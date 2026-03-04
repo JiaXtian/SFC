@@ -1,0 +1,27 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "threads": 4,
+    "max_connections": 10000,
+    "idle_timeout": 60
+  },
+  "onnx": {
+    "gnn_model": "../models/exported/gnn_encoder.onnx",
+    "actor_model": "../models/exported/actor.onnx",
+    "num_threads": 2,
+    "use_gpu": false
+  },
+  "database": {
+    "type": "sqlite",
+    "path": "./data/sfc.db"
+  },
+  "logging": {
+    "level": "info",
+    "path": "./logs"
+  },
+  "websocket": {
+    "ping_interval": 30,
+    "ping_timeout": 60
+  }
+}

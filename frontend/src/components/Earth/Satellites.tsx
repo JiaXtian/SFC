@@ -1,0 +1,230 @@
+import { useMemo, useRef, useState } from 'react'
+import { useFrame, useThree } from '@react-three/fiber'
+import { Html } from '@react-three/drei'
+import * as THREE from 'three'
+import { useStore } from '@/store/useStore'
+
+const EARTH_R = 5
+const KM_TO_U = EARTH_R / 6371
+
+function satToVec3(x: number, y: number, z: number): THREE.Vector3 {
+  return new THREE.Vector3(x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U)
+}
+
+function blendColors(colors: string[]): string {
+  if (colors.length === 0) return '#39ff6a'
+  const c = colors.map(hex => new THREE.Color(hex))
+  const out = new THREE.Color(0, 0, 0)
+  c.forEach(col => out.add(col))
+  out.multiplyScalar(1 / c.length)
+  return `#${out.getHexString()}`
+}
+
+export default function Satellites() {
+  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore()
+  const { camera } = useThree()
+  const [hoveredIdx, setHoveredIdx] = useState<number>(-1)
+  const instanceRef = useRef<THREE.InstancedMesh>(null)
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+  const tmpDir = useMemo(() => new THREE.Vector3(), [])
+
+  const vnfHighlightSet = useMemo(() => {
+    if (highlightedDeploymentIds.length === 0) return new Set<string>()
+    const active = new Set(highlightedDeploymentIds)
+    const nodes = new Set<string>()
+    deployments.forEach(dep => {
+      if (!active.has(dep.deployment_id)) return
+      dep.deployed_nodes.forEach(nodeId => nodes.add(nodeId))
+    })
+    return nodes
+  }, [deployments, highlightedDeploymentIds])
+
+  const endpointSets = useMemo(() => {
+    const ingress = new Set<string>()
+    const egress = new Set<string>()
+    if (highlightedDeploymentIds.length === 0) return { ingress, egress }
+    const active = new Set(highlightedDeploymentIds)
+    deployments.forEach(dep => {
+      if (!active.has(dep.deployment_id)) return
+      if ((dep as any).source_node) ingress.add((dep as any).source_node)
+      if ((dep as any).destination_node) egress.add((dep as any).destination_node)
+    })
+    return { ingress, egress }
+  }, [deployments, highlightedDeploymentIds])
+
+  const { positions, colours } = useMemo(() => {
+    const positions: THREE.Vector3[] = []
+    const colours: THREE.Color[] = []
+    const baseGreen = new THREE.Color('#6afb8e')
+    const selectedGreen = new THREE.Color('#8dff3a')
+
+    satellites.forEach(sat => {
+      positions.push(satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z))
+      if (selectedSatellite?.id === sat.id) {
+        colours.push(selectedGreen)
+      } else if (vnfHighlightSet.has(sat.id)) {
+        colours.push(new THREE.Color('#e4fff1'))
+      } else {
+        colours.push(baseGreen)
+      }
+    })
+    return { positions, colours }
+  }, [satellites, selectedSatellite, vnfHighlightSet])
+
+  useFrame(() => {
+    const mesh = instanceRef.current
+    if (!mesh || positions.length === 0) return
+    const n = Math.min(positions.length, mesh.count)
+    for (let i = 0; i < n; i++) {
+      dummy.position.copy(positions[i])
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+      mesh.setColorAt(i, colours[i])
+    }
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  })
+
+  const isOccludedByEarth = (point: THREE.Vector3) => {
+    const occlusionR = EARTH_R + 0.02
+    const cam = camera.position
+    tmpDir.subVectors(point, cam)
+    const a = tmpDir.dot(tmpDir)
+    if (a < 1e-9) return false
+    const b = 2 * cam.dot(tmpDir)
+    const c = cam.dot(cam) - occlusionR * occlusionR
+    const disc = b * b - 4 * a * c
+    if (disc <= 0) return false
+    const s = Math.sqrt(disc)
+    const t1 = (-b - s) / (2 * a)
+    const t2 = (-b + s) / (2 * a)
+    const eps = 1e-4
+    return (t1 > eps && t1 < 1 - eps) || (t2 > eps && t2 < 1 - eps)
+  }
+
+  const handlePick = (idx: number) => {
+    if (idx < 0 || idx >= satellites.length) return
+    if (isOccludedByEarth(positions[idx])) return
+    setSelectedSatellite(satellites[idx])
+    setSelectedLink(null)
+  }
+
+  const handlePointerMove = (e: any) => {
+    const idx = Number(e.instanceId ?? -1)
+    if (satellites.length > 1200) {
+      setHoveredIdx(-1)
+      document.body.style.cursor = 'default'
+      return
+    }
+    const vis = idx >= 0 && !isOccludedByEarth(positions[idx])
+    setHoveredIdx(vis ? idx : -1)
+    document.body.style.cursor = vis ? 'pointer' : 'default'
+  }
+
+  if (satellites.length === 0) return null
+
+  const hov = hoveredIdx >= 0 ? satellites[hoveredIdx] : null
+  const hovPos = hov ? positions[hoveredIdx] : null
+  const selectedIdx = selectedSatellite ? satellites.findIndex(s => s.id === selectedSatellite.id) : -1
+  const selectedPos = selectedIdx >= 0 ? positions[selectedIdx] : null
+
+  return (
+    <group>
+      <instancedMesh
+        ref={instanceRef}
+        args={[undefined, undefined, satellites.length]}
+        frustumCulled={false}
+        onClick={(e: any) => {
+          const idx = Number(e.instanceId ?? -1)
+          if (idx >= 0) {
+            e.stopPropagation()
+            handlePick(idx)
+          }
+        }}
+        onPointerMove={handlePointerMove}
+        onPointerOut={() => {
+          setHoveredIdx(-1)
+          document.body.style.cursor = 'default'
+        }}
+      >
+        <sphereGeometry args={[0.07, 10, 10]} />
+        <meshStandardMaterial
+          vertexColors
+          toneMapped={false}
+          roughness={0.2}
+          metalness={0.66}
+          emissive="#1da63a"
+          emissiveIntensity={0.42}
+        />
+      </instancedMesh>
+
+      {selectedPos && (
+        <group position={selectedPos}>
+          <mesh raycast={() => null}>
+            <sphereGeometry args={[0.11, 16, 16]} />
+            <meshBasicMaterial color="#80fbe1" transparent opacity={0.92} />
+          </mesh>
+          <mesh raycast={() => null}>
+            <sphereGeometry args={[0.15, 16, 16]} />
+            <meshBasicMaterial color="#67e8f9" transparent opacity={0.35} depthWrite={false} />
+          </mesh>
+        </group>
+      )}
+
+      {/* Static bulging overlays for deployed nodes (VNF / ingress / egress) */}
+      {highlightedDeploymentIds.length > 0 && positions.map((p, i) => {
+        const satId = satellites[i]?.id ?? ''
+        const isVnf = vnfHighlightSet.has(satId)
+        const isIngress = endpointSets.ingress.has(satId)
+        const isEgress = endpointSets.egress.has(satId)
+        if (!isVnf && !isIngress && !isEgress) return null
+
+        const roleColors: string[] = []
+        if (isVnf) roleColors.push('#f5f9f7')
+        if (isIngress) roleColors.push('#0097fb')
+        if (isEgress) roleColors.push('#f67904')
+        const core = blendColors(roleColors)
+
+        return (
+          <group key={`mark-${satId}`} position={p}>
+            <mesh raycast={() => null}>
+              <sphereGeometry args={[0.083, 14, 14]} />
+              <meshBasicMaterial color={core} transparent opacity={0.9} />
+            </mesh>
+            <mesh raycast={() => null}>
+              <sphereGeometry args={[0.118, 14, 14]} />
+              <meshBasicMaterial color={core} transparent opacity={0.28} depthWrite={false} />
+            </mesh>
+          </group>
+        )
+      })}
+
+      {hov && hovPos && (
+        <group position={hovPos}>
+          <Html distanceFactor={10} zIndexRange={[200, 0]} style={{ pointerEvents: 'none' }}>
+            <div style={{
+              transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 10,
+              background: 'linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.97))',
+              border: '1px solid rgba(0,255,136,0.4)', fontSize: 11, whiteSpace: 'nowrap',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: '"IBM Plex Mono", monospace',
+            }}>
+              <div style={{ color: '#00ff88', fontWeight: 700, marginBottom: 5 }}>{hov.id}</div>
+              <div style={{ color: '#cbd5e1', fontSize: 10 }}>
+                CPU <span style={{ color: '#f0f9ff', fontWeight: 600 }}>{hov.cpu_available.toFixed(1)}</span>/{hov.cpu_total}
+                &nbsp;&nbsp;
+                内存 <span style={{ color: '#f0f9ff', fontWeight: 600 }}>{hov.mem_available.toFixed(0)}</span>/{hov.mem_total}GB
+                &nbsp;&nbsp;
+                磁盘 <span style={{ color: '#f0f9ff', fontWeight: 600 }}>{(hov as any).disk_available?.toFixed?.(0) ?? '0'}</span>/{(hov as any).disk_total ?? 0}GB
+              </div>
+              <div style={{ color: '#64748b', marginTop: 3, fontSize: 9 }}>
+                {Math.abs(hov.coordinates.lat).toFixed(1)}°{hov.coordinates.lat >= 0 ? 'N' : 'S'} &nbsp;
+                {Math.abs(hov.coordinates.lon).toFixed(1)}°{hov.coordinates.lon >= 0 ? 'E' : 'W'} &nbsp;
+                {hov.orbital_params.altitude_km.toFixed(0)}km
+              </div>
+            </div>
+          </Html>
+        </group>
+      )}
+    </group>
+  )
+}

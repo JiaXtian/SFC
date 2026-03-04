@@ -1,0 +1,72 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Node / frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# CMake / C++ build artifacts
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+Makefile
+cmake_install.cmake
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Project-specific backend artifacts
+backend/build/
+backend/logs/
+backend/uploads/
+backend/sfc_server
+backend/old_version/
+
+# Training / inference generated artifacts
+train/data/
+train/logs/
+train/results/
+train/models/exported/
+train/onboard_inference/build/
+models/exported/
+models/old/
+
+# Model binaries
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Logs / temp files
+*.log
+*.tmp
+*.temp
