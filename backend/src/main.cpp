@@ -106,7 +106,6 @@ int main() {
         
         // 配置Drogon
         app()
-            .setLogPath("./logs")
             .setLogLevel(trantor::Logger::kInfo)
             .addListener(config.server.host, config.server.port)
             .setThreadNum(config.server.threads)

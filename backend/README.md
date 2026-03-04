@@ -200,10 +200,10 @@ backend/
 
 ## 🔍 日志
 
-日志文件位于 `logs/` 目录：
+服务日志默认输出到控制台：
 
 ```bash
-tail -f logs/drogon.log
+./build/sfc_server
 ```
 
 ## 🐛 故障排查
@@ -233,8 +233,8 @@ rm -rf build
 # 检查模型文件
 ls -lh ../models/exported/
 
-# 查看日志
-tail -50 logs/drogon.log
+# 直接观察控制台输出
+./build/sfc_server
 ```
 
 ## 📊 性能指标
@@ -243,16 +243,6 @@ tail -50 logs/drogon.log
 - **API响应**: <50ms (不含推理)
 - **并发连接**: 支持10000+连接
 - **WebSocket延迟**: <100ms
-
-## 🐳 Docker
-
-```bash
-# 构建镜像
-docker build -t sfc-backend .
-
-# 运行容器
-docker run -p 8080:8080 -v $(pwd)/../models:/app/models sfc-backend
-```
 
 ## 📚 开发
 

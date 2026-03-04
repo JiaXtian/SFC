@@ -91,7 +91,7 @@ make -j"$JOBS"
 echo ""
 echo "[5/5] Creating runtime directories..."
 cd ..
-mkdir -p logs data public
+mkdir -p data public
 
 echo ""
 echo "========================================"
