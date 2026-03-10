@@ -57,6 +57,7 @@ train/models/exported/
 train/onboard_inference/build/
 models/exported/
 models/old/
+models.zip
 
 # Model binaries
 *.onnx
