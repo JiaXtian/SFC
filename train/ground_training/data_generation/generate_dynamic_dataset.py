@@ -6,7 +6,12 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from dynamic_scene_generator import DynamicSceneConfig, generate_dynamic_scene
+try:
+    from .dynamic_scene_generator import DynamicSceneConfig, generate_dynamic_scene
+except ImportError:
+    from dynamic_scene_generator import DynamicSceneConfig, generate_dynamic_scene
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def split_indices(total: int, train_ratio: float) -> Dict[str, List[int]]:
@@ -49,8 +54,16 @@ def build_dataset(scene_file: Path, out_file: Path, train_ratio: float = 0.8):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate dynamic dataset index for training v2")
-    p.add_argument("--scene-file", type=Path, default=Path("../../data/dynamic/scenes/scene_4800_v1.json"))
-    p.add_argument("--dataset-file", type=Path, default=Path("../../data/dynamic/dataset_v2_index.json"))
+    p.add_argument(
+        "--scene-file",
+        type=Path,
+        default=PROJECT_ROOT / "train" / "data" / "dynamic" / "scenes" / "scene_4800_v1.json",
+    )
+    p.add_argument(
+        "--dataset-file",
+        type=Path,
+        default=PROJECT_ROOT / "train" / "data" / "dynamic" / "dataset_v2_index.json",
+    )
     p.add_argument("--train-ratio", type=float, default=0.8)
     p.add_argument("--generate-scene-if-missing", action="store_true")
     return p.parse_args()

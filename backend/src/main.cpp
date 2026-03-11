@@ -9,6 +9,8 @@
 #include "services/DynamicSimulationService.h"
 #include "services/DynamicInferenceService.h"
 #include <fstream>
+#include <filesystem>
+#include <vector>
 
 using namespace drogon;
 using json = nlohmann::json;
@@ -78,10 +80,38 @@ Config load_config(const std::string& config_file) {
     return config;
 }
 
+std::filesystem::path find_config_file() {
+    const std::vector<std::filesystem::path> candidates = {
+        std::filesystem::path("config.json"),
+        std::filesystem::path("../config.json"),
+        std::filesystem::path("backend/config.json"),
+    };
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(c, ec) && !ec) {
+            return std::filesystem::absolute(c).lexically_normal();
+        }
+    }
+    return std::filesystem::absolute(std::filesystem::path("config.json")).lexically_normal();
+}
+
+std::string resolve_with_base(const std::filesystem::path& base_dir, const std::string& raw_path) {
+    if (raw_path.empty()) return raw_path;
+    std::filesystem::path p(raw_path);
+    if (p.is_absolute()) {
+        return p.lexically_normal().string();
+    }
+    return (base_dir / p).lexically_normal().string();
+}
+
 int main() {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
     
-    Config config = load_config("config.json");
+    const std::filesystem::path config_path = find_config_file();
+    Config config = load_config(config_path.string());
+    const std::filesystem::path config_dir = config_path.parent_path();
+    config.onnx.gnn_model = resolve_with_base(config_dir, config.onnx.gnn_model);
+    config.onnx.actor_model = resolve_with_base(config_dir, config.onnx.actor_model);
     
     if (config.logging.level == "debug") {
         spdlog::set_level(spdlog::level::debug);

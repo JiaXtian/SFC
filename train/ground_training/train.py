@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TRAIN_ROOT = PROJECT_ROOT / "train"
 
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
@@ -284,6 +286,7 @@ def _build_scale_balanced_data(train_topos, train_reqs):
 
 
 def main():
+    os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
@@ -351,12 +354,12 @@ def main():
     actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(agent.actor_optimizer, T_max=args.epochs, eta_min=1e-5)
     critic_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(agent.critic_optimizer, T_max=args.epochs, eta_min=2e-5)
 
-    train_topos = sorted(glob.glob("data/train/topologies/*.json"))
-    train_reqs = sorted(glob.glob("data/train/requests/*.json"))
+    train_topos = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "topologies" / "*.json")))
+    train_reqs = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "requests" / "*.json")))
 
     if not train_topos or not train_reqs:
         print("错误: 训练数据未生成，请先运行数据增强")
-        print("cd ground_training/data_generation && python3 augment_data.py")
+        print("python3 train/ground_training/data_generation/augment_data.py")
         sys.exit(1)
 
     full_train_data = _build_scale_balanced_data(train_topos, train_reqs)

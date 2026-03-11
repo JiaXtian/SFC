@@ -5,6 +5,7 @@ import argparse
 import glob
 import json
 import os
+from pathlib import Path
 from collections import Counter
 
 import networkx as nx
@@ -14,6 +15,9 @@ from ground_training.environment.sfc_env import SFCEnvironment
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
 from ground_training.training.trainer import SFCTrainer
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TRAIN_ROOT = PROJECT_ROOT / "train"
 
 
 class HeuristicPruner:
@@ -161,6 +165,7 @@ def _episode_infer(env, trainer, gnn, agent, heuristic, request):
 
 
 def main():
+    os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_checkpoint", default="models/checkpoints/model_best.pth")
     parser.add_argument("--gnn_checkpoint", default="models/checkpoints/gnn_best.pth")
@@ -172,17 +177,37 @@ def main():
     parser.add_argument("--output_json", default="logs/val_eval.json")
     args = parser.parse_args()
 
-    topologies = sorted(glob.glob(os.path.join(args.val_topology_dir, "*.json")))
-    requests = sorted(glob.glob(os.path.join(args.val_requests_dir, "*.json")))
+    val_topology_dir = Path(args.val_topology_dir)
+    val_requests_dir = Path(args.val_requests_dir)
+    if not val_topology_dir.is_absolute():
+        if str(val_topology_dir).replace("\\", "/").startswith("data/"):
+            val_topology_dir = TRAIN_ROOT / val_topology_dir
+        else:
+            val_topology_dir = PROJECT_ROOT / val_topology_dir
+    if not val_requests_dir.is_absolute():
+        if str(val_requests_dir).replace("\\", "/").startswith("data/"):
+            val_requests_dir = TRAIN_ROOT / val_requests_dir
+        else:
+            val_requests_dir = PROJECT_ROOT / val_requests_dir
+
+    model_checkpoint = Path(args.model_checkpoint)
+    gnn_checkpoint = Path(args.gnn_checkpoint)
+    if not model_checkpoint.is_absolute():
+        model_checkpoint = PROJECT_ROOT / model_checkpoint
+    if not gnn_checkpoint.is_absolute():
+        gnn_checkpoint = PROJECT_ROOT / gnn_checkpoint
+
+    topologies = sorted(glob.glob(str(val_topology_dir / "*.json")))
+    requests = sorted(glob.glob(str(val_requests_dir / "*.json")))
     if not topologies or not requests:
         raise RuntimeError("验证数据缺失，请检查 data/val/topologies 与 data/val/requests")
 
     gnn = GNNEncoder(input_dim=8, hidden_dim=192, num_layers=4).to(args.device)
-    gnn.load_state_dict(torch.load(args.gnn_checkpoint, map_location=args.device))
+    gnn.load_state_dict(torch.load(str(gnn_checkpoint), map_location=args.device))
     gnn.eval()
 
     agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=48, device=args.device)
-    agent.load(args.model_checkpoint, load_optimizer=False)
+    agent.load(str(model_checkpoint), load_optimizer=False)
     agent.actor.eval()
     agent.critic.eval()
 

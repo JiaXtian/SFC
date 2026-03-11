@@ -34,7 +34,10 @@ if [[ "${SKIP_DATA}" -eq 0 ]]; then
     --train-scale-plan "${DYNAMIC_SCALE_PLAN}" \
     --duration-sec "${DYNAMIC_DURATION_SEC}" \
     --step-sec "${DYNAMIC_STEP_SEC}" \
-    --base-requests-per-step "${DYNAMIC_REQ_PER_STEP}"
+    --base-requests-per-step "${DYNAMIC_REQ_PER_STEP}" \
+    --topology-dir "${ROOT_DIR}/train/data/train/dynamic/topologies" \
+    --request-dir "${ROOT_DIR}/train/data/train/dynamic/requests" \
+    --summary-file "${ROOT_DIR}/logs/dynamic_multiscale_generation_summary.json"
 fi
 
 if [[ "${SKIP_TRAIN}" -eq 0 ]]; then
@@ -46,7 +49,9 @@ if [[ "${SKIP_TRAIN}" -eq 0 ]]; then
     --dynamic_scale_plan "${DYNAMIC_SCALE_PLAN}" \
     --dynamic_duration_sec "${DYNAMIC_DURATION_SEC}" \
     --dynamic_step_sec "${DYNAMIC_STEP_SEC}" \
-    --dynamic_requests_per_step "${DYNAMIC_REQ_PER_STEP}"
+    --dynamic_requests_per_step "${DYNAMIC_REQ_PER_STEP}" \
+    --dynamic_topology_dir "${ROOT_DIR}/train/data/train/dynamic/topologies" \
+    --dynamic_request_dir "${ROOT_DIR}/train/data/train/dynamic/requests"
 fi
 
 if [[ "${SKIP_EXPORT}" -eq 0 ]]; then
@@ -79,8 +84,8 @@ if [[ "${SKIP_FRONTEND_INSTALL}" -eq 0 ]]; then
 fi
 
 mkdir -p logs
-pushd backend/build >/dev/null
-./sfc_server > "${ROOT_DIR}/logs/backend_runtime.log" 2>&1 &
+pushd backend >/dev/null
+./build/sfc_server > "${ROOT_DIR}/logs/backend_runtime.log" 2>&1 &
 BACKEND_PID=$!
 popd >/dev/null
 

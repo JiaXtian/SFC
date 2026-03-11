@@ -10,6 +10,8 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TRAIN_ROOT = PROJECT_ROOT / "train"
 
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
@@ -117,12 +119,30 @@ def _split_train_val(sequences, train_ratio=0.8, seed=42):
 
 
 def _resolve_data_dir(path: str) -> str:
-    if os.path.isdir(path):
-        return path
-    prefixed = os.path.join("train", path)
-    if os.path.isdir(prefixed):
-        return prefixed
-    return path
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    normalized = str(path).replace("\\", "/")
+    candidates: list[Path] = []
+    if normalized.startswith("train/"):
+        candidates.append(PROJECT_ROOT / p)
+    else:
+        if normalized.startswith("data/"):
+            candidates.append(TRAIN_ROOT / p)
+        candidates.append(PROJECT_ROOT / p)
+        candidates.append(TRAIN_ROOT / p)
+    seen = set()
+    uniq_candidates = []
+    for c in candidates:
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq_candidates.append(c)
+    for c in uniq_candidates:
+        if c.is_dir():
+            return str(c)
+    return str(uniq_candidates[0]) if uniq_candidates else str(PROJECT_ROOT / p)
 
 
 def _maybe_expand_dynamic_data(args, current_pair_count: int) -> int:
@@ -158,6 +178,7 @@ def _maybe_expand_dynamic_data(args, current_pair_count: int) -> int:
 
 
 def main():
+    os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser(description="动态拓扑时序训练（阶段2）")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--device", default="auto")

@@ -3,11 +3,15 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from data_generation.sfc_generator import generate_sfc_requests
 from data_generation.topology_generator import generate_scaled_topologies
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = PROJECT_ROOT / "train" / "data"
 
 
 def _parse_scales(scale_text):
@@ -52,12 +56,20 @@ def augment_training_data(
     scale_distribution="2,4,2",
 ):
     print("=== 数据模拟 ===")
+    train_topology_dir = DATA_ROOT / "train" / "topologies"
+    train_request_dir = DATA_ROOT / "train" / "requests"
+    val_topology_dir = DATA_ROOT / "val" / "topologies"
+    val_request_dir = DATA_ROOT / "val" / "requests"
+    train_topology_dir.mkdir(parents=True, exist_ok=True)
+    train_request_dir.mkdir(parents=True, exist_ok=True)
+    val_topology_dir.mkdir(parents=True, exist_ok=True)
+    val_request_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n[1/3] 生成训练拓扑...")
     parsed_scales = _parse_scales(train_scales)
     scale_to_count = _distribute_counts(train_topologies, parsed_scales, scale_distribution)
 
-    train_topos = generate_scaled_topologies(scale_to_count, output_dir="../../data/train/topologies")
+    train_topos = generate_scaled_topologies(scale_to_count, output_dir=str(train_topology_dir))
 
     print("\n[2/3] 生成训练请求...")
     total_train_requests = 0
@@ -82,7 +94,7 @@ def augment_training_data(
             generate_sfc_requests(
                 num_requests=req_count,
                 node_list=nodes,
-                output_file=f"../../data/train/requests/requests_{i:03d}_{j:03d}.json",
+                output_file=str(train_request_dir / f"requests_{i:03d}_{j:03d}.json"),
                 load_profile=load_profile,
                 seed=1000 + i * 100 + j,
                 topology_scale=topo_sat_count,
@@ -95,7 +107,7 @@ def augment_training_data(
     val_scale_plan = _distribute_counts(val_topologies, val_scales, scale_distribution)
     val_topos = generate_scaled_topologies(
         val_scale_plan,
-        output_dir="../../data/val/topologies",
+        output_dir=str(val_topology_dir),
     )
 
     total_val_requests = 0
@@ -108,7 +120,7 @@ def augment_training_data(
         generate_sfc_requests(
             num_requests=val_requests_per_topology,
             node_list=nodes,
-            output_file=f"../../data/val/requests/requests_{i:03d}.json",
+            output_file=str(val_request_dir / f"requests_{i:03d}.json"),
             load_profile=profile,
             seed=9000 + i,
             topology_scale=int(topo.get("metadata", {}).get("total_satellites", len(nodes))),

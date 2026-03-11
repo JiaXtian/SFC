@@ -2,10 +2,13 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+TRAIN_ROOT = PROJECT_ROOT / "train"
 
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
@@ -13,12 +16,27 @@ from ground_training.models.gnn_encoder import GNNEncoder
 
 def _resolve_checkpoint(*candidates):
     for path in candidates:
-        if path and os.path.exists(path):
-            return path
+        if not path:
+            continue
+        p = Path(path)
+        expanded = []
+        if p.is_absolute():
+            expanded.append(p)
+        else:
+            expanded.append(PROJECT_ROOT / p)
+            expanded.append(TRAIN_ROOT / p)
+            expanded.append(Path(path))
+        for ep in expanded:
+            if ep.exists():
+                return str(ep)
     return candidates[0] if candidates else None
 
 
 def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", context_dim=48):
+    output_dir_path = Path(output_dir)
+    if not output_dir_path.is_absolute():
+        output_dir_path = PROJECT_ROOT / output_dir_path
+    output_dir = str(output_dir_path)
     print("=" * 60)
     print("  导出ONNX模型 ")
     print("=" * 60)
@@ -117,6 +135,7 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
 
 
 def export():
+    os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser(description="Export ONNX models")
     parser.add_argument("--gnn-checkpoint", default=None)
     parser.add_argument("--actor-checkpoint", default=None)

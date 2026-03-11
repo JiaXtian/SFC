@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -20,6 +19,8 @@ try:
 except ImportError:
     from dynamic_scene_generator import DynamicSceneConfig, generate_dynamic_scene
     from sfc_generator import build_sfc_requests_payload
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _parse_scale_plan(text: str) -> List[Tuple[int, int]]:
@@ -243,14 +244,14 @@ def generate_multiscale_dynamic_dataset(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate multi-scale dynamic datasets for dynamic training.")
     p.add_argument("--train-scale-plan", type=str, default="800:2,1600:2,2500:2,4000:2,4800:2")
-    p.add_argument("--topology-dir", type=Path, default=Path("../../data/train/dynamic/topologies"))
-    p.add_argument("--request-dir", type=Path, default=Path("../../data/train/dynamic/requests"))
+    p.add_argument("--topology-dir", type=Path, default=PROJECT_ROOT / "train" / "data" / "train" / "dynamic" / "topologies")
+    p.add_argument("--request-dir", type=Path, default=PROJECT_ROOT / "train" / "data" / "train" / "dynamic" / "requests")
     p.add_argument("--step-sec", type=int, default=5)
     p.add_argument("--duration-sec", type=int, default=180)
     p.add_argument("--base-requests-per-step", type=int, default=64)
     p.add_argument("--isl-max-distance-km", type=float, default=4200.0)
     p.add_argument("--seed", type=int, default=11000)
-    p.add_argument("--summary-file", type=Path, default=Path("../../logs/dynamic_multiscale_generation_summary.json"))
+    p.add_argument("--summary-file", type=Path, default=PROJECT_ROOT / "logs" / "dynamic_multiscale_generation_summary.json")
     return p.parse_args()
 
 

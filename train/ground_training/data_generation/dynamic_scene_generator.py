@@ -18,6 +18,7 @@ EARTH_RADIUS_KM = 6371.0
 LIGHT_SPEED_KMPS = 299792.458
 EARTH_MU = 398600.4418
 TS = load.timescale()
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass
@@ -310,7 +311,7 @@ def generate_dynamic_scene(config: DynamicSceneConfig, output_file: Path) -> Dic
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate dynamic satellite scenes with SGP4 propagation.")
-    p.add_argument("--output", type=Path, default=Path("../../data/dynamic/scenes/scene_4800_v1.json"))
+    p.add_argument("--output", type=Path, default=PROJECT_ROOT / "train" / "data" / "dynamic" / "scenes" / "scene_4800_v1.json")
     p.add_argument("--total-sats", type=int, default=4800)
     p.add_argument("--num-planes", type=int, default=60)
     p.add_argument("--altitude-km", type=float, default=550.0)
