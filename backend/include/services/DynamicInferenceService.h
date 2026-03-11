@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace sfc {
@@ -49,6 +50,7 @@ private:
         DeploymentCandidate last_candidate;
         bool has_last_candidate = false;
         std::string last_candidate_signature;
+        std::string last_required_recompute_signature;
         nlohmann::json last_decision_trace;
     };
 
@@ -66,6 +68,24 @@ private:
         const TopologySnapshot& snapshot,
         const std::string& trigger
     );
+    std::unordered_set<std::string> collect_down_nodes(const Topology& topology) const;
+    std::unordered_map<std::string, std::vector<std::string>> build_active_adjacency(
+        const Topology& topology,
+        const std::unordered_set<std::string>& down_nodes
+    ) const;
+    bool has_path_between_nodes(
+        const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
+        const std::string& src,
+        const std::string& dst
+    ) const;
+    std::string infer_required_recompute_trigger(
+        const SessionState& session,
+        const TopologySnapshot& snapshot,
+        const std::unordered_set<std::string>& down_nodes,
+        const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
+        std::string* disconnected_from = nullptr,
+        std::string* disconnected_to = nullptr
+    ) const;
     void trim_latency_window_locked();
     nlohmann::json build_metrics_payload_locked(
         int decisions_this_tick,
@@ -92,9 +112,6 @@ private:
     uint64_t total_recovery_attempts_ = 0;
     uint64_t total_recovery_success_ = 0;
     uint64_t total_recovery_failures_ = 0;
-    int last_down_nodes_ = -1;
-    int last_down_links_ = -1;
-    int last_congested_links_ = -1;
 };
 
 } // namespace sfc

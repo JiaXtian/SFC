@@ -3,15 +3,34 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <limits>
 #include <numeric>
+#include <queue>
 #include <random>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
 
 namespace sfc {
 namespace {
 
 constexpr size_t kLatencyWindowLimit = 512;
+
+std::string to_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool node_is_down(const Satellite& sat) {
+    const std::string status = to_lower(sat.status);
+    if (status == "down" || status == "fault" || status == "failed" || status == "inactive") {
+        return true;
+    }
+    const std::string fault_tag = to_lower(sat.fault_tag);
+    return !fault_tag.empty() && fault_tag != "none";
+}
 
 bool better_candidate(const DeploymentCandidate& a, const DeploymentCandidate& b) {
     if (a.satisfies_constraints != b.satisfies_constraints) {
@@ -156,6 +175,120 @@ TopologySnapshot DynamicInferenceService::build_snapshot_fallback(const Topology
         if (link.status == "congested") snapshot.metrics.congested_links += 1;
     }
     return snapshot;
+}
+
+std::unordered_set<std::string> DynamicInferenceService::collect_down_nodes(const Topology& topology) const {
+    std::unordered_set<std::string> down_nodes;
+    for (const auto& sat : topology.nodes) {
+        if (node_is_down(sat)) {
+            down_nodes.insert(sat.id);
+        }
+    }
+    return down_nodes;
+}
+
+std::unordered_map<std::string, std::vector<std::string>> DynamicInferenceService::build_active_adjacency(
+    const Topology& topology,
+    const std::unordered_set<std::string>& down_nodes
+) const {
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+    for (const auto& sat : topology.nodes) {
+        if (down_nodes.find(sat.id) == down_nodes.end()) {
+            adjacency[sat.id] = {};
+        }
+    }
+
+    for (const auto& link : topology.links) {
+        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+        if (down_nodes.find(link.source) != down_nodes.end() || down_nodes.find(link.target) != down_nodes.end()) {
+            continue;
+        }
+        if (to_lower(link.status) == "down") continue;
+        if (link.bandwidth_available_gbps <= 0.0) continue;
+
+        adjacency[link.source].push_back(link.target);
+        adjacency[link.target].push_back(link.source);
+    }
+    return adjacency;
+}
+
+bool DynamicInferenceService::has_path_between_nodes(
+    const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
+    const std::string& src,
+    const std::string& dst
+) const {
+    if (src.empty() || dst.empty()) return false;
+    if (src == dst) return true;
+    if (adjacency.find(src) == adjacency.end() || adjacency.find(dst) == adjacency.end()) return false;
+
+    std::queue<std::string> q;
+    std::unordered_set<std::string> visited;
+    visited.insert(src);
+    q.push(src);
+
+    while (!q.empty()) {
+        const std::string cur = q.front();
+        q.pop();
+        auto it = adjacency.find(cur);
+        if (it == adjacency.end()) continue;
+        for (const auto& next : it->second) {
+            if (visited.find(next) != visited.end()) continue;
+            if (next == dst) return true;
+            visited.insert(next);
+            q.push(next);
+        }
+    }
+    return false;
+}
+
+std::string DynamicInferenceService::infer_required_recompute_trigger(
+    const SessionState& session,
+    const TopologySnapshot&,
+    const std::unordered_set<std::string>& down_nodes,
+    const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
+    std::string* disconnected_from,
+    std::string* disconnected_to
+) const {
+    const std::string source = session.request.source_node;
+    const std::string destination = session.request.destination_node;
+    if (!source.empty() && down_nodes.find(source) != down_nodes.end()) {
+        return "source_node_down";
+    }
+    if (!destination.empty() && down_nodes.find(destination) != down_nodes.end()) {
+        return "destination_node_down";
+    }
+
+    if (session.has_last_candidate) {
+        for (const auto& node : session.last_candidate.deployed_nodes) {
+            if (!node.empty() && down_nodes.find(node) != down_nodes.end()) {
+                return "deployment_node_down";
+            }
+        }
+    }
+
+    std::vector<std::string> anchors;
+    anchors.reserve(session.last_candidate.deployed_nodes.size() + 2);
+    if (!source.empty()) anchors.push_back(source);
+    for (const auto& node : session.last_candidate.deployed_nodes) {
+        if (!node.empty() && (anchors.empty() || anchors.back() != node)) {
+            anchors.push_back(node);
+        }
+    }
+    if (!destination.empty() && (anchors.empty() || anchors.back() != destination)) {
+        anchors.push_back(destination);
+    }
+    if (anchors.size() < 2) return "";
+
+    for (size_t i = 0; i + 1 < anchors.size(); ++i) {
+        const std::string& a = anchors[i];
+        const std::string& b = anchors[i + 1];
+        if (!has_path_between_nodes(adjacency, a, b)) {
+            if (disconnected_from) *disconnected_from = a;
+            if (disconnected_to) *disconnected_to = b;
+            return "anchor_path_disconnected";
+        }
+    }
+    return "";
 }
 
 void DynamicInferenceService::trim_latency_window_locked() {
@@ -343,6 +476,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             {"session_id", session.session_id},
             {"request_id", session.request.request_id},
             {"status", status},
+            {"trigger", trigger},
             {"topology_version", session.last_topology_version},
             {"sim_time", session.last_sim_time},
             {"path_changed", changed},
@@ -365,6 +499,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"session_id", session.session_id},
         {"request_id", session.request.request_id},
         {"status", "decision_failed"},
+        {"trigger", trigger},
         {"topology_version", session.last_topology_version},
         {"sim_time", session.last_sim_time},
         {"path_changed", false},
@@ -490,6 +625,7 @@ nlohmann::json DynamicInferenceService::start_session(
             {"session_id", session.session_id},
             {"request_id", sessions_[session.session_id].request.request_id},
             {"status", "deployed"},
+            {"trigger", "manual_initial_candidate"},
             {"topology_version", sessions_[session.session_id].last_topology_version},
             {"sim_time", sessions_[session.session_id].last_sim_time},
             {"path_changed", true},
@@ -605,23 +741,52 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
     int recovery_attempts_this_tick = 0;
     int recovery_success_this_tick = 0;
     int recovery_failures_this_tick = 0;
-    const bool fault_metrics_changed =
-        (last_down_nodes_ != snapshot.metrics.down_nodes) ||
-        (last_down_links_ != snapshot.metrics.down_links) ||
-        (last_congested_links_ != snapshot.metrics.congested_links);
+
+    Topology topology = snapshot.topology;
+    if (topology.nodes.empty()) {
+        topology = res_mgr_->export_current_topology();
+    }
+    if (topology.nodes.empty()) {
+        topology = topo_mgr_->get_current_topology();
+    }
+    const auto down_nodes = collect_down_nodes(topology);
+    const auto adjacency = build_active_adjacency(topology, down_nodes);
 
     for (auto& kv : sessions_) {
         auto& session = kv.second;
         if (!session.active) continue;
-        const bool needs_recompute =
-            !session.has_last_candidate ||
-            (fault_metrics_changed && snapshot.topology_version != session.last_topology_version);
-        if (!needs_recompute) continue;
+        if (!session.auto_redeploy) continue;
+
+        std::string trigger;
+        std::string disconnected_from;
+        std::string disconnected_to;
+        if (!session.has_last_candidate) {
+            trigger = "topology_tick_bootstrap";
+        } else {
+            trigger = infer_required_recompute_trigger(
+                session,
+                snapshot,
+                down_nodes,
+                adjacency,
+                &disconnected_from,
+                &disconnected_to
+            );
+        }
+        if (trigger.empty()) {
+            session.last_required_recompute_signature.clear();
+            continue;
+        }
+
+        const bool fault_driven = trigger != "topology_tick_bootstrap";
+        const std::string reason_signature = trigger + "|" + disconnected_from + "->" + disconnected_to;
+        if (fault_driven && reason_signature == session.last_required_recompute_signature) {
+            continue;
+        }
         const bool had_prev = session.has_last_candidate;
         const DeploymentCandidate prev_candidate = session.last_candidate;
-        const std::string trigger = fault_metrics_changed ? "fault_or_anomaly_tick" : "topology_tick";
         auto result = evaluate_session(session, snapshot, trigger);
-        if (fault_metrics_changed) {
+        if (fault_driven) {
+            session.last_required_recompute_signature = reason_signature;
             recovery_attempts_this_tick += 1;
             total_recovery_attempts_ += 1;
             const std::string status = result.value("status", "");
@@ -660,10 +825,15 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
                 {"sim_time", snapshot.sim_time},
                 {"topology_version", snapshot.topology_version},
                 {"strategy", strategy},
+                {"trigger", trigger},
+                {"disconnected_from", disconnected_from},
+                {"disconnected_to", disconnected_to},
                 {"result", status},
                 {"success", success},
                 {"affected_services", 1}
             });
+        } else {
+            session.last_required_recompute_signature.clear();
         }
         decisions_this_tick += 1;
     }
@@ -682,9 +852,6 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
             snapshot.sim_time
         )
     );
-    last_down_nodes_ = snapshot.metrics.down_nodes;
-    last_down_links_ = snapshot.metrics.down_links;
-    last_congested_links_ = snapshot.metrics.congested_links;
 }
 
 } // namespace sfc

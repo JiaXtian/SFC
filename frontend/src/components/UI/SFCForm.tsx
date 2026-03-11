@@ -39,6 +39,8 @@ const vnfTemplates = {
 }
 
 type VNFTemplateName = keyof typeof vnfTemplates
+const DEFAULT_SOURCE_NODE = 'SAT_000_000'
+const DEFAULT_DESTINATION_NODE = 'SAT_000_001'
 
 interface VNFConfig {
   type: VNFTemplateName
@@ -349,8 +351,8 @@ export default function SFCForm() {
     auto_redeploy: true,
   }
   const [trafficEndpoints, setTrafficEndpoints] = useState({
-    source_node: '',
-    destination_node: '',
+    source_node: DEFAULT_SOURCE_NODE,
+    destination_node: DEFAULT_DESTINATION_NODE,
     priority: 'medium',
   })
 
@@ -371,19 +373,6 @@ export default function SFCForm() {
     [scoreWeights]
   )
   const satelliteIds = useMemo(() => satellites.map(s => s.id), [satellites])
-
-  useEffect(() => {
-    if (satelliteIds.length < 2) return
-    setTrafficEndpoints(prev => {
-      if (prev.source_node && prev.destination_node) return prev
-      const source = prev.source_node || satelliteIds[0]
-      const fallbackDst = satelliteIds.find(id => id !== source) || ''
-      const destination = prev.destination_node && prev.destination_node !== source
-        ? prev.destination_node
-        : fallbackDst
-      return { ...prev, source_node: source, destination_node: destination }
-    })
-  }, [satelliteIds])
 
   const addVNF = () => {
     setCustomSFC(prev => {

@@ -11,6 +11,7 @@ function defaultWsUrl() {
 export function useWebSocket() {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
+  const endpointFaultPopupCooldownRef = useRef<Record<string, number>>({})
 
   useEffect(() => {
     const state = useStore.getState()
@@ -72,6 +73,18 @@ export function useWebSocket() {
               const trace = data as any
               pushDecisionTrace(trace)
               upsertSessionDeploymentFromTrace(trace)
+              const trigger = String(trace?.trigger ?? '')
+              if (trigger === 'source_node_down' || trigger === 'destination_node_down') {
+                const sessionId = String(trace?.session_id ?? trace?.request_id ?? 'unknown')
+                const key = `${sessionId}:${trigger}`
+                const now = Date.now()
+                const last = endpointFaultPopupCooldownRef.current[key] ?? 0
+                if (now - last > 12000) {
+                  endpointFaultPopupCooldownRef.current[key] = now
+                  const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
+                  window.alert(`SFC ${sessionId} 触发必要重调度\n原因：${label}故障，当前部署不可继续保持`)
+                }
+              }
               pushRuntimeEvent({
                 type: 'decision_trace',
                 sim_time: data.sim_time,

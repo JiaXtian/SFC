@@ -14,6 +14,7 @@ import TimeAxis from './components/UI/TimeAxis'
 import { useStore } from './store/useStore'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useAutoDynamics } from './hooks/useAutoDynamics'
+import { shallow } from 'zustand/shallow'
 
 const CandidateModal = lazy(() => import('./components/UI/CandidateModal'))
 const MonitoringPage = lazy(() => import('./components/UI/MonitoringPage'))
@@ -21,7 +22,19 @@ const MonitoringPage = lazy(() => import('./components/UI/MonitoringPage'))
 export default function App() {
   useWebSocket()
   useAutoDynamics()
-  const { candidateResult, setSelectedSatellite, setSelectedLink, display } = useStore()
+  const {
+    candidateResult,
+    setSelectedSatellite,
+    setSelectedLink,
+    display,
+    satCount,
+  } = useStore((s) => ({
+    candidateResult: s.candidateResult,
+    setSelectedSatellite: s.setSelectedSatellite,
+    setSelectedLink: s.setSelectedLink,
+    display: s.display,
+    satCount: s.satellites.length,
+  }), shallow)
   const [viewport, setViewport] = useState(() => ({
     w: window.innerWidth,
     h: window.innerHeight,
@@ -62,29 +75,30 @@ export default function App() {
     return Math.max(0.9, Math.min(1.34, scale))
   }, [viewport])
   const qualityConfig = useMemo(() => {
+    const largeScale = satCount >= 900
     if (display.renderQuality === 'performance') {
       return {
         dpr: 1 as number | [number, number],
         antialias: false,
         powerPreference: 'low-power' as WebGLPowerPreference,
-        starCount: 2800,
+        starCount: satCount >= 900 ? 1800 : 2800,
       }
     }
     if (display.renderQuality === 'balanced') {
       return {
-        dpr: [1, 1.5] as [number, number],
-        antialias: true,
+        dpr: (largeScale ? [1, 1.2] : [1, 1.5]) as [number, number],
+        antialias: !largeScale,
         powerPreference: 'default' as WebGLPowerPreference,
-        starCount: 4500,
+        starCount: satCount >= 900 ? 2600 : 4500,
       }
     }
     return {
-      dpr: [1, 2] as [number, number],
-      antialias: true,
-      powerPreference: 'high-performance' as WebGLPowerPreference,
-      starCount: 7000,
+      dpr: (largeScale ? [1, 1.3] : [1, 2]) as [number, number],
+      antialias: !largeScale,
+      powerPreference: (largeScale ? 'default' : 'high-performance') as WebGLPowerPreference,
+      starCount: satCount >= 900 ? 3200 : 7000,
     }
-  }, [display.renderQuality])
+  }, [display.renderQuality, satCount])
 
   return (
     <div className="w-screen h-screen overflow-hidden"

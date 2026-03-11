@@ -17,6 +17,27 @@ function navigateTo(path: string) {
   window.dispatchEvent(new PopStateEvent('popstate'))
 }
 
+function rescheduleReasonLabel(trigger: string): string {
+  switch (trigger) {
+    case 'source_node_down':
+      return '源节点故障'
+    case 'destination_node_down':
+      return '宿节点故障'
+    case 'deployment_node_down':
+      return '部署节点故障'
+    case 'anchor_path_disconnected':
+      return '锚点路径断连'
+    case 'topology_tick_bootstrap':
+      return '初始策略构建'
+    case 'session_start':
+      return '会话启动'
+    case 'manual_initial_candidate':
+      return '手动初始方案'
+    default:
+      return trigger || '无'
+  }
+}
+
 function AxisLineChart({
   values,
   color,
@@ -256,6 +277,7 @@ export default function MonitoringPage() {
     addToast,
     runtimeEvents,
     decisionTraces,
+    deployments,
   } = useStore()
   const [updatingFaults, setUpdatingFaults] = useState(false)
   const [enableFaults, setEnableFaults] = useState(true)
@@ -410,6 +432,67 @@ export default function MonitoringPage() {
   }, [runtimeEvents])
 
   const recoveryRate = Number(orch?.recovery_success_rate ?? 0) * 100
+  const stabilityRows = useMemo(() => {
+    const tracesBySession = new Map<string, any[]>()
+    decisionTraces.forEach((trace: any) => {
+      const sid = String(trace?.session_id ?? '')
+      if (!sid) return
+      if (!tracesBySession.has(sid)) tracesBySession.set(sid, [])
+      tracesBySession.get(sid)!.push(trace)
+    })
+
+    return deployments
+      .filter((dep: any) => !!dep?.session_id)
+      .map((dep: any) => {
+        const sessionId = String(dep.session_id)
+        const traces = tracesBySession.get(sessionId) ?? []
+        const rescheduleTraces = traces.filter((t: any) => {
+          const trigger = String(t?.trigger ?? '')
+          if (!trigger) return false
+          return !['session_start', 'manual_initial_candidate', 'topology_tick_bootstrap'].includes(trigger)
+        })
+        const reasonCount = new Map<string, number>()
+        rescheduleTraces.forEach((t: any) => {
+          const trigger = String(t?.trigger ?? 'unknown')
+          reasonCount.set(trigger, (reasonCount.get(trigger) ?? 0) + 1)
+        })
+        const sortedReasons = Array.from(reasonCount.entries()).sort((a, b) => b[1] - a[1])
+        const latestTrigger = String(rescheduleTraces[0]?.trigger ?? dep.decision_trigger ?? '')
+        const pathRecompute = Math.max(0, Number(dep.path_recompute_count ?? 0))
+        const forcedReschedules = rescheduleTraces.length
+        const failedPenalty = dep.status === 'failed' ? 18 : 0
+        const stabilityScore = Math.max(0, 100 - Math.min(95, forcedReschedules * 9 + pathRecompute * 2 + failedPenalty))
+        let stabilityLevel = '高稳定'
+        if (stabilityScore < 70) stabilityLevel = '低稳定'
+        else if (stabilityScore < 85) stabilityLevel = '中稳定'
+
+        const reasonSummary = sortedReasons.length > 0
+          ? sortedReasons
+              .slice(0, 2)
+              .map(([r, c]) => `${rescheduleReasonLabel(r)}(${c})`)
+              .join('，')
+          : '无必要重调度'
+
+        return {
+          sessionId,
+          requestId: String(dep.request_id ?? '-'),
+          sfcName: String(dep.sfc_name ?? `SFC ${dep.request_id ?? ''}`),
+          stabilityScore,
+          stabilityLevel,
+          forcedReschedules,
+          pathRecompute,
+          latestReason: rescheduleReasonLabel(latestTrigger),
+          reasonSummary,
+          inferenceMs: Number(dep.inference_latency_ms ?? 0),
+        }
+      })
+      .sort((a, b) => a.stabilityScore - b.stabilityScore)
+  }, [deployments, decisionTraces])
+
+  const maxRescheduleCount = useMemo(() => {
+    if (stabilityRows.length === 0) return 1
+    return Math.max(1, ...stabilityRows.map((r) => r.forcedReschedules))
+  }, [stabilityRows])
   const monitorScale = useMemo(() => {
     const widthScale = viewport.w / 1680
     const heightScale = viewport.h / 950
@@ -708,6 +791,75 @@ export default function MonitoringPage() {
             <Heatmap matrix={faultHeatmap.matrix} rowLabels={faultHeatmap.rows} title="故障类型时序热力图" />
             <div className="mt-1 text-[10px] text-slate-400">恢复事件会话影响趋势（受影响业务数）</div>
             <AxisLineChart values={sessionImpactSeries} color="#22d3ee" title="恢复事件会话影响趋势" yLabel="受影响业务数" xLabel="事件序列" />
+          </div>
+
+          <div className="col-span-12 rounded-2xl p-3"
+            style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
+            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
+              <ShieldCheck className="w-4 h-4 text-cyan-300" />SFC稳定性与重调度原因
+            </div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              说明：仅统计“必要重调度”触发（节点故障/路径断连），用于评估各SFC在动态拓扑中的稳定运行能力。
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[980px] text-[11px] border-separate border-spacing-y-1">
+                <thead>
+                  <tr className="text-slate-400">
+                    <th className="text-left font-medium px-2 py-1">SFC</th>
+                    <th className="text-left font-medium px-2 py-1">稳定性</th>
+                    <th className="text-left font-medium px-2 py-1">必要重调度</th>
+                    <th className="text-left font-medium px-2 py-1">路径重算</th>
+                    <th className="text-left font-medium px-2 py-1">最近原因</th>
+                    <th className="text-left font-medium px-2 py-1">原因统计</th>
+                    <th className="text-left font-medium px-2 py-1">最近推理时延</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stabilityRows.map((row) => (
+                    <tr key={row.sessionId} className="bg-slate-900/45 border border-slate-700/60">
+                      <td className="px-2 py-1.5 text-cyan-200">
+                        <div className="font-medium">{row.sfcName}</div>
+                        <div className="text-[10px] text-slate-500">{row.requestId}</div>
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <div className="text-slate-200">{row.stabilityLevel} ({row.stabilityScore.toFixed(0)})</div>
+                        <div className="mt-1 h-1.5 rounded-full bg-slate-800/90 overflow-hidden">
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${Math.max(4, Math.min(100, row.stabilityScore))}%`,
+                              background: row.stabilityScore >= 85
+                                ? 'linear-gradient(90deg, #34d399, #22d3ee)'
+                                : row.stabilityScore >= 70
+                                  ? 'linear-gradient(90deg, #f59e0b, #f97316)'
+                                  : 'linear-gradient(90deg, #fb7185, #ef4444)',
+                            }}
+                          />
+                        </div>
+                      </td>
+                      <td className="px-2 py-1.5 text-amber-200">
+                        {row.forcedReschedules}
+                        <div className="mt-1 h-1 rounded-full bg-slate-800/90 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-amber-300/80"
+                            style={{ width: `${Math.min(100, (row.forcedReschedules / maxRescheduleCount) * 100)}%` }}
+                          />
+                        </div>
+                      </td>
+                      <td className="px-2 py-1.5 text-violet-200">{row.pathRecompute}</td>
+                      <td className="px-2 py-1.5 text-rose-200">{row.latestReason}</td>
+                      <td className="px-2 py-1.5 text-slate-300">{row.reasonSummary}</td>
+                      <td className="px-2 py-1.5 text-emerald-200">{row.inferenceMs.toFixed(1)} ms</td>
+                    </tr>
+                  ))}
+                  {stabilityRows.length === 0 && (
+                    <tr>
+                      <td className="px-2 py-2 text-slate-500" colSpan={7}>暂无已部署SFC稳定性数据</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="col-span-12 rounded-2xl p-3"

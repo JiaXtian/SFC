@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import { Line } from '@react-three/drei'
 import { useStore } from '@/store/useStore'
+import { shallow } from 'zustand/shallow'
 
 const EARTH_R = 5
 const KM_TO_U = EARTH_R / 6371
@@ -65,7 +66,16 @@ export default function Links() {
     selectedLink,
     setSelectedLink,
     setSelectedSatellite,
-  } = useStore()
+  } = useStore((s) => ({
+    satellites: s.satellites,
+    links: s.links,
+    display: s.display,
+    deployments: s.deployments,
+    highlightedDeploymentIds: s.highlightedDeploymentIds,
+    selectedLink: s.selectedLink,
+    setSelectedLink: s.setSelectedLink,
+    setSelectedSatellite: s.setSelectedSatellite,
+  }), shallow)
 
   const satMap = useMemo(() => {
     const m = new Map<string, any>()
@@ -106,6 +116,10 @@ export default function Links() {
       : (display.renderQuality === 'balanced' ? MAX_RENDER_BALANCED : MAX_RENDER_HIGH)
     if (satellites.length > 3200) {
       maxRenderNormal = Math.floor(maxRenderNormal * 0.72)
+    } else if (satellites.length > 1800) {
+      maxRenderNormal = Math.floor(maxRenderNormal * 0.58)
+    } else if (satellites.length > 900) {
+      maxRenderNormal = Math.floor(maxRenderNormal * 0.48)
     }
     if (normalCount > maxRenderNormal) {
       const stride = Math.ceil(normalCount / Math.max(1, maxRenderNormal))
@@ -156,12 +170,6 @@ export default function Links() {
     return set
   }, [links])
 
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 120)
-    return () => window.clearInterval(timer)
-  }, [])
-
   const highlightedLines = useMemo(() => {
     const out: Array<{
       key: string
@@ -177,9 +185,6 @@ export default function Links() {
     deployments.forEach((dep: any) => {
       if (!active.has(dep.deployment_id)) return
       if (dep.satisfies_constraints === false || dep.status === 'failed') return
-      const transitionUntil = Number(dep.path_transition_until ?? 0)
-      const inTransition = transitionUntil > nowMs
-      const remain = inTransition ? Math.max(0, Math.min(1, (transitionUntil - nowMs) / 900)) : 0
 
       const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
       currentLinks.forEach((l: any, i: number) => {
@@ -195,39 +200,17 @@ export default function Links() {
             toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
           ],
           link: l,
-          color: inTransition ? '#e8f4ff' : '#ffffff',
-          glowColor: inTransition ? '#7dd3fc' : '#e2f1ff',
-          lineWidth: inTransition ? 4.2 : 3.6,
-          opacity: inTransition ? 0.98 : 0.95,
+          color: '#ffffff',
+          glowColor: '#e2f1ff',
+          lineWidth: 3.6,
+          opacity: 0.95,
           isGhost: false,
         })
       })
-
-      if (inTransition && Array.isArray(dep.previous_link_details)) {
-        dep.previous_link_details.forEach((l: any, i: number) => {
-          const lk = `${String(l?.src ?? '')}|${String(l?.dst ?? '')}`
-          if (!activeLinkSet.has(lk)) return
-          const a = satMap.get(l.src)
-          const b = satMap.get(l.dst)
-          if (!a || !b) return
-          out.push({
-            key: `hl-old-${dep.deployment_id}-${l.src}-${l.dst}-${i}`,
-            points: [
-              toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z),
-              toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
-            ],
-            link: l,
-            color: '#60a5fa',
-            glowColor: '#38bdf8',
-            lineWidth: 2.6,
-            opacity: 0.45 * remain,
-            isGhost: true,
-          })
-        })
-      }
     })
     return out
-  }, [deployments, highlightedDeploymentIds, satMap, nowMs, activeLinkSet])
+  }, [deployments, highlightedDeploymentIds, satMap, activeLinkSet])
+  const heavyHighlightMode = satellites.length >= 2600
 
   const selectedLines = useMemo(() => {
     const out: Array<{ key: string; points: [number, number, number][]; link: RenderLink }> = []
@@ -252,13 +235,19 @@ export default function Links() {
     }
   }, [meshes])
 
-  const enableLinkPicking = useMemo(() => {
-    const rendered = (groups.normalIntra.length + groups.normalInter.length + groups.selected.length)
-    if (display.renderQuality === 'performance') return rendered <= 8000
-    return rendered <= 12000
-  }, [groups, display.renderQuality])
+  const raycastNormalLink = useMemo(
+    () =>
+      function raycastLineSegments(this: THREE.LineSegments, raycaster: THREE.Raycaster, intersects: THREE.Intersection[]) {
+        const prev = raycaster.params.Line.threshold
+        // Shrink line picking radius to avoid stealing most satellite clicks.
+        raycaster.params.Line.threshold = 0.015
+        THREE.LineSegments.prototype.raycast.call(this, raycaster, intersects)
+        raycaster.params.Line.threshold = prev
+      },
+    []
+  )
 
-  const handleClick = (item: { links: RenderLink[] } | null, e: any) => {
+  const handleLinkPick = (item: { links: RenderLink[] } | null, e: any) => {
     if (!item) return
     const ray: THREE.Ray | undefined = e?.ray
     if (!ray) return
@@ -283,11 +272,11 @@ export default function Links() {
         best = link
       }
     }
-    if (!Number.isFinite(bestD) || Math.sqrt(bestD) > 0.02) return
-    const l = best
-    if (!l) return
+    // Keep threshold tight to prioritize satellite picking when near nodes.
+    if (!Number.isFinite(bestD) || Math.sqrt(bestD) > 0.018) return
+    if (!best) return
     e.stopPropagation()
-    setSelectedLink(l as any)
+    setSelectedLink(best as any)
     setSelectedSatellite(null)
   }
 
@@ -296,12 +285,20 @@ export default function Links() {
   return (
     <group>
       {meshes.intra && (
-        <lineSegments geometry={meshes.intra.geometry} onClick={enableLinkPicking ? ((e) => handleClick(meshes.intra, e)) : undefined}>
+        <lineSegments
+          geometry={meshes.intra.geometry}
+          raycast={raycastNormalLink}
+          onClick={(e) => handleLinkPick(meshes.intra, e)}
+        >
           <lineBasicMaterial color="#65ff7f" transparent opacity={display.linkOpacity * 0.93} depthWrite={false} />
         </lineSegments>
       )}
       {meshes.inter && (
-        <lineSegments geometry={meshes.inter.geometry} onClick={enableLinkPicking ? ((e) => handleClick(meshes.inter, e)) : undefined}>
+        <lineSegments
+          geometry={meshes.inter.geometry}
+          raycast={raycastNormalLink}
+          onClick={(e) => handleLinkPick(meshes.inter, e)}
+        >
           <lineBasicMaterial color="#8b5bf9" transparent opacity={display.linkOpacity * 0.8} depthWrite={false} />
         </lineSegments>
       )}
@@ -312,19 +309,21 @@ export default function Links() {
           <Line
             points={item.points}
             color={item.color}
-            lineWidth={item.lineWidth}
+            lineWidth={heavyHighlightMode ? Math.max(2.1, item.lineWidth - 1.1) : item.lineWidth}
             transparent
-            opacity={item.opacity}
+            opacity={heavyHighlightMode ? Math.max(0.7, item.opacity * 0.88) : item.opacity}
             raycast={() => null}
           />
-          <Line
-            points={item.points}
-            color={item.glowColor}
-            lineWidth={item.isGhost ? 6.2 : 8.5}
-            transparent
-            opacity={item.isGhost ? Math.max(0.08, item.opacity * 0.55) : 0.24}
-            raycast={() => null}
-          />
+          {!heavyHighlightMode && (
+            <Line
+              points={item.points}
+              color={item.glowColor}
+              lineWidth={item.isGhost ? 6.2 : 8.5}
+              transparent
+              opacity={item.isGhost ? Math.max(0.08, item.opacity * 0.55) : 0.24}
+              raycast={() => null}
+            />
+          )}
         </group>
       ))}
 

@@ -276,71 +276,58 @@ interface Store {
   suppressSessionDeployment: (sessionId: string) => void
 }
 
-type AdjEdge = { to: string; latency: number }
+type PathGraph = {
+  adj: Map<string, string[]>
+  linkMap: Map<string, LinkData>
+}
 
 function linkKey(src: string, dst: string) {
   return `${src}|${dst}`
 }
 
-function buildAdjacency(links: LinkData[]) {
-  const adj = new Map<string, AdjEdge[]>()
+function buildAdjacency(links: LinkData[]): PathGraph {
+  const adj = new Map<string, string[]>()
   const linkMap = new Map<string, LinkData>()
   links.forEach((l) => {
     const status = (l as any).status ?? 'active'
     const avail = Number((l as any).bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0)
     if (status === 'down' || avail <= 0) return
-    const lat = Number(l.latency_ms ?? 1)
     if (!adj.has(l.source)) adj.set(l.source, [])
     if (!adj.has(l.target)) adj.set(l.target, [])
-    adj.get(l.source)!.push({ to: l.target, latency: lat })
-    adj.get(l.target)!.push({ to: l.source, latency: lat })
+    adj.get(l.source)!.push(l.target)
+    adj.get(l.target)!.push(l.source)
     linkMap.set(linkKey(l.source, l.target), l)
     linkMap.set(linkKey(l.target, l.source), l)
   })
   return { adj, linkMap }
 }
 
-function shortestPath(src: string, dst: string, adj: Map<string, AdjEdge[]>) {
+function shortestPath(src: string, dst: string, adj: Map<string, string[]>) {
   if (!src || !dst) return []
   if (src === dst) return [src]
-
-  const dist = new Map<string, number>()
   const prev = new Map<string, string>()
-  const visited = new Set<string>()
-  const nodes = new Set<string>([src, dst])
-  adj.forEach((_, k) => nodes.add(k))
-  nodes.forEach((n) => dist.set(n, Number.POSITIVE_INFINITY))
-  dist.set(src, 0)
-
-  while (visited.size < nodes.size) {
-    let u = ''
-    let best = Number.POSITIVE_INFINITY
-    nodes.forEach((n) => {
-      if (visited.has(n)) return
-      const d = dist.get(n) ?? Number.POSITIVE_INFINITY
-      if (d < best) {
-        best = d
-        u = n
+  const visited = new Set<string>([src])
+  const queue: string[] = [src]
+  let qi = 0
+  while (qi < queue.length) {
+    const cur = queue[qi++]
+    const edges = adj.get(cur) ?? []
+    for (const next of edges) {
+      if (visited.has(next)) continue
+      visited.add(next)
+      prev.set(next, cur)
+      if (next === dst) {
+        qi = queue.length
+        break
       }
-    })
-    if (!u || !Number.isFinite(best)) break
-    if (u === dst) break
-    visited.add(u)
-    const edges = adj.get(u) ?? []
-    edges.forEach((e) => {
-      if (visited.has(e.to)) return
-      const nd = best + e.latency
-      if (nd < (dist.get(e.to) ?? Number.POSITIVE_INFINITY)) {
-        dist.set(e.to, nd)
-        prev.set(e.to, u)
-      }
-    })
+      queue.push(next)
+    }
   }
 
-  if (!prev.has(dst)) return []
+  if (!visited.has(dst)) return []
   const path: string[] = [dst]
   let cur = dst
-  for (let i = 0; i < nodes.size + 2; i++) {
+  for (let i = 0; i < visited.size + 2; i++) {
     const p = prev.get(cur)
     if (!p) break
     path.push(p)
@@ -351,19 +338,125 @@ function shortestPath(src: string, dst: string, adj: Map<string, AdjEdge[]>) {
   return path.reverse()
 }
 
-function rebuildDeploymentPath(dep: Deployment, links: LinkData[]): Deployment {
-  const { adj, linkMap } = buildAdjacency(links)
-  const anchors = (() => {
-    const fromPathNodes = Array.isArray(dep.path_nodes) ? dep.path_nodes.filter(Boolean) : []
-    if (fromPathNodes.length >= 2) return fromPathNodes
-    const seq = [
-      dep.source_node ?? '',
-      ...(Array.isArray(dep.deployed_nodes) ? dep.deployed_nodes : []),
-      dep.destination_node ?? '',
-    ].filter(Boolean)
-    return seq.filter((n, idx) => idx === 0 || n !== seq[idx - 1])
-  })()
+function buildAnchorsForDeployment(dep: Deployment): string[] {
+  const seq = [
+    dep.source_node ?? '',
+    ...(Array.isArray(dep.deployed_nodes) ? dep.deployed_nodes : []),
+    dep.destination_node ?? '',
+  ].filter(Boolean)
+  const compact = seq.filter((n, idx) => idx === 0 || n !== seq[idx - 1])
+  if (compact.length >= 2) return compact
+
+  const fromPathNodes = Array.isArray(dep.path_nodes) ? dep.path_nodes.filter(Boolean) : []
+  if (fromPathNodes.length >= 2) return fromPathNodes
+  return []
+}
+
+function followsSingleChain(dep: Deployment, anchors: string[]) {
+  const details = Array.isArray(dep.link_details) ? dep.link_details : []
+  if (details.length === 0 || anchors.length < 2) return false
+
+  const nextMap = new Map<string, string>()
+  const outDegree = new Map<string, number>()
+  const inDegree = new Map<string, number>()
+  for (const l of details) {
+    const src = String(l?.src ?? '')
+    const dst = String(l?.dst ?? '')
+    if (!src || !dst || src === dst) return false
+    if (!nextMap.has(src)) nextMap.set(src, dst)
+    outDegree.set(src, (outDegree.get(src) || 0) + 1)
+    inDegree.set(dst, (inDegree.get(dst) || 0) + 1)
+    if ((outDegree.get(src) || 0) > 1) return false
+    if ((inDegree.get(dst) || 0) > 1) return false
+  }
+
+  const start = String(anchors[0] ?? '')
+  const end = String(anchors[anchors.length - 1] ?? '')
+  if (!start || !end) return false
+
+  const visitedEdges = new Set<string>()
+  const orderedNodes: string[] = [start]
+  let cur = start
+  for (let i = 0; i < details.length + 2; i++) {
+    const nxt = nextMap.get(cur)
+    if (!nxt) break
+    const ek = `${cur}|${nxt}`
+    if (visitedEdges.has(ek)) return false
+    visitedEdges.add(ek)
+    orderedNodes.push(nxt)
+    cur = nxt
+  }
+  if (orderedNodes[orderedNodes.length - 1] !== end) return false
+  if (visitedEdges.size !== details.length) return false
+
+  let anchorIdx = 0
+  for (const n of orderedNodes) {
+    if (n === anchors[anchorIdx]) anchorIdx += 1
+    if (anchorIdx >= anchors.length) break
+  }
+  return anchorIdx >= anchors.length
+}
+
+function linksAreStillUsable(dep: Deployment, linkMap: Map<string, LinkData>) {
+  if (!Array.isArray(dep.link_details) || dep.link_details.length === 0) return false
+  for (const l of dep.link_details) {
+    const cur = linkMap.get(linkKey(String(l.src), String(l.dst)))
+    if (!cur) return false
+    const status = String((cur as any)?.status ?? 'active')
+    const avail = Number((cur as any)?.bandwidth_available_gbps ?? (cur as any)?.bandwidth_gbps ?? 0)
+    if (status === 'down' || avail <= 0) return false
+  }
+  return true
+}
+
+function refreshLinkMetrics(linkDetails: LinkDetail[], linkMap: Map<string, LinkData>) {
+  let changed = false
+  const latencyEps = 0.8
+  const bwEps = 0.35
+  const reliabilityEps = 0.0015
+  const refreshed = linkDetails.map((l) => {
+    const cur = linkMap.get(linkKey(String(l.src), String(l.dst)))
+    if (!cur) return l
+    const next: LinkDetail = {
+      src: String(l.src),
+      dst: String(l.dst),
+      latency_ms: Number((cur as any)?.latency_ms ?? l.latency_ms ?? 0),
+      bandwidth_gbps: Number((cur as any)?.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
+      bandwidth_available_gbps: Number((cur as any)?.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0),
+      bandwidth_required_gbps: Number(l.bandwidth_required_gbps ?? 0),
+      status: String((cur as any)?.status ?? l.status ?? 'active'),
+      reliability: Number((cur as any)?.reliability ?? (cur as any)?.link_reliability ?? l.reliability ?? 0),
+    }
+    if (
+      Math.abs((next.latency_ms ?? 0) - Number(l.latency_ms ?? 0)) > latencyEps ||
+      Math.abs((next.bandwidth_available_gbps ?? 0) - Number(l.bandwidth_available_gbps ?? 0)) > bwEps ||
+      Math.abs((next.reliability ?? 0) - Number(l.reliability ?? 0)) > reliabilityEps ||
+      String(next.status ?? '') !== String(l.status ?? '')
+    ) {
+      changed = true
+    }
+    return next
+  })
+  return { refreshed, changed }
+}
+
+function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
+  const { adj, linkMap } = graph
+  const anchors = buildAnchorsForDeployment(dep)
   if (anchors.length < 2) return dep
+
+  const chainValid = followsSingleChain(dep, anchors)
+  if (chainValid && linksAreStillUsable(dep, linkMap)) {
+    const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
+    const { refreshed, changed } = refreshLinkMetrics(currentLinks, linkMap)
+    if (!changed) return dep
+    const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+    return {
+      ...dep,
+      link_details: refreshed,
+      total_latency_ms: totalLatency > 0 ? totalLatency : dep.total_latency_ms,
+    }
+  }
 
   const newNodes: string[] = [anchors[0]]
   const newLinks: LinkDetail[] = []
@@ -627,23 +720,36 @@ export const useStore = create<Store>((set, get) => ({
   })),
   clearDeployments: () => set({ deployments: [], highlightedDeploymentIds: [] }),
   refreshDeploymentPaths: () => set((s) => {
-    const now = Date.now()
+    if (s.deployments.length === 0) return s
+    const graph = buildAdjacency(s.links)
     const topoV = Number(s.simulation.topology_version || s.topologyVersion || 0)
-    return {
-      deployments: s.deployments.map((dep) => {
-        const rebuilt = rebuildDeploymentPath(dep, s.links)
-        const oldSig = pathSignature(dep.link_details)
-        const newSig = pathSignature(rebuilt.link_details)
-        const changed = oldSig !== newSig
-        return {
-          ...rebuilt,
-          topology_version_bound: topoV,
-          path_recompute_count: (dep.path_recompute_count ?? 0) + (changed ? 1 : 0),
-          previous_link_details: changed ? (dep.link_details ?? []) : dep.previous_link_details,
-          path_transition_until: changed ? now + 900 : dep.path_transition_until,
-        }
-      }),
-    }
+    let stateChanged = false
+    const nextDeployments = s.deployments.map((dep) => {
+      const rebuilt = rebuildDeploymentPath(dep, graph)
+      const oldSig = pathSignature(dep.link_details)
+      const newSig = pathSignature(rebuilt.link_details)
+      const pathChanged = oldSig !== newSig
+      const nextRecomputeCount = (dep.path_recompute_count ?? 0) + (pathChanged ? 1 : 0)
+      const topologyChanged = Number(dep.topology_version_bound ?? -1) !== topoV
+      const deploymentChanged =
+        rebuilt !== dep ||
+        dep.path_recompute_count !== nextRecomputeCount ||
+        topologyChanged ||
+        dep.previous_link_details !== undefined ||
+        dep.path_transition_until !== undefined
+
+      if (!deploymentChanged) return dep
+      stateChanged = true
+      return {
+        ...rebuilt,
+        topology_version_bound: topoV,
+        path_recompute_count: nextRecomputeCount,
+        previous_link_details: undefined,
+        path_transition_until: undefined,
+      }
+    })
+    if (!stateChanged) return s
+    return { ...s, deployments: nextDeployments }
   }),
   toggleHighlightedDeployment: (id) => set((s) => ({
     highlightedDeploymentIds: s.highlightedDeploymentIds.includes(id)
@@ -815,7 +921,7 @@ export const useStore = create<Store>((set, get) => ({
       deployed_nodes: Array.isArray(chosen.deployed_nodes) ? chosen.deployed_nodes : perVnf.map((p) => p.node),
       per_vnf: perVnf.length > 0 ? perVnf : (existing?.per_vnf ?? []),
       link_details: pickTraceLinkDetails(chosen),
-      previous_link_details: existing?.previous_link_details,
+      previous_link_details: undefined,
       total_latency_ms: Number(chosen.total_latency_ms ?? existing?.total_latency_ms ?? 0),
       deployed_at: nowIso,
       progress: 100,
@@ -824,10 +930,10 @@ export const useStore = create<Store>((set, get) => ({
       topology_version_bound: topoV,
       path_recompute_count: existing?.path_recompute_count ?? 0,
       decision_trigger: trace.trigger,
-      path_transition_until: existing?.path_transition_until,
+      path_transition_until: undefined,
     }
 
-    const rebuilt = rebuildDeploymentPath(base, s.links)
+    const rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links))
     const hasExisting = !!existing
     const deployments = hasExisting
       ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))

@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '@/store/useStore'
+import { shallow } from 'zustand/shallow'
 
 const EARTH_R = 5
 const KM_TO_U = EARTH_R / 6371
@@ -21,7 +22,14 @@ function blendColors(colors: string[]): string {
 }
 
 export default function Satellites() {
-  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore()
+  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
+    satellites: s.satellites,
+    selectedSatellite: s.selectedSatellite,
+    deployments: s.deployments,
+    highlightedDeploymentIds: s.highlightedDeploymentIds,
+    setSelectedSatellite: s.setSelectedSatellite,
+    setSelectedLink: s.setSelectedLink,
+  }), shallow)
   const { camera } = useThree()
   const [hoveredIdx, setHoveredIdx] = useState<number>(-1)
   const instanceRef = useRef<THREE.InstancedMesh>(null)
@@ -29,6 +37,7 @@ export default function Satellites() {
   const tmpDir = useMemo(() => new THREE.Vector3(), [])
   const currentPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
   const targetPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
+  const meshDirtyRef = useRef(true)
 
   const vnfHighlightSet = useMemo(() => {
     if (highlightedDeploymentIds.length === 0) return new Set<string>()
@@ -94,6 +103,7 @@ export default function Satellites() {
     })
     Array.from(current.keys()).forEach((id) => { if (!liveIds.has(id)) current.delete(id) })
     Array.from(target.keys()).forEach((id) => { if (!liveIds.has(id)) target.delete(id) })
+    meshDirtyRef.current = true
   }, [satellites, targetPositions])
 
   const getDisplayPosition = (idx: number) => {
@@ -106,7 +116,7 @@ export default function Satellites() {
 
   useFrame(() => {
     const mesh = instanceRef.current
-    if (!mesh || satellites.length === 0) return
+    if (!mesh || satellites.length === 0 || !meshDirtyRef.current) return
     const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {
       const sat = satellites[i]
@@ -123,6 +133,7 @@ export default function Satellites() {
     }
     mesh.instanceMatrix.needsUpdate = true
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    meshDirtyRef.current = false
   })
 
   const isOccludedByEarth = (point: THREE.Vector3) => {

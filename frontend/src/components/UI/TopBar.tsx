@@ -1,13 +1,18 @@
 import { useState } from 'react'
 import { Activity, Settings, Satellite, Info, ChevronDown } from 'lucide-react'
 import { useStore } from '@/store/useStore'
+import { shallow } from 'zustand/shallow'
 import SettingsModal from './SettingsModal'
 
 export default function TopBar() {
   const [open, setOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
-  const { satellites, links, deployments, simulation } = useStore()
-  const orch = simulation.orchestration
+  const { satCount, linkCount, deployCount, orch } = useStore((s) => ({
+    satCount: s.satellites.length,
+    linkCount: s.links.length,
+    deployCount: s.deployments.length,
+    orch: s.simulation.orchestration,
+  }), shallow)
   const gotoMonitorPage = () => {
     if (window.location.pathname === '/monitor') return
     window.history.pushState({}, '', '/monitor')
@@ -46,19 +51,19 @@ export default function TopBar() {
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
             style={{ background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(103,232,249,0.32)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
-            <span className="text-cyan-200 font-semibold">{satellites.length}</span>
+            <span className="text-cyan-200 font-semibold">{satCount}</span>
             <span className="text-cyan-200/70">在轨卫星</span>
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
             style={{ background: 'rgba(96,165,250,0.1)', border: '1px solid rgba(96,165,250,0.25)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-blue-300 animate-pulse" />
-            <span className="text-blue-300 font-semibold">{links.length}</span>
+            <span className="text-blue-300 font-semibold">{linkCount}</span>
             <span className="text-blue-300/70">ISL</span>
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
             style={{ background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(196,181,253,0.25)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-violet-300 animate-pulse" />
-            <span className="text-violet-300 font-semibold">{deployments.length}</span>
+            <span className="text-violet-300 font-semibold">{deployCount}</span>
             <span className="text-violet-300/70">SFC 部署</span>
           </div>
           {orch && (

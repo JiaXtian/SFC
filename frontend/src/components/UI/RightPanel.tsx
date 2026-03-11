@@ -3,11 +3,14 @@ import { ChevronRight, ChevronLeft, Layers, List } from 'lucide-react'
 import SFCForm from './SFCForm'
 import DeploymentPanel from './DeploymentPanel'
 import { useStore } from '@/store/useStore'
+import { shallow } from 'zustand/shallow'
 
 export default function RightPanel() {
   const [collapsed, setCollapsed] = useState(false)
   const [tab, setTab] = useState<'sfc' | 'deploy'>('sfc')
-  const { deployments } = useStore()
+  const { deploymentCount } = useStore((s) => ({
+    deploymentCount: s.deployments.length,
+  }), shallow)
 
   return (
     <div
@@ -35,9 +38,9 @@ export default function RightPanel() {
                 {t === 'sfc' ? 'SFC 请求' : t === 'deploy' ? (
                   <span className="flex items-center gap-1">
                     部署列表
-                    {deployments.length > 0 && (
+                    {deploymentCount > 0 && (
                       <span className="w-4 h-4 rounded-full text-[8px] font-bold flex items-center justify-center"
-                        style={{ background: '#0f3460', color: '#fff' }}>{deployments.length}</span>
+                        style={{ background: '#0f3460', color: '#fff' }}>{deploymentCount}</span>
                     )}
                   </span>
                 ) : '部署列表'}
