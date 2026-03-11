@@ -110,6 +110,8 @@ int main() {
     const std::filesystem::path config_path = find_config_file();
     Config config = load_config(config_path.string());
     const std::filesystem::path config_dir = config_path.parent_path();
+    const std::string upload_tmp_path =
+        (std::filesystem::temp_directory_path() / "sfc_drogon_upload").lexically_normal().string();
     config.onnx.gnn_model = resolve_with_base(config_dir, config.onnx.gnn_model);
     config.onnx.actor_model = resolve_with_base(config_dir, config.onnx.actor_model);
     
@@ -163,6 +165,7 @@ int main() {
             .setMaxConnectionNum(10000)
             .setIdleConnectionTimeout(60)
             .enableSession(3600)
+            .setUploadPath(upload_tmp_path)
             .setDocumentRoot("./public");
         
         // 启用CORS
@@ -231,6 +234,7 @@ int main() {
         spdlog::info("  - Threads: {}", config.server.threads);
         spdlog::info("  - GNN Model: {}", config.onnx.gnn_model);
         spdlog::info("  - Actor Model: {}", config.onnx.actor_model);
+        spdlog::info("  - Upload Temp Path: {}", upload_tmp_path);
         spdlog::info("");
         spdlog::info("Starting server...");
         

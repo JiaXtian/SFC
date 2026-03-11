@@ -22,7 +22,6 @@ TRAIN_ROOT = PROJECT_ROOT / "train"
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
 from ground_training.training.trainer import SFCTrainer
-from ground_training.training.hyperparam_report import generate_hyperparam_report
 
 
 class HeuristicPruner:
@@ -524,13 +523,6 @@ def main():
     torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")
 
     json_path, csv_path, plot_path = save_metrics(history, output_dir="logs")
-    report_md_path, report_json_path = generate_hyperparam_report(
-        history=history,
-        current_config=current_config,
-        markdown_path=Path("logs/hyperparam_report.md"),
-        json_path=Path("logs/hyperparam_report.json"),
-    )
-
     total_time = time.time() - start_time
     best_success = max((h["success_rate"] for h in history), default=0.0)
     best_sla = max((h["sla_satisfaction_rate"] for h in history), default=0.0)
@@ -542,8 +534,6 @@ def main():
     print(f"  指标JSON: {json_path}")
     print(f"  指标CSV: {csv_path}")
     print(f"  训练图表: {plot_path}")
-    print(f"  超参报告: {report_md_path}")
-    print(f"  超参JSON: {report_json_path}")
 
 
 if __name__ == "__main__":

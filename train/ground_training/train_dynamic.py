@@ -21,7 +21,6 @@ from ground_training.data_generation.generate_dynamic_multiscale_data import (
     _parse_scale_plan as parse_dynamic_scale_plan,
 )
 from ground_training.training.dynamic_dataset import discover_dynamic_pairs, load_dynamic_sequences
-from ground_training.training.hyperparam_report import generate_hyperparam_report
 from ground_training.training.trainer import SFCTrainer
 
 
@@ -377,33 +376,6 @@ def main():
         )
 
     json_path, csv_path = _save_metrics(history, output_dir="logs")
-    report_md_path, report_json_path = generate_hyperparam_report(
-        history=[
-            {
-                "epoch": h["epoch"],
-                "avg_reward": h["train_success_rate"],
-                "success_rate": h["val_success_rate"],
-                "sla_satisfaction_rate": h["val_sla_satisfaction_rate"],
-                "full_sla_satisfaction_rate": h["val_full_sla_satisfaction_rate"],
-                "avg_episode_delay_ms": h["val_avg_episode_delay_ms"],
-                "avg_algorithm_latency_ms": h["val_avg_algorithm_latency_ms"],
-                "top_failure_reasons": [],
-            }
-            for h in history
-        ],
-        current_config={
-            "epochs": args.epochs,
-            "history_window": args.history_window,
-            "context_dim": args.context_dim,
-            "backend_align_context": args.backend_align_context,
-            "heuristic_top_m": args.heuristic_top_m,
-            "max_steps_per_sequence": args.max_steps_per_sequence,
-            "max_requests_per_step": args.max_requests_per_step,
-        },
-        markdown_path=Path("logs/dynamic_hyperparam_report.md"),
-        json_path=Path("logs/dynamic_hyperparam_report.json"),
-    )
-
     val_best = max(history, key=lambda x: x["val_success_rate"])
     validation_report = {
         "summary": {
@@ -441,8 +413,6 @@ def main():
     print(f"  指标JSON: {json_path}")
     print(f"  指标CSV: {csv_path}")
     print(f"  验证报告: {validation_report_path}")
-    print(f"  超参报告: {report_md_path}")
-    print(f"  超参JSON: {report_json_path}")
 
 
 if __name__ == "__main__":
