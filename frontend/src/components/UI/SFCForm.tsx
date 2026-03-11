@@ -15,6 +15,7 @@ import {
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
+import { buildRuntimeTopologyPayload } from '@/utils/topologySync'
 
 const vnfTemplates = {
   firewall: { cpu: 0.8, mem: 1.5, bw_in: 0.5, bw_out: 0.5 },
@@ -104,7 +105,7 @@ function FoldHeader({
 }
 
 export default function SFCForm() {
-  const { setCandidateResult, addToast, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
+  const { setCandidateResult, addToast, topologyVersion, backendTopologySynced, satellites, links, simulation } = useStore()
 
   const [mode, setMode] = useState<'template' | 'custom'>('template')
   const [selectedTemplate, setSelectedTemplate] = useState(0)
@@ -275,6 +276,17 @@ export default function SFCForm() {
 
     setBusy(true)
     try {
+      try {
+        await apiClient.generateTopology(
+          buildRuntimeTopologyPayload(satellites as any, links as any, simulation.sim_time)
+        )
+      } catch (syncErr: any) {
+        const msg = syncErr?.message ?? syncErr
+        addToast(`规划前同步动态拓扑失败: ${msg}`, 'error')
+        setBusy(false)
+        return
+      }
+
       const selectedTpl = sfcTemplates[selectedTemplate]
       const sfc =
         mode === 'template'

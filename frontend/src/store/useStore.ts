@@ -392,10 +392,13 @@ function rebuildDeploymentPath(dep: Deployment, links: LinkData[]): Deployment {
       })
     }
   }
-  if (segmentFailed && Array.isArray(dep.link_details) && dep.link_details.length > 0) {
-    return dep
+  if (segmentFailed || newLinks.length === 0) {
+    return {
+      ...dep,
+      link_details: [],
+      total_latency_ms: 0,
+    }
   }
-  if (newLinks.length === 0) return dep
   const totalLatency = newLinks.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
   return {
     ...dep,
@@ -608,7 +611,15 @@ export const useStore = create<Store>((set, get) => ({
   bumpTopologyVersion: () => set((s) => ({ topologyVersion: s.topologyVersion + 1 })),
   setTopologyVersion: (v) => set({ topologyVersion: v }),
   setBackendTopologySynced: (synced) => set({ backendTopologySynced: synced }),
-  addDeployment: (d) => set((s) => ({ deployments: [d, ...s.deployments] })),
+  addDeployment: (d) => set((s) => {
+    const idx = s.deployments.findIndex((x) => x.deployment_id === d.deployment_id)
+    if (idx >= 0) {
+      const merged = [...s.deployments]
+      merged[idx] = { ...merged[idx], ...d }
+      return { deployments: merged }
+    }
+    return { deployments: [d, ...s.deployments] }
+  }),
   updateDeployment: (id, p) => set((s) => ({ deployments: s.deployments.map((d) => (d.deployment_id === id ? { ...d, ...p } : d)) })),
   removeDeployment: (id) => set((s) => ({
     deployments: s.deployments.filter((d) => d.deployment_id !== id),

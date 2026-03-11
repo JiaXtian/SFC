@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { X, CheckCircle, XCircle, Clock, Server, Zap, ChevronRight, Gauge, Info } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
+import { buildRuntimeTopologyPayload } from '@/utils/topologySync'
 
 function sanitizeLinkDetails(linkDetails: any[]): any[] {
   if (!Array.isArray(linkDetails)) return []
@@ -71,10 +72,13 @@ export default function CandidateModal() {
     setLinks,
     backendTopologySynced,
     satellites,
+    links,
+    simulation,
   } = useStore()
   const [sel, setSel] = useState(0)
   const [busy, setBusy] = useState(false)
   const [showScoreInfo, setShowScoreInfo] = useState(false)
+  const deployingRef = useRef(false)
 
   if (!candidateResult) return null
   const {
@@ -129,6 +133,7 @@ export default function CandidateModal() {
   const score = scoreBreakdown.total
 
   const deploy = async () => {
+    if (busy || deployingRef.current) return
     if (!backendTopologySynced) {
       alert('后端拓扑未同步，已禁止部署。请先重新生成/导入星座并完成同步。')
       return
@@ -140,8 +145,22 @@ export default function CandidateModal() {
       if (!ok) return
     }
 
+    deployingRef.current = true
     setBusy(true)
     try {
+      try {
+        await apiClient.generateTopology(buildRuntimeTopologyPayload(
+          satellites as any,
+          links as any,
+          simulation.sim_time
+        ))
+      } catch (syncErr: any) {
+        alert(`部署前同步动态拓扑失败：${syncErr?.message ?? syncErr}`)
+        setBusy(false)
+        deployingRef.current = false
+        return
+      }
+
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
       const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
       const deployResp = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
@@ -238,6 +257,7 @@ export default function CandidateModal() {
       alert(`部署失败: ${e.message ?? e}`)
     }
     setBusy(false)
+    deployingRef.current = false
   }
 
   return (

@@ -1468,6 +1468,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     }
 
     std::vector<std::string> final_path;
+    bool final_path_relaxed_bw = false;
     if (prev_node != request.destination_node) {
         const int final_hop_cap = compute_hop_cap(0);
         final_path = find_shortest_path(
@@ -1483,10 +1484,13 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 prev_node,
                 request.destination_node,
                 topology,
-                request.constraints.min_bandwidth_gbps,
+                0.0,
                 compute_relaxed_hop_cap(final_hop_cap),
                 false
             );
+            if (!final_path.empty() && final_path.size() >= 2) {
+                final_path_relaxed_bw = true;
+            }
         }
         if (final_path.empty() || final_path.size() < 2) {
             return finalize_failure("No path to destination node");
@@ -1498,7 +1502,11 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     auto final_links = generate_path_links(final_path, topology, request.constraints.min_bandwidth_gbps);
     const PathMetrics final_metrics = evaluate_path_links(final_links, request.constraints.min_bandwidth_gbps);
     if (!final_metrics.feasible) {
-        return finalize_failure("Final path does not meet bandwidth/status constraints");
+        return finalize_failure(
+            final_path_relaxed_bw
+                ? "Final path exists but does not meet bandwidth/status constraints"
+                : "Final path does not meet bandwidth/status constraints"
+        );
     }
     if (accumulated_latency + final_metrics.latency_ms > request.constraints.max_latency_ms) {
         return finalize_failure("Final path latency exceeds SLA");

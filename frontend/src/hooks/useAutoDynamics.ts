@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
+import { buildRuntimeTopologyPayload } from '@/utils/topologySync'
 
 const EARTH_RADIUS_KM = 6371
 const LIGHT_SPEED_KM_S = 299792.458
@@ -59,13 +60,28 @@ function minDistanceToOriginSegment(a: Vec3, b: Vec3) {
 }
 
 function hasLineOfSight(a: Vec3, b: Vec3) {
-  return minDistanceToOriginSegment(a, b) > EARTH_RADIUS_KM + 20
+  return minDistanceToOriginSegment(a, b) > EARTH_RADIUS_KM + 55
 }
 
 function maxRangeKm(r1: number, r2: number) {
   const h1 = Math.sqrt(Math.max(0, r1 * r1 - EARTH_RADIUS_KM * EARTH_RADIUS_KM))
   const h2 = Math.sqrt(Math.max(0, r2 * r2 - EARTH_RADIUS_KM * EARTH_RADIUS_KM))
   return (h1 + h2) * 0.98
+}
+
+function practicalIslRangeKm(
+  r1: number,
+  r2: number,
+  linkType: 'intra_orbit' | 'inter_orbit'
+) {
+  const h1 = Math.max(0, r1 - EARTH_RADIUS_KM)
+  const h2 = Math.max(0, r2 - EARTH_RADIUS_KM)
+  const hMin = Math.min(h1, h2)
+  const physicsLimit = maxRangeKm(r1, r2)
+  const engineeringLimit = linkType === 'inter_orbit'
+    ? Math.min(3200, 1500 + 1.0 * hMin)
+    : Math.min(3800, 1800 + 1.2 * hMin)
+  return Math.min(physicsLimit, engineeringLimit)
 }
 
 function linkKey(a: string, b: string) {
@@ -168,7 +184,7 @@ function buildDynamicLinkPlan(sats: any[], prevLinks: any[]) {
         if (!bPos) return null
         const d = distanceKm(aPos, bPos)
         const los = hasLineOfSight(aPos, bPos)
-        const reachable = los && d <= maxRangeKm(norm(aPos), norm(bPos))
+        const reachable = los && d <= practicalIslRangeKm(norm(aPos), norm(bPos), 'inter_orbit')
         if (!reachable) return null
         return { sat: bSat, d }
       }
@@ -209,11 +225,14 @@ export function useAutoDynamics() {
   const clockEpochMsRef = useRef<number>(Date.now())
   const recomputeCooldownRef = useRef<Record<string, number>>({})
   const recomputeInFlightRef = useRef<Set<string>>(new Set())
+  const topoSyncBeforeRecomputeRef = useRef<number>(0)
+  const topoSyncBeforeRecomputeInFlightRef = useRef(false)
 
   useEffect(() => {
-    const maybeTriggerSlaRecompute = (trigger: string) => {
+    const maybeTriggerSlaRecompute = async (trigger: string) => {
       const state = useStore.getState()
       const now = Date.now()
+      const sessionsToRecompute: string[] = []
       state.deployments.forEach((dep: any) => {
         const sessionId = String(dep.session_id ?? '')
         if (!sessionId) return
@@ -253,6 +272,33 @@ export function useAutoDynamics() {
         if (recomputeInFlightRef.current.has(sessionId)) return
 
         recomputeCooldownRef.current[sessionId] = now
+        sessionsToRecompute.push(sessionId)
+      })
+
+      if (sessionsToRecompute.length === 0) return
+
+      const needSync =
+        now - topoSyncBeforeRecomputeRef.current > 900 &&
+        !topoSyncBeforeRecomputeInFlightRef.current
+      if (needSync) {
+        topoSyncBeforeRecomputeInFlightRef.current = true
+        try {
+          await apiClient.generateTopology(
+            buildRuntimeTopologyPayload(
+              state.satellites as any,
+              state.links as any,
+              state.simulation.sim_time
+            )
+          )
+          topoSyncBeforeRecomputeRef.current = Date.now()
+        } catch {
+          // If sync fails, still attempt recompute to avoid deadlock.
+        } finally {
+          topoSyncBeforeRecomputeInFlightRef.current = false
+        }
+      }
+
+      sessionsToRecompute.forEach((sessionId) => {
         recomputeInFlightRef.current.add(sessionId)
         apiClient.recomputeSFCSession(sessionId, trigger)
           .catch(() => {})
@@ -323,7 +369,7 @@ export function useAutoDynamics() {
         })
         if (useStore.getState().deployments.length > 0) {
           useStore.getState().refreshDeploymentPaths()
-          maybeTriggerSlaRecompute('sla_violation_resource_tick')
+          void maybeTriggerSlaRecompute('sla_violation_resource_tick')
         }
       } catch {
         // ignore transient sync failures
@@ -443,7 +489,7 @@ export function useAutoDynamics() {
 
             const d = distanceKm(a, b)
             const los = hasLineOfSight(a, b)
-            const range = maxRangeKm(norm(a), norm(b))
+            const range = practicalIslRangeKm(norm(a), norm(b), linkType)
             const up = los && d <= range
 
             const currentStatus = String(prev?.status ?? 'active')
@@ -511,7 +557,7 @@ export function useAutoDynamics() {
             if (statusChanged || pathRefreshAccRef.current >= 0.1) {
               pathRefreshAccRef.current = 0
               useStore.getState().refreshDeploymentPaths()
-              maybeTriggerSlaRecompute('sla_violation_topology_tick')
+              void maybeTriggerSlaRecompute('sla_violation_topology_tick')
             }
           }
         }
