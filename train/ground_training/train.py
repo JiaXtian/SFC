@@ -30,23 +30,27 @@ class HeuristicPruner:
         self.top_m = top_m
 
     @staticmethod
-    def _active_graph(G):
+    def _active_graph(G, bw_req=0.0):
         import networkx as nx
 
         active = nx.DiGraph()
         active.add_nodes_from(G.nodes(data=True))
         for u, v, d in G.edges(data=True):
-            if int(d.get("link_status", 1)) == 1:
-                active.add_edge(u, v, **d)
+            if int(d.get("link_status", 1)) != 1:
+                continue
+            if float(d.get("bandwidth_available_gbps", 0.0)) + 1e-9 < float(bw_req):
+                continue
+            active.add_edge(u, v, **d)
         return active
 
-    def prune(self, G, vnf, prev_node, dest_node, remaining_delay, top_m=None):
+    def prune(self, G, vnf, prev_node, dest_node, remaining_delay, top_m=None, bandwidth_demand_gbps=0.0):
         import networkx as nx
 
         if top_m is None:
             top_m = self.top_m
 
-        active_graph = self._active_graph(G)
+        bw_req = max(float(vnf.get("bandwidth_required_gbps", 0.0)), float(bandwidth_demand_gbps))
+        active_graph = self._active_graph(G, bw_req=bw_req)
         candidates = []
         try:
             dist_from_prev = nx.single_source_dijkstra_path_length(
@@ -59,7 +63,6 @@ class HeuristicPruner:
         except Exception:
             return []
 
-        checked = 0
         cpu_req = float(vnf.get("cpu_required", 0.0))
         mem_req = float(vnf.get("mem_required", 0.0))
         disk_req = float(vnf.get("disk_required_gb", 0.0))
@@ -76,10 +79,6 @@ class HeuristicPruner:
         ]
 
         for node in valid_nodes:
-            checked += 1
-            if checked > 1200:
-                break
-
             d1 = dist_from_prev.get(node, float("inf"))
             d2 = dist_to_dest.get(node, float("inf"))
             if d1 == float("inf") or d2 == float("inf"):
