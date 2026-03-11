@@ -15,12 +15,22 @@ from tqdm import tqdm
 
 
 class SFCTrainer:
-    def __init__(self, gnn, agent, device="cpu", log_dir="logs", context_dim=48, history_window=0):
+    def __init__(
+        self,
+        gnn,
+        agent,
+        device="cpu",
+        log_dir="logs",
+        context_dim=48,
+        history_window=0,
+        backend_align_context=True,
+    ):
         self.gnn = gnn.to(device)
         self.agent = agent
         self.device = device
         self.context_dim = int(context_dim)
         self.history_window = int(max(0, history_window))
+        self.backend_align_context = bool(backend_align_context)
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -35,6 +45,25 @@ class SFCTrainer:
     def _build_graph_from_json(topo_data):
         topology_data = topo_data.get("topology", topo_data)
         graph = nx.DiGraph()
+
+        def _merge_or_set_edge(u, v, attrs):
+            if not graph.has_edge(u, v):
+                graph.add_edge(u, v, **attrs)
+                return
+            cur = graph[u][v]
+            cur["latency_ms"] = min(float(cur.get("latency_ms", 1.0)), float(attrs.get("latency_ms", 1.0)))
+            cur["bandwidth_gbps"] = max(float(cur.get("bandwidth_gbps", 0.0)), float(attrs.get("bandwidth_gbps", 0.0)))
+            cur["bandwidth_available_gbps"] = max(
+                float(cur.get("bandwidth_available_gbps", 0.0)),
+                float(attrs.get("bandwidth_available_gbps", 0.0)),
+            )
+            cur["link_status"] = max(int(cur.get("link_status", 0)), int(attrs.get("link_status", 0)))
+            cur["link_reliability"] = max(
+                float(cur.get("link_reliability", 0.0)),
+                float(attrs.get("link_reliability", 0.0)),
+            )
+            cur["jitter_ms"] = min(float(cur.get("jitter_ms", 0.2)), float(attrs.get("jitter_ms", 0.2)))
+
         for node in topology_data.get("nodes", []):
             node_status = str(node.get("status", "active")).lower()
             is_active_node = node_status not in {"down", "inactive", "failed"}
@@ -66,17 +95,19 @@ class SFCTrainer:
                 link_status = 1 if status_text in {"active", "up", "healthy"} else 0
             else:
                 link_status = int(raw_status)
-            graph.add_edge(
-                link["source"],
-                link["target"],
-                latency_ms=link.get("latency_ms", 1.0),
-                bandwidth_gbps=link.get("bandwidth_gbps", 1.0),
-                bandwidth_available_gbps=link.get("bandwidth_available_gbps", 1.0),
-                link_status=link_status,
-                link_reliability=link.get("link_reliability", link.get("reliability", 0.98)),
-                jitter_ms=link.get("jitter_ms", 0.2),
-                link_type=link.get("link_type", "isl"),
-            )
+            edge_attrs = {
+                "latency_ms": link.get("latency_ms", 1.0),
+                "bandwidth_gbps": link.get("bandwidth_gbps", 1.0),
+                "bandwidth_available_gbps": link.get("bandwidth_available_gbps", 1.0),
+                "link_status": link_status,
+                "link_reliability": link.get("link_reliability", link.get("reliability", 0.98)),
+                "jitter_ms": link.get("jitter_ms", 0.2),
+                "link_type": link.get("link_type", "isl"),
+            }
+            src = link["source"]
+            dst = link["target"]
+            _merge_or_set_edge(src, dst, edge_attrs)
+            _merge_or_set_edge(dst, src, edge_attrs)
         return graph
 
     def _build_context_features(self, state, history_stats: Sequence[Dict] | None = None):
@@ -89,6 +120,16 @@ class SFCTrainer:
         reliability_req = float(state.get("reliability_requirement", 0.97))
         accumulated_reliability = float(state.get("accumulated_reliability", 1.0))
 
+        topology_version = float(state.get("topology_version", 0.0))
+        sim_time_flag = 1.0 if str(state.get("sim_time", "")).strip() else 0.0
+        active_node_ratio = float(state.get("active_node_ratio", 1.0))
+        active_link_ratio = float(state.get("active_link_ratio", 1.0))
+        avg_latency_ms = float(state.get("avg_latency_ms", 0.0))
+        avg_bw_util = float(state.get("avg_bandwidth_utilization", 0.0))
+
+        # Backend-aligned layout:
+        # [0..11] exactly match backend/src/services/InferenceEngine.cpp::build_context_features
+        # [12..15] dynamic topology health stats (also injected in backend runtime now).
         base_features = [
             remaining_delay / 300.0,
             float(state.get("current_vnf_idx", 0)) / total_vnfs,
@@ -99,18 +140,21 @@ class SFCTrainer:
             float(state.get("priority_weight", 1.0)),
             load_level_map.get(state.get("load_level", "medium"), 0.6),
             accumulated_delay / 300.0,
-            float(state.get("remaining_reliability_margin", 0.0)),
-            float(state.get("time_progress", 0.0)),
-            float(state.get("sampling_interval_sec", 5.0)) / 30.0,
-            float(state.get("active_node_ratio", 1.0)),
-            float(state.get("active_link_ratio", 1.0)),
-            float(state.get("avg_latency_ms", 0.0)) / 80.0,
-            float(state.get("avg_bandwidth_utilization", 0.0)),
+            accumulated_reliability - reliability_req,
+            topology_version / 10000.0,
+            sim_time_flag,
+            active_node_ratio,
+            active_link_ratio,
+            avg_latency_ms / 80.0,
+            avg_bw_util,
         ]
         for idx, value in enumerate(base_features):
             if idx >= self.context_dim:
                 break
             ctx[idx] = float(value)
+
+        if self.backend_align_context:
+            return ctx
 
         if (not history_stats) or self.history_window <= 0:
             return ctx
@@ -233,12 +277,15 @@ class SFCTrainer:
         )
 
     @staticmethod
-    def _build_active_graph(graph):
+    def _build_active_graph(graph, bw_req=0.0):
         active_graph = nx.DiGraph()
         active_graph.add_nodes_from(graph.nodes(data=True))
         for u, v, d in graph.edges(data=True):
-            if int(d.get("link_status", 1)) == 1:
-                active_graph.add_edge(u, v, **d)
+            if int(d.get("link_status", 1)) != 1:
+                continue
+            if float(d.get("bandwidth_available_gbps", 0.0)) + 1e-9 < float(bw_req):
+                continue
+            active_graph.add_edge(u, v, **d)
         return active_graph
 
     @staticmethod
@@ -386,7 +433,14 @@ class SFCTrainer:
             remaining_delay = state.get("remaining_delay", float("inf"))
 
             t0 = time.perf_counter()
-            candidates = heuristic_pruner.prune(env.topology, vnf, prev_node, dest_node, remaining_delay)
+            candidates = heuristic_pruner.prune(
+                env.topology,
+                vnf,
+                prev_node,
+                dest_node,
+                remaining_delay,
+                bandwidth_demand_gbps=float(state.get("bandwidth_demand_gbps", 0.0)),
+            )
 
             if not candidates:
                 failure_reason = "no_candidates"
@@ -417,7 +471,11 @@ class SFCTrainer:
             action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
             selected = nodes_list[candidate_indices[action_idx]]
 
-            active_graph = self._build_active_graph(env.topology)
+            bw_req = max(
+                float(vnf.get("bandwidth_required_gbps", 0.0)),
+                float(state.get("bandwidth_demand_gbps", 0.0)),
+            )
+            active_graph = self._build_active_graph(env.topology, bw_req=bw_req)
             try:
                 path = nx.shortest_path(active_graph, prev_node, selected, weight="latency_ms")
                 delay = float(sum(active_graph[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1)))
@@ -453,6 +511,7 @@ class SFCTrainer:
                     next_state.get("prev_node"),
                     next_state.get("dest_node"),
                     next_state.get("remaining_delay", float("inf")),
+                    bandwidth_demand_gbps=float(next_state.get("bandwidth_demand_gbps", 0.0)),
                 )
                 traj["next_candidate_indices"] = [
                     next_node_index[c] for c in next_candidates if c in next_node_index
@@ -788,7 +847,14 @@ class SFCTrainer:
             remaining_delay = state_dyn.get("remaining_delay", float("inf"))
 
             t0 = time.perf_counter()
-            candidates = heuristic_pruner.prune(env.topology, vnf, prev_node, dest_node, remaining_delay)
+            candidates = heuristic_pruner.prune(
+                env.topology,
+                vnf,
+                prev_node,
+                dest_node,
+                remaining_delay,
+                bandwidth_demand_gbps=float(state_dyn.get("bandwidth_demand_gbps", 0.0)),
+            )
             if not candidates:
                 failure_reason = "no_candidates"
                 return finish_episode(False, failure_reason, info)
@@ -816,7 +882,11 @@ class SFCTrainer:
 
             action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
             selected = nodes_list[candidate_indices[action_idx]]
-            active_graph = self._build_active_graph(env.topology)
+            bw_req = max(
+                float(vnf.get("bandwidth_required_gbps", 0.0)),
+                float(state_dyn.get("bandwidth_demand_gbps", 0.0)),
+            )
+            active_graph = self._build_active_graph(env.topology, bw_req=bw_req)
             try:
                 path = nx.shortest_path(active_graph, prev_node, selected, weight="latency_ms")
                 delay = float(sum(active_graph[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1)))
@@ -858,6 +928,7 @@ class SFCTrainer:
                     next_state_dyn.get("prev_node"),
                     next_state_dyn.get("dest_node"),
                     next_state_dyn.get("remaining_delay", float("inf")),
+                    bandwidth_demand_gbps=float(next_state_dyn.get("bandwidth_demand_gbps", 0.0)),
                 )
                 traj["next_candidate_indices"] = [next_node_index[c] for c in next_candidates if c in next_node_index]
 

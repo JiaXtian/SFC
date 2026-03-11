@@ -102,6 +102,18 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print("节点输入维度: 8")
     print("VNF输入维度: 4")
     print(f"上下文输入维度: {context_dim}")
+    if int(context_dim) != 48:
+        print("⚠ 警告: 当前后端默认按 context=48 构造输入，导出维度不为48可能导致在线推理不匹配。")
+
+    with open(os.path.join(output_dir, "model_io_meta.json"), "w") as f:
+        f.write(
+            "{\n"
+            '  "node_feature_dim": 8,\n'
+            '  "vnf_feature_dim": 4,\n'
+            f'  "context_feature_dim": {int(context_dim)},\n'
+            '  "gnn_output_dim": 192\n'
+            "}\n"
+        )
 
 
 def export():

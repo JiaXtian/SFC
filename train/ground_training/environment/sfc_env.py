@@ -44,6 +44,17 @@ class SFCEnvironment:
         self.deployed_vnfs = []
         self.resource_snapshots = []
 
+    @staticmethod
+    def _softened_path_reliability(raw_reliability: float, hops: int) -> float:
+        if hops <= 0:
+            return 1.0
+        raw = max(1e-9, min(1.0, float(raw_reliability)))
+        geometric_mean = raw ** (1.0 / max(1, hops))
+        softened_product = raw ** 0.46
+        blend = (0.7 * softened_product + 0.3 * geometric_mean) if hops <= 6 else (0.82 * softened_product + 0.18 * geometric_mean)
+        excess_hops = max(0, hops - 6)
+        return float(max(0.0, min(1.0, blend * (0.9992 ** excess_hops))))
+
     def reset(self, sfc_request: Dict, reset_resources=None) -> Dict:
         should_reset = reset_resources if reset_resources is not None else (not self.shared_resources)
         if should_reset:
@@ -222,12 +233,11 @@ class SFCEnvironment:
     def _path_reliability(topology: nx.DiGraph, path: List[str]):
         if len(path) < 2:
             return 1.0
-        # 用几何平均替代纯乘积，避免长路径下可靠性指数级坍缩导致SLA恒为0
-        rel_logs = []
+        raw_product = 1.0
         for i in range(len(path) - 1):
             edge_data = topology[path[i]][path[i + 1]]
-            rel_logs.append(np.log(max(1e-6, float(edge_data.get("link_reliability", 0.98)))))
-        return float(np.exp(np.mean(rel_logs)))
+            raw_product *= max(1e-9, float(edge_data.get("link_reliability", 0.98)))
+        return SFCEnvironment._softened_path_reliability(raw_product, len(path) - 1)
 
     def step(self, selected_node: str, path_to_node: List[str], path_delay: float):
         vnf = self.sfc_request["vnf_sequence"][self.current_vnf_idx]
@@ -248,7 +258,10 @@ class SFCEnvironment:
         cpu_req = float(vnf.get("cpu_required", 0.0))
         mem_req = float(vnf.get("mem_required", 0.0))
         disk_req = float(vnf.get("disk_required_gb", 0.0))
-        bw_req = float(vnf.get("bandwidth_required_gbps", 0.0))
+        bw_req = max(
+            float(vnf.get("bandwidth_required_gbps", 0.0)),
+            float(sla.get("bandwidth_demand_gbps", 0.0)),
+        )
 
         if (
             node_data.get("cpu_available", 0.0) < cpu_req
@@ -396,6 +409,15 @@ class SFCEnvironment:
                     **info,
                     "failure_reason": "final_path_link_down",
                 }
+            final_bw_req = float(sla.get("bandwidth_demand_gbps", 0.0))
+            for i in range(len(final_path) - 1):
+                bw_avail = float(self.topology[final_path[i]][final_path[i + 1]].get("bandwidth_available_gbps", 0.0))
+                if bw_avail + 1e-9 < final_bw_req:
+                    self._rollback_resources()
+                    return None, self.reward_config["path_fail"], True, {
+                        **info,
+                        "failure_reason": "final_bandwidth_insufficient",
+                    }
 
             final_delay = float(
                 sum(self.topology[final_path[i]][final_path[i + 1]].get("latency_ms", 0.0) for i in range(len(final_path) - 1))

@@ -56,6 +56,9 @@ def main():
     parser.add_argument("--top_m", type=int, default=100)
     parser.add_argument("--history_window", type=int, default=-1)
     parser.add_argument("--context_dim", type=int, default=-1)
+    parser.add_argument("--backend_align_context", dest="backend_align_context", action="store_true")
+    parser.add_argument("--no_backend_align_context", dest="backend_align_context", action="store_false")
+    parser.set_defaults(backend_align_context=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output_json", default="logs/dynamic_eval.json")
     args = parser.parse_args()
@@ -65,11 +68,21 @@ def main():
 
     meta = _load_meta_if_exists()
     if args.context_dim <= 0:
-        args.context_dim = int(meta.get("context_dim", 80))
+        args.context_dim = int(meta.get("context_dim", 48))
+    if args.backend_align_context is None:
+        args.backend_align_context = bool(meta.get("backend_align_context", True))
     if args.history_window < 0:
-        args.history_window = int(meta.get("history_window", max(0, (args.context_dim - 16) // 8)))
+        if args.backend_align_context:
+            args.history_window = 0
+        else:
+            args.history_window = int(meta.get("history_window", max(0, (args.context_dim - 16) // 8)))
+    if args.backend_align_context and args.context_dim < 48:
+        args.context_dim = 48
     args.context_dim = _infer_context_dim(args.model_checkpoint, args.context_dim)
-    args.history_window = max(0, min(args.history_window, max(0, (args.context_dim - 16) // 8)))
+    if args.backend_align_context:
+        args.history_window = 0
+    else:
+        args.history_window = max(0, min(args.history_window, max(0, (args.context_dim - 16) // 8)))
 
     pairs = discover_dynamic_pairs(args.dynamic_topology_dir, args.dynamic_request_dir)
     if not pairs:
@@ -93,6 +106,7 @@ def main():
         device=args.device,
         context_dim=args.context_dim,
         history_window=args.history_window,
+        backend_align_context=args.backend_align_context,
         log_dir="logs",
     )
     heuristic = HeuristicPruner(top_m=args.top_m)

@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ground_training.models.drl_agent import DRLAgent
 from ground_training.models.gnn_encoder import GNNEncoder
 from ground_training.models.model_export import export_models
+from ground_training.data_generation.generate_dynamic_multiscale_data import (
+    generate_multiscale_dynamic_dataset,
+    _parse_scale_plan as parse_dynamic_scale_plan,
+)
 from ground_training.training.dynamic_dataset import discover_dynamic_pairs, load_dynamic_sequences
 from ground_training.training.hyperparam_report import generate_hyperparam_report
 from ground_training.training.trainer import SFCTrainer
@@ -24,23 +28,27 @@ class HeuristicPruner:
         self.top_m = top_m
 
     @staticmethod
-    def _active_graph(G):
+    def _active_graph(G, bw_req=0.0):
         import networkx as nx
 
         active = nx.DiGraph()
         active.add_nodes_from(G.nodes(data=True))
         for u, v, d in G.edges(data=True):
-            if int(d.get("link_status", 1)) == 1:
-                active.add_edge(u, v, **d)
+            if int(d.get("link_status", 1)) != 1:
+                continue
+            if float(d.get("bandwidth_available_gbps", 0.0)) + 1e-9 < float(bw_req):
+                continue
+            active.add_edge(u, v, **d)
         return active
 
-    def prune(self, G, vnf, prev_node, dest_node, remaining_delay, top_m=None):
+    def prune(self, G, vnf, prev_node, dest_node, remaining_delay, top_m=None, bandwidth_demand_gbps=0.0):
         import networkx as nx
 
         if top_m is None:
             top_m = self.top_m
 
-        active_graph = self._active_graph(G)
+        bw_req = max(float(vnf.get("bandwidth_required_gbps", 0.0)), float(bandwidth_demand_gbps))
+        active_graph = self._active_graph(G, bw_req=bw_req)
         candidates = []
         try:
             dist_from_prev = nx.single_source_dijkstra_path_length(active_graph, prev_node, weight="latency_ms")
@@ -64,7 +72,8 @@ class HeuristicPruner:
             )
         ]
 
-        for node in valid_nodes[:1800]:
+        scan_limit = len(valid_nodes)
+        for node in valid_nodes[:scan_limit]:
             d1 = dist_from_prev.get(node, float("inf"))
             d2 = dist_to_dest.get(node, float("inf"))
             if d1 == float("inf") or d2 == float("inf"):
@@ -116,13 +125,45 @@ def _resolve_data_dir(path: str) -> str:
     return path
 
 
+def _maybe_expand_dynamic_data(args, current_pair_count: int) -> int:
+    if not args.auto_expand_multiscale_data:
+        return current_pair_count
+    if current_pair_count >= args.min_dynamic_sequences:
+        return current_pair_count
+
+    scale_plan = parse_dynamic_scale_plan(args.dynamic_scale_plan)
+    print(
+        "[dynamic_data] 当前动态序列不足，触发多规模扩展: "
+        f"existing={current_pair_count}, min_required={args.min_dynamic_sequences}, "
+        f"plan={scale_plan}"
+    )
+    summary = generate_multiscale_dynamic_dataset(
+        scale_plan=scale_plan,
+        topology_dir=Path(args.dynamic_topology_dir),
+        request_dir=Path(args.dynamic_request_dir),
+        step_sec=args.dynamic_step_sec,
+        duration_sec=args.dynamic_duration_sec,
+        base_requests_per_step=args.dynamic_requests_per_step,
+        seed=args.seed + 100000,
+        isl_max_distance_km=args.dynamic_isl_max_distance_km,
+    )
+    print(
+        "[dynamic_data] 扩展完成: "
+        f"new_sequences={summary['total_sequences']} total_steps={summary['total_steps']} "
+        f"estimated_requests={summary['estimated_total_requests']}"
+    )
+
+    pairs = discover_dynamic_pairs(args.dynamic_topology_dir, args.dynamic_request_dir)
+    return len(pairs)
+
+
 def main():
     parser = argparse.ArgumentParser(description="动态拓扑时序训练（阶段2）")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--heuristic_top_m", type=int, default=110)
-    parser.add_argument("--history_window", type=int, default=4)
-    parser.add_argument("--context_dim", type=int, default=80)
+    parser.add_argument("--history_window", type=int, default=0)
+    parser.add_argument("--context_dim", type=int, default=48)
     parser.add_argument("--max_sequences", type=int, default=0)
     parser.add_argument("--max_steps_per_sequence", type=int, default=0)
     parser.add_argument("--max_requests_per_step", type=int, default=24)
@@ -131,6 +172,18 @@ def main():
     parser.add_argument("--train_ratio", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip_onnx_export", action="store_true")
+    parser.add_argument("--auto_expand_multiscale_data", dest="auto_expand_multiscale_data", action="store_true")
+    parser.add_argument("--no_auto_expand_multiscale_data", dest="auto_expand_multiscale_data", action="store_false")
+    parser.set_defaults(auto_expand_multiscale_data=True)
+    parser.add_argument("--min_dynamic_sequences", type=int, default=12)
+    parser.add_argument("--dynamic_scale_plan", type=str, default="800:2,1600:2,2500:3,4000:3,4800:2")
+    parser.add_argument("--dynamic_step_sec", type=int, default=5)
+    parser.add_argument("--dynamic_duration_sec", type=int, default=180)
+    parser.add_argument("--dynamic_requests_per_step", type=int, default=64)
+    parser.add_argument("--dynamic_isl_max_distance_km", type=float, default=4200.0)
+    parser.add_argument("--backend_align_context", dest="backend_align_context", action="store_true")
+    parser.add_argument("--no_backend_align_context", dest="backend_align_context", action="store_false")
+    parser.set_defaults(backend_align_context=True)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -144,19 +197,27 @@ def main():
         else:
             args.device = "cpu"
 
-    min_context_dim = 16 + max(0, args.history_window) * 8
+    if args.backend_align_context:
+        args.history_window = 0
+        min_context_dim = 48
+    else:
+        min_context_dim = 16 + max(0, args.history_window) * 8
     if args.context_dim < min_context_dim:
         args.context_dim = min_context_dim
         print(f"context_dim 自动提升到 {args.context_dim} (history_window={args.history_window})")
 
     os.makedirs("models/checkpoints", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
+    os.makedirs("models/exported", exist_ok=True)
     os.makedirs("models/exported_dynamic", exist_ok=True)
 
     args.dynamic_topology_dir = _resolve_data_dir(args.dynamic_topology_dir)
     args.dynamic_request_dir = _resolve_data_dir(args.dynamic_request_dir)
 
     pairs = discover_dynamic_pairs(args.dynamic_topology_dir, args.dynamic_request_dir)
+    pair_count = _maybe_expand_dynamic_data(args, len(pairs))
+    if pair_count != len(pairs):
+        pairs = discover_dynamic_pairs(args.dynamic_topology_dir, args.dynamic_request_dir)
     if not pairs:
         raise RuntimeError(
             f"未找到动态拓扑/请求对，请检查目录: {args.dynamic_topology_dir} 与 {args.dynamic_request_dir}"
@@ -178,6 +239,7 @@ def main():
         device=args.device,
         context_dim=args.context_dim,
         history_window=args.history_window,
+        backend_align_context=args.backend_align_context,
         log_dir="logs",
     )
     heuristic = HeuristicPruner(top_m=args.heuristic_top_m)
@@ -258,6 +320,7 @@ def main():
                     {
                         "context_dim": args.context_dim,
                         "history_window": args.history_window,
+                        "backend_align_context": args.backend_align_context,
                         "best_actor_checkpoint": "models/checkpoints/model_dynamic_best.pth",
                         "best_gnn_checkpoint": "models/checkpoints/gnn_dynamic_best.pth",
                     },
@@ -282,6 +345,7 @@ def main():
             {
                 "context_dim": args.context_dim,
                 "history_window": args.history_window,
+                "backend_align_context": args.backend_align_context,
                 "best_actor_checkpoint": "models/checkpoints/model_dynamic_best.pth",
                 "best_gnn_checkpoint": "models/checkpoints/gnn_dynamic_best.pth",
                 "final_actor_checkpoint": "models/checkpoints/model_dynamic_final.pth",
@@ -310,6 +374,7 @@ def main():
             "epochs": args.epochs,
             "history_window": args.history_window,
             "context_dim": args.context_dim,
+            "backend_align_context": args.backend_align_context,
             "heuristic_top_m": args.heuristic_top_m,
             "max_steps_per_sequence": args.max_steps_per_sequence,
             "max_requests_per_step": args.max_requests_per_step,
@@ -338,6 +403,12 @@ def main():
         best_actor = "models/checkpoints/model_dynamic_best.pth"
         best_gnn = "models/checkpoints/gnn_dynamic_best.pth"
         if os.path.exists(best_actor) and os.path.exists(best_gnn):
+            export_models(
+                gnn_path=best_gnn,
+                agent_path=best_actor,
+                output_dir="models/exported",
+                context_dim=args.context_dim,
+            )
             export_models(
                 gnn_path=best_gnn,
                 agent_path=best_actor,

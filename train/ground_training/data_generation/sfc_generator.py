@@ -125,14 +125,14 @@ def _sample_reliability_requirement(priority, load_level):
     return float(min(0.92, max(0.58, base + np.random.uniform(-0.035, 0.035))))
 
 
-def generate_sfc_requests(
+def build_sfc_requests_payload(
     num_requests,
     node_list,
-    output_file,
     load_profile="mixed",
     seed=None,
     topology_scale=None,
     topology_file=None,
+    request_id_prefix="sfc",
 ):
     """生成SFC请求（含 SLA、业务负载、可靠性、磁盘需求）。"""
     if seed is not None:
@@ -181,7 +181,7 @@ def generate_sfc_requests(
         reliability_requirement = _sample_reliability_requirement(template["priority"], load_level)
 
         request = {
-            "request_id": f"sfc_{i}",
+            "request_id": f"{request_id_prefix}_{i}",
             "service_type": service_type,
             "vnf_sequence": vnf_sequence,
             "source_node": src,
@@ -201,7 +201,7 @@ def generate_sfc_requests(
         }
         requests.append(request)
 
-    output_data = {
+    payload = {
         "metadata": {
             "num_requests": num_requests,
             "load_profile": load_profile,
@@ -221,9 +221,31 @@ def generate_sfc_requests(
         },
         "requests": requests,
     }
+    return payload
+
+
+def generate_sfc_requests(
+    num_requests,
+    node_list,
+    output_file,
+    load_profile="mixed",
+    seed=None,
+    topology_scale=None,
+    topology_file=None,
+    request_id_prefix="sfc",
+):
+    payload = build_sfc_requests_payload(
+        num_requests=num_requests,
+        node_list=node_list,
+        load_profile=load_profile,
+        seed=seed,
+        topology_scale=topology_scale,
+        topology_file=topology_file,
+        request_id_prefix=request_id_prefix,
+    )
 
     with open(output_file, "w") as f:
-        json.dump(output_data, f, indent=2)
+        json.dump(payload, f, indent=2)
 
     print(f"Generated {num_requests} requests ({load_profile}) -> {output_file}")
     return output_file

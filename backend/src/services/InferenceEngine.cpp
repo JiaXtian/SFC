@@ -13,6 +13,9 @@
 namespace sfc {
 namespace {
 
+double clamp01(double x);
+bool link_is_down(const Link& link);
+
 double load_level_to_value(const std::string& load_level) {
     if (load_level == "low") return 0.2;
     if (load_level == "high") return 1.0;
@@ -34,7 +37,11 @@ std::vector<float> build_context_features(
     size_t current_vnf_idx,
     double remaining_delay,
     double accumulated_delay,
-    double accumulated_reliability
+    double accumulated_reliability,
+    double active_node_ratio,
+    double active_link_ratio,
+    double avg_latency_ms,
+    double avg_bandwidth_utilization
 ) {
     std::vector<float> ctx(48, 0.0f);
     const double total_vnfs = std::max<size_t>(1, request.vnfs.size());
@@ -53,7 +60,48 @@ std::vector<float> build_context_features(
     ctx[9] = static_cast<float>(accumulated_reliability - reliability_req);
     ctx[10] = static_cast<float>(std::max(0, request.topology_version) / 10000.0);
     ctx[11] = static_cast<float>(request.sim_time.empty() ? 0.0 : 1.0);
+    ctx[12] = static_cast<float>(clamp01(active_node_ratio));
+    ctx[13] = static_cast<float>(clamp01(active_link_ratio));
+    ctx[14] = static_cast<float>(std::max(0.0, avg_latency_ms) / 80.0);
+    ctx[15] = static_cast<float>(clamp01(avg_bandwidth_utilization));
     return ctx;
+}
+
+struct DynamicTopologyFeatures {
+    double active_node_ratio = 1.0;
+    double active_link_ratio = 1.0;
+    double avg_latency_ms = 0.0;
+    double avg_bandwidth_utilization = 0.0;
+};
+
+DynamicTopologyFeatures build_dynamic_topology_features(const Topology& topology) {
+    DynamicTopologyFeatures f{};
+    const double node_total = static_cast<double>(std::max<size_t>(1, topology.nodes.size()));
+    const double link_total = static_cast<double>(std::max<size_t>(1, topology.links.size()));
+
+    int active_nodes = 0;
+    for (const auto& n : topology.nodes) {
+        if (n.status != "down") active_nodes += 1;
+    }
+    f.active_node_ratio = static_cast<double>(active_nodes) / node_total;
+
+    int active_links = 0;
+    double latency_sum = 0.0;
+    double util_sum = 0.0;
+    int util_cnt = 0;
+    for (const auto& l : topology.links) {
+        if (!link_is_down(l)) active_links += 1;
+        latency_sum += std::max(0.0, l.latency_ms);
+        if (l.bandwidth_gbps > 1e-9) {
+            const double bw_ratio = clamp01(l.bandwidth_available_gbps / l.bandwidth_gbps);
+            util_sum += 1.0 - bw_ratio;
+            util_cnt += 1;
+        }
+    }
+    f.active_link_ratio = static_cast<double>(active_links) / link_total;
+    f.avg_latency_ms = latency_sum / link_total;
+    f.avg_bandwidth_utilization = util_cnt > 0 ? util_sum / static_cast<double>(util_cnt) : 0.0;
+    return f;
 }
 
 std::string build_candidate_signature(const DeploymentCandidate& candidate) {
@@ -87,10 +135,8 @@ double clamp01(double x) {
 
 constexpr int kMaxActorCandidatePool = 72;
 constexpr int kMaxProbePerVnf = 48;
-constexpr int kMaxDeterministicScanPerVnf = 144;
 constexpr int kRealtimeActorCandidatePool = 28;
 constexpr int kRealtimeProbePerVnf = 18;
-constexpr int kRealtimeDeterministicScanPerVnf = 48;
 constexpr double kHopPenaltyMs = 2.5;
 constexpr double kPathSofteningExponent = 0.46;
 constexpr double kExcessHopReliabilityPenalty = 0.9992;
@@ -983,6 +1029,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     double accumulated_reliability = 1.0;
     double bottleneck_bandwidth = std::numeric_limits<double>::infinity();
     std::unordered_set<std::string> deployed_node_set;
+    const DynamicTopologyFeatures topo_features = build_dynamic_topology_features(topology);
     spdlog::debug("Max latency: {}ms", request.constraints.max_latency_ms);
 
     auto finalize_failure = [&](const std::string& reason) {
@@ -1123,7 +1170,11 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             i,
             remaining_latency,
             accumulated_latency,
-            accumulated_reliability
+            accumulated_reliability,
+            topo_features.active_node_ratio,
+            topo_features.active_link_ratio,
+            topo_features.avg_latency_ms,
+            topo_features.avg_bandwidth_utilization
         );
 
         auto probs = run_actor_policy(node_embeddings, actor_candidate_indices, vnf_features, context_features);
@@ -1301,16 +1352,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         }
 
         if (!found_feasible_node) {
-            const int fallback_scan_limit = std::min(
-                static_cast<int>(ranked_nodes.size()),
-                std::max(
-                    std::max(actor_top_k * 2, static_cast<int>(max_probe_count) * 2),
-                    std::min(
-                        request.realtime_mode ? kRealtimeDeterministicScanPerVnf : kMaxDeterministicScanPerVnf,
-                        search_target * (request.realtime_mode ? 8 : 12)
-                    )
-                )
-            );
+            // 覆盖所有已排序候选，降低“存在可行节点但被扫描上限截断”导致的漏解概率。
+            const int fallback_scan_limit = static_cast<int>(ranked_nodes.size());
             for (int rank_idx = actor_top_k; rank_idx < fallback_scan_limit; ++rank_idx) {
                 const auto& node_id = ranked_nodes[rank_idx].first;
                 std::vector<std::string> path = {node_id};
@@ -1773,6 +1816,93 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 "Relaxed candidate filtering at VNF index {} (prev={}, remaining_latency={:.2f}ms), recovered {} candidates",
                 current_vnf_idx, prev_node, remaining_latency, candidates.size()
             );
+        }
+    }
+
+    // 第三阶段（全量恢复）：前两级剪枝仍无候选时，执行全局可达性恢复，避免“有解被剪空”。
+    if (candidates.empty()) {
+        const SearchTree* exhaustive_prev_tree = nullptr;
+        const SearchTree* exhaustive_dest_tree = nullptr;
+        if (!prev_node.empty()) {
+            const auto it = cache.node_index.find(prev_node);
+            if (it != cache.node_index.end()) {
+                exhaustive_prev_tree = &get_constrained_tree(topology, prev_node, required_bw, -1);
+            }
+        }
+        if (!request.destination_node.empty()) {
+            const auto it = cache.node_index.find(request.destination_node);
+            if (it != cache.node_index.end()) {
+                exhaustive_dest_tree = &get_constrained_tree(topology, request.destination_node, required_bw, -1);
+            }
+        }
+
+        const bool is_last_vnf = current_vnf_idx + 1 >= request.vnfs.size();
+        const size_t remaining_steps = request.vnfs.size() > current_vnf_idx
+            ? request.vnfs.size() - current_vnf_idx
+            : 0;
+        std::vector<std::string> recovered;
+        recovered.reserve(topology.nodes.size() / 2);
+
+        for (size_t idx = 0; idx < topology.nodes.size(); ++idx) {
+            const auto& node = topology.nodes[idx];
+            if (node.cpu_available < vnf.cpu ||
+                node.mem_available < vnf.mem ||
+                node.disk_available < vnf.disk) {
+                continue;
+            }
+
+            double path_delay = 0.0;
+            double path_reliability = 1.0;
+            if (!prev_node.empty() && prev_node != node.id) {
+                if (!exhaustive_prev_tree ||
+                    idx >= exhaustive_prev_tree->latency.size() ||
+                    !std::isfinite(exhaustive_prev_tree->latency[idx]) ||
+                    exhaustive_prev_tree->hops[idx] == std::numeric_limits<int>::max()) {
+                    continue;
+                }
+                path_delay = exhaustive_prev_tree->latency[idx];
+                path_reliability = soften_path_reliability(
+                    exhaustive_prev_tree->reliability[idx],
+                    exhaustive_prev_tree->hops[idx]
+                );
+            }
+            if (path_delay > remaining_latency + 1e-9) {
+                continue;
+            }
+
+            if (is_last_vnf && !request.destination_node.empty() && request.destination_node != node.id) {
+                if (!exhaustive_dest_tree ||
+                    idx >= exhaustive_dest_tree->latency.size() ||
+                    !std::isfinite(exhaustive_dest_tree->latency[idx]) ||
+                    exhaustive_dest_tree->hops[idx] == std::numeric_limits<int>::max()) {
+                    continue;
+                }
+                const double final_leg_delay = exhaustive_dest_tree->latency[idx];
+                if (path_delay + final_leg_delay > remaining_latency * 1.08 + 1e-9) {
+                    continue;
+                }
+            }
+
+            const double node_rel =
+                deployed_node_set.find(node.id) == deployed_node_set.end()
+                    ? estimate_node_reliability(node.id, topology)
+                    : 1.0;
+            const double optimistic_rel =
+                accumulated_reliability * node_rel * path_reliability *
+                std::pow(0.9992, static_cast<double>(remaining_steps));
+            if (optimistic_rel + 1e-9 < request.constraints.min_reliability * 0.45) {
+                continue;
+            }
+
+            recovered.push_back(node.id);
+        }
+
+        if (!recovered.empty()) {
+            spdlog::warn(
+                "Global recovery restored {} candidates at VNF index {} (prev={}, remaining_latency={:.2f}ms)",
+                recovered.size(), current_vnf_idx, prev_node, remaining_latency
+            );
+            candidates = std::move(recovered);
         }
     }
 
