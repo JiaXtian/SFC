@@ -8,6 +8,7 @@
 #include <cmath>
 #include <numeric>
 #include <cstdint>
+#include <chrono>
 
 namespace sfc {
 namespace {
@@ -50,6 +51,8 @@ std::vector<float> build_context_features(
     ctx[7] = static_cast<float>(load_level_to_value(request.load_level));
     ctx[8] = static_cast<float>(accumulated_delay / 300.0);
     ctx[9] = static_cast<float>(accumulated_reliability - reliability_req);
+    ctx[10] = static_cast<float>(std::max(0, request.topology_version) / 10000.0);
+    ctx[11] = static_cast<float>(request.sim_time.empty() ? 0.0 : 1.0);
     return ctx;
 }
 
@@ -85,6 +88,9 @@ double clamp01(double x) {
 constexpr int kMaxActorCandidatePool = 72;
 constexpr int kMaxProbePerVnf = 48;
 constexpr int kMaxDeterministicScanPerVnf = 144;
+constexpr int kRealtimeActorCandidatePool = 28;
+constexpr int kRealtimeProbePerVnf = 18;
+constexpr int kRealtimeDeterministicScanPerVnf = 48;
 constexpr double kHopPenaltyMs = 2.5;
 constexpr double kPathSofteningExponent = 0.46;
 constexpr double kExcessHopReliabilityPenalty = 0.9992;
@@ -433,10 +439,11 @@ InferenceEngine::~InferenceEngine() {}
 
 std::vector<DeploymentCandidate> InferenceEngine::inference(
     const SFCRequest& request,
-    const Topology& topology
+    const Topology& topology,
+    nlohmann::json* decision_trace
 ) {
     try {
-        return generate_gha_drl_candidates(request, topology);
+        return generate_gha_drl_candidates(request, topology, decision_trace);
     } catch (const std::exception& e) {
         spdlog::error("Inference failed: {}", e.what());
         return {};
@@ -669,7 +676,8 @@ double InferenceEngine::estimate_link_reliability(const Link& link) const {
 
 std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     const SFCRequest& request,
-    const Topology& topology
+    const Topology& topology,
+    nlohmann::json* decision_trace
 ) {
     spdlog::info("Using GHA-DRL algorithm for SFC planning");
     
@@ -679,6 +687,19 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         return {};
     }
     
+    if (decision_trace) {
+        *decision_trace = {
+            {"algorithm", "GHA-DRL"},
+            {"request_id", request.request_id},
+            {"source_node", request.source_node},
+            {"destination_node", request.destination_node},
+            {"requested_topk", request.topk},
+            {"topology_version", request.topology_version},
+            {"sim_time", request.sim_time},
+            {"steps", nlohmann::json::array()}
+        };
+    }
+
     const auto [node_features, edge_index] = prepare_graph_inputs(topology);
     const auto node_embeddings = run_gnn_encoder(node_features, edge_index, topology.nodes.size());
     if (node_embeddings.empty()) {
@@ -692,12 +713,37 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         node_id_to_idx[topology.nodes[i].id] = static_cast<int64_t>(i);
     }
 
-    const int target_feasible_count = std::max(request.topk, 10);
+    const bool realtime_mode = request.realtime_mode;
+    const int target_feasible_count = realtime_mode
+        ? std::max(1, std::min(4, request.topk))
+        : std::max(request.topk, 10);
+    const int hard_attempt_cap = request.max_planning_attempts > 0
+        ? request.max_planning_attempts
+        : (realtime_mode ? std::max(16, target_feasible_count * 6) : 0);
+    const double planning_time_budget_ms = request.planning_time_budget_ms > 0.0
+        ? request.planning_time_budget_ms
+        : (realtime_mode ? 450.0 : 0.0);
+    const auto search_start = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() -> double {
+        return static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - search_start
+            ).count()
+        ) / 1000.0;
+    };
+    auto budget_exceeded = [&]() -> bool {
+        return planning_time_budget_ms > 0.0 && elapsed_ms() >= planning_time_budget_ms;
+    };
+
     std::vector<DeploymentCandidate> feasible_candidates;
     feasible_candidates.reserve(std::max(1, target_feasible_count));
     std::vector<DeploymentCandidate> fallback_candidates;
     fallback_candidates.reserve(std::max(1, target_feasible_count * 3));
     std::unordered_set<std::string> seen_signatures;
+    nlohmann::json trace_steps = nlohmann::json::array();
+    const size_t kMaxTraceAttempts = realtime_mode ? 6 : 12;
+    int attempts_done = 0;
+    bool stop_search = false;
 
     std::vector<double> relax_levels = {1.0, 0.98, 0.95, 0.92, 0.88};
     if (request.constraints.min_reliability <= 0.75) {
@@ -721,18 +767,52 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         }
 
         const bool strict_phase = relax_idx == 0;
-        const int level_attempts = strict_phase
+        int level_attempts = strict_phase
             ? std::max(target_feasible_count * 8, 48)
             : std::max(target_feasible_count * 6, 36);
+        if (hard_attempt_cap > 0) {
+            const int remaining_attempts = hard_attempt_cap - attempts_done;
+            if (remaining_attempts <= 0) {
+                stop_search = true;
+                break;
+            }
+            level_attempts = std::min(level_attempts, remaining_attempts);
+        }
         for (int k = 0; k < level_attempts; ++k) {
+            if (budget_exceeded()) {
+                stop_search = true;
+                break;
+            }
+            if (hard_attempt_cap > 0 && attempts_done >= hard_attempt_cap) {
+                stop_search = true;
+                break;
+            }
+            attempts_done += 1;
+            nlohmann::json single_trace;
             DeploymentCandidate candidate = generate_single_deployment(
                 planning_request,
                 topology,
                 static_cast<int>(relax_idx) * level_attempts + k,
                 node_embeddings,
-                node_id_to_idx
+                node_id_to_idx,
+                decision_trace ? &single_trace : nullptr
             );
             if (candidate.deployed_nodes.empty()) continue;
+
+            if (decision_trace && trace_steps.size() < kMaxTraceAttempts) {
+                trace_steps.push_back({
+                    {"attempt_id", static_cast<int>(relax_idx) * level_attempts + k},
+                    {"relax_factor", relax_factor},
+                    {"satisfies_constraints", candidate.satisfies_constraints},
+                    {"score", candidate.score},
+                    {"latency_ms", candidate.total_latency_ms},
+                    {"estimated_reliability", candidate.estimated_reliability},
+                    {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
+                    {"reason", candidate.reason},
+                    {"deployment_nodes", candidate.deployed_nodes},
+                    {"decision_process", single_trace}
+                });
+            }
 
             const std::string sig = build_candidate_signature(candidate);
             if (!seen_signatures.insert(sig).second) continue;
@@ -751,28 +831,51 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             }
         }
 
-        if (static_cast<int>(feasible_candidates.size()) >= target_feasible_count) {
+        if (stop_search || static_cast<int>(feasible_candidates.size()) >= target_feasible_count) {
             break;
         }
     }
 
-    if (static_cast<int>(feasible_candidates.size()) < target_feasible_count) {
-        const int extra_attempts = std::max(target_feasible_count * 12, 80);
+    if (!stop_search && static_cast<int>(feasible_candidates.size()) < target_feasible_count) {
+        int extra_attempts = std::max(target_feasible_count * 12, 80);
         const int seed_base = static_cast<int>(relax_levels.size()) * 1000;
+        if (hard_attempt_cap > 0) {
+            extra_attempts = std::min(extra_attempts, std::max(0, hard_attempt_cap - attempts_done));
+        }
         spdlog::warn(
             "Feasible candidates still below target ({} < {}), running diversification fallback",
             feasible_candidates.size(),
             target_feasible_count
         );
         for (int extra = 0; extra < extra_attempts; ++extra) {
+            if (budget_exceeded()) break;
+            if (hard_attempt_cap > 0 && attempts_done >= hard_attempt_cap) break;
+            attempts_done += 1;
+            nlohmann::json single_trace;
             DeploymentCandidate candidate = generate_single_deployment(
                 request,
                 topology,
                 seed_base + extra,
                 node_embeddings,
-                node_id_to_idx
+                node_id_to_idx,
+                decision_trace ? &single_trace : nullptr
             );
             if (candidate.deployed_nodes.empty()) continue;
+
+            if (decision_trace && trace_steps.size() < kMaxTraceAttempts) {
+                trace_steps.push_back({
+                    {"attempt_id", seed_base + extra},
+                    {"relax_factor", 1.0},
+                    {"satisfies_constraints", candidate.satisfies_constraints},
+                    {"score", candidate.score},
+                    {"latency_ms", candidate.total_latency_ms},
+                    {"estimated_reliability", candidate.estimated_reliability},
+                    {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
+                    {"reason", candidate.reason},
+                    {"deployment_nodes", candidate.deployed_nodes},
+                    {"decision_process", single_trace}
+                });
+            }
 
             const std::string sig = build_candidate_signature(candidate);
             if (!seen_signatures.insert(sig).second) continue;
@@ -795,6 +898,19 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     });
     if (static_cast<int>(feasible_candidates.size()) > request.topk) {
         feasible_candidates.resize(static_cast<size_t>(request.topk));
+    }
+
+    if (decision_trace) {
+        (*decision_trace)["steps"] = trace_steps;
+        (*decision_trace)["feasible_candidate_count"] = static_cast<int>(feasible_candidates.size());
+        (*decision_trace)["fallback_candidate_count"] = static_cast<int>(fallback_candidates.size());
+        (*decision_trace)["target_feasible_count"] = target_feasible_count;
+        (*decision_trace)["realtime_mode"] = realtime_mode;
+        (*decision_trace)["attempts_done"] = attempts_done;
+        (*decision_trace)["attempt_cap"] = hard_attempt_cap;
+        (*decision_trace)["planning_time_budget_ms"] = planning_time_budget_ms;
+        (*decision_trace)["planning_elapsed_ms"] = elapsed_ms();
+        (*decision_trace)["stopped_by_budget"] = budget_exceeded();
     }
 
     if (!feasible_candidates.empty()) {
@@ -823,10 +939,22 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     const Topology& topology,
     int seed,
     const std::vector<float>& node_embeddings,
-    const std::unordered_map<std::string, int64_t>& node_id_to_idx
+    const std::unordered_map<std::string, int64_t>& node_id_to_idx,
+    nlohmann::json* candidate_trace
 ) {
     DeploymentCandidate candidate;
     candidate.score = 0.9 - seed * 0.1;
+    if (candidate_trace) {
+        *candidate_trace = {
+            {"seed", seed},
+            {"status", "running"},
+            {"source_node", request.source_node},
+            {"destination_node", request.destination_node},
+            {"vnf_count", static_cast<int>(request.vnfs.size())},
+            {"per_vnf", nlohmann::json::array()},
+            {"final", nlohmann::json::object()}
+        };
+    }
 
     if (node_embeddings.empty()) {
         candidate.satisfies_constraints = false;
@@ -864,12 +992,29 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             std::isfinite(bottleneck_bandwidth) ? bottleneck_bandwidth : request.constraints.min_bandwidth_gbps;
         candidate.satisfies_constraints = false;
         candidate.reason = reason;
+        if (candidate_trace) {
+            (*candidate_trace)["status"] = "failed";
+            (*candidate_trace)["failure_reason"] = reason;
+            (*candidate_trace)["final"] = {
+                {"total_latency_ms", candidate.total_latency_ms},
+                {"estimated_reliability", candidate.estimated_reliability},
+                {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps}
+            };
+        }
         return candidate;
     };
 
     // 迭代放置每个VNF
     for (size_t i = 0; i < request.vnfs.size(); ++i) {
         const auto& vnf = request.vnfs[i];
+        nlohmann::json step_trace = {
+            {"vnf_index", static_cast<int>(i)},
+            {"vnf_name", vnf.name},
+            {"prev_node", prev_node},
+            {"remaining_latency_before", remaining_latency},
+            {"accumulated_latency_before", accumulated_latency},
+            {"accumulated_reliability_before", accumulated_reliability}
+        };
         const double required_bandwidth_gbps = std::max(
             request.constraints.min_bandwidth_gbps,
             std::max(vnf.bw_in, vnf.bw_out)
@@ -887,20 +1032,44 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             deployed_node_set,
             topology
         );
+        step_trace["pruned_candidate_count"] = static_cast<int>(candidates_set.size());
 
         if (candidates_set.empty()) {
             spdlog::error("No feasible node for VNF {}: {}", i, vnf.name);
+            if (candidate_trace) {
+                step_trace["status"] = "failed";
+                step_trace["failure_reason"] = "no_candidate_after_pruning";
+                (*candidate_trace)["per_vnf"].push_back(step_trace);
+            }
             return finalize_failure("No feasible node for VNF: " + vnf.name);
         }
 
         auto ranked_nodes = rank_nodes_by_cost(candidates_set, vnf, prev_node, topology);
-        const int search_target = std::max(request.topk, 10);
+        nlohmann::json ranked_top = nlohmann::json::array();
+        for (size_t ridx = 0; ridx < std::min<size_t>(10, ranked_nodes.size()); ++ridx) {
+            ranked_top.push_back({
+                {"node", ranked_nodes[ridx].first},
+                {"heuristic_cost", ranked_nodes[ridx].second}
+            });
+        }
+        step_trace["ranked_candidates_top"] = ranked_top;
+        const int search_target = request.realtime_mode
+            ? std::max(1, std::min(4, request.topk))
+            : std::max(request.topk, 10);
         const int target_actor_fanout = std::max(
-            16,
-            std::min(kMaxActorCandidatePool, search_target * 8)
+            request.realtime_mode ? 8 : 16,
+            std::min(
+                request.realtime_mode ? kRealtimeActorCandidatePool : kMaxActorCandidatePool,
+                search_target * (request.realtime_mode ? 5 : 8)
+            )
         );
         const int actor_top_k = std::min(target_actor_fanout, static_cast<int>(ranked_nodes.size()));
         if (actor_top_k <= 0) {
+            if (candidate_trace) {
+                step_trace["status"] = "failed";
+                step_trace["failure_reason"] = "no_actor_candidate";
+                (*candidate_trace)["per_vnf"].push_back(step_trace);
+            }
             return finalize_failure("No candidate node index available");
         }
 
@@ -940,6 +1109,11 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             }
         }
         if (candidate_node_ids.empty()) {
+            if (candidate_trace) {
+                step_trace["status"] = "failed";
+                step_trace["failure_reason"] = "candidate_embedding_index_miss";
+                (*candidate_trace)["per_vnf"].push_back(step_trace);
+            }
             return finalize_failure("Candidate nodes are not indexed in embeddings");
         }
 
@@ -960,6 +1134,15 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             }
         }
 
+        nlohmann::json actor_top = nlohmann::json::array();
+        for (size_t aidx = 0; aidx < std::min<size_t>(10, candidate_node_ids.size()); ++aidx) {
+            actor_top.push_back({
+                {"node", candidate_node_ids[aidx]},
+                {"actor_prob", aidx < probs.size() ? probs[aidx] : 0.0}
+            });
+        }
+        step_trace["actor_candidates"] = actor_top;
+
         std::vector<size_t> probe_order(probs.size());
         std::iota(probe_order.begin(), probe_order.end(), 0);
         std::vector<double> probe_scores(probs.size(), 0.0);
@@ -972,6 +1155,17 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         std::stable_sort(probe_order.begin(), probe_order.end(), [&](size_t a, size_t b) {
             return probe_scores[a] > probe_scores[b];
         });
+        nlohmann::json actor_rank_top = nlohmann::json::array();
+        for (size_t pidx = 0; pidx < std::min<size_t>(10, probe_order.size()); ++pidx) {
+            const size_t probe_idx = probe_order[pidx];
+            actor_rank_top.push_back({
+                {"rank", static_cast<int>(pidx + 1)},
+                {"node", candidate_node_ids[probe_idx]},
+                {"actor_prob", probe_idx < probs.size() ? probs[probe_idx] : 0.0},
+                {"blended_score", probe_idx < probe_scores.size() ? probe_scores[probe_idx] : 0.0}
+            });
+        }
+        step_trace["actor_ranking_top"] = actor_rank_top;
         const auto prev_probe_it = std::find(candidate_node_ids.begin(), candidate_node_ids.end(), prev_node);
         if (prev_probe_it != candidate_node_ids.end()) {
             const size_t prev_probe_idx = static_cast<size_t>(std::distance(candidate_node_ids.begin(), prev_probe_it));
@@ -993,8 +1187,11 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             }
         }
         const size_t max_probe_count = static_cast<size_t>(std::max(
-            10,
-            std::min(kMaxProbePerVnf, search_target * 5)
+            request.realtime_mode ? 6 : 10,
+            std::min(
+                request.realtime_mode ? kRealtimeProbePerVnf : kMaxProbePerVnf,
+                search_target * (request.realtime_mode ? 3 : 5)
+            )
         ));
         if (probe_order.size() > max_probe_count) {
             probe_order.resize(max_probe_count);
@@ -1002,6 +1199,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
 
         std::unordered_map<std::string, std::vector<std::string>> local_path_cache;
         local_path_cache.reserve(probe_order.size());
+        std::unordered_map<std::string, int> reject_counters;
         const size_t desired_feasible_rank = static_cast<size_t>((seed + static_cast<int>(i) * 3) % 4);
         size_t feasible_rank = 0;
         bool has_backup_choice = false;
@@ -1048,14 +1246,26 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     }
                     path = relaxed_it->second;
                 }
-                if (path.empty() || path.size() < 2) continue;
+                if (path.empty() || path.size() < 2) {
+                    reject_counters["path_unreachable"] += 1;
+                    continue;
+                }
             }
 
             auto path_links = generate_path_links(path, topology, required_bandwidth_gbps);
             const PathMetrics path_metrics = evaluate_path_links(path_links, required_bandwidth_gbps);
-            if (!path_metrics.feasible) continue;
-            if (effective_hop_cap > 0 && path_metrics.hops > effective_hop_cap) continue;
-            if (accumulated_latency + path_metrics.latency_ms > request.constraints.max_latency_ms) continue;
+            if (!path_metrics.feasible) {
+                reject_counters["link_or_bandwidth_violation"] += 1;
+                continue;
+            }
+            if (effective_hop_cap > 0 && path_metrics.hops > effective_hop_cap) {
+                reject_counters["hop_cap_exceeded"] += 1;
+                continue;
+            }
+            if (accumulated_latency + path_metrics.latency_ms > request.constraints.max_latency_ms) {
+                reject_counters["latency_constraint"] += 1;
+                continue;
+            }
 
             const double node_rel =
                 deployed_node_set.find(node_id) == deployed_node_set.end()
@@ -1065,6 +1275,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1; // +1 for final leg to destination
             const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
             if (tentative_reliability * optimistic_future_rel < request.constraints.min_reliability) {
+                reject_counters["reliability_projection"] += 1;
                 continue;
             }
 
@@ -1094,7 +1305,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 static_cast<int>(ranked_nodes.size()),
                 std::max(
                     std::max(actor_top_k * 2, static_cast<int>(max_probe_count) * 2),
-                    std::min(kMaxDeterministicScanPerVnf, search_target * 12)
+                    std::min(
+                        request.realtime_mode ? kRealtimeDeterministicScanPerVnf : kMaxDeterministicScanPerVnf,
+                        search_target * (request.realtime_mode ? 8 : 12)
+                    )
                 )
             );
             for (int rank_idx = actor_top_k; rank_idx < fallback_scan_limit; ++rank_idx) {
@@ -1135,14 +1349,26 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                         }
                         path = relaxed_it->second;
                     }
-                    if (path.empty() || path.size() < 2) continue;
+                    if (path.empty() || path.size() < 2) {
+                        reject_counters["fallback_path_unreachable"] += 1;
+                        continue;
+                    }
                 }
 
                 auto path_links = generate_path_links(path, topology, required_bandwidth_gbps);
                 const PathMetrics path_metrics = evaluate_path_links(path_links, required_bandwidth_gbps);
-                if (!path_metrics.feasible) continue;
-                if (effective_hop_cap > 0 && path_metrics.hops > effective_hop_cap) continue;
-                if (accumulated_latency + path_metrics.latency_ms > request.constraints.max_latency_ms) continue;
+                if (!path_metrics.feasible) {
+                    reject_counters["fallback_link_or_bandwidth_violation"] += 1;
+                    continue;
+                }
+                if (effective_hop_cap > 0 && path_metrics.hops > effective_hop_cap) {
+                    reject_counters["fallback_hop_cap_exceeded"] += 1;
+                    continue;
+                }
+                if (accumulated_latency + path_metrics.latency_ms > request.constraints.max_latency_ms) {
+                    reject_counters["fallback_latency_constraint"] += 1;
+                    continue;
+                }
 
                 const double node_rel =
                     deployed_node_set.find(node_id) == deployed_node_set.end()
@@ -1153,6 +1379,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1;
                 const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
                 if (tentative_reliability * optimistic_future_rel < request.constraints.min_reliability) {
+                    reject_counters["fallback_reliability_projection"] += 1;
                     continue;
                 }
 
@@ -1189,6 +1416,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
 
         if (!found_feasible_node) {
             spdlog::error("No SLA-feasible node for VNF {}: {}", i, vnf.name);
+            if (candidate_trace) {
+                step_trace["status"] = "failed";
+                step_trace["failure_reason"] = "no_sla_feasible_node";
+                step_trace["reject_counters"] = reject_counters;
+                (*candidate_trace)["per_vnf"].push_back(step_trace);
+            }
             return finalize_failure("No SLA-feasible node for VNF: " + vnf.name);
         }
 
@@ -1220,6 +1453,15 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         candidate.per_vnf.push_back(pv);
         candidate.deployed_nodes.push_back(selected_node);
         deployed_node_set.insert(selected_node);
+        if (candidate_trace) {
+            step_trace["status"] = "selected";
+            step_trace["selected_node"] = selected_node;
+            step_trace["selected_path_latency_ms"] = selected_path_latency;
+            step_trace["selected_path_reliability"] = selected_path_reliability;
+            step_trace["selected_path_bottleneck_gbps"] = selected_path_bottleneck;
+            step_trace["reject_counters"] = reject_counters;
+            (*candidate_trace)["per_vnf"].push_back(step_trace);
+        }
         
         prev_node = selected_node;
         has_prev_vnf = true;
@@ -1271,6 +1513,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         bottleneck_bandwidth,
         final_metrics.bottleneck_bandwidth_gbps
     );
+    if (candidate_trace) {
+        (*candidate_trace)["final_path"] = final_path;
+        (*candidate_trace)["final_path_latency_ms"] = final_metrics.latency_ms;
+        (*candidate_trace)["final_path_reliability"] = final_metrics.reliability;
+        (*candidate_trace)["final_path_bottleneck_gbps"] = final_metrics.bottleneck_bandwidth_gbps;
+    }
 
     std::vector<std::string> unique_nodes;
     unique_nodes.reserve(candidate.deployed_nodes.size());
@@ -1372,9 +1620,36 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     }
     candidate.score = std::max(0.0, std::min(1.0, candidate.score));
     
-    spdlog::info("Candidate {}: {} VNFs, {} links, {:.2f}ms, feasible: {}", 
-                seed + 1, candidate.per_vnf.size(), candidate.link_details.size(),
-                candidate.total_latency_ms, candidate.satisfies_constraints);
+    if (!request.realtime_mode) {
+        spdlog::info(
+            "Candidate {}: {} VNFs, {} links, {:.2f}ms, feasible: {}",
+            seed + 1,
+            candidate.per_vnf.size(),
+            candidate.link_details.size(),
+            candidate.total_latency_ms,
+            candidate.satisfies_constraints
+        );
+    } else {
+        spdlog::debug(
+            "[realtime] Candidate {}: score={:.3f}, latency={:.2f}ms, feasible={}",
+            seed + 1,
+            candidate.score,
+            candidate.total_latency_ms,
+            candidate.satisfies_constraints
+        );
+    }
+    if (candidate_trace) {
+        (*candidate_trace)["status"] = candidate.satisfies_constraints ? "success" : "failed";
+        (*candidate_trace)["final"] = {
+            {"score", candidate.score},
+            {"satisfies_constraints", candidate.satisfies_constraints},
+            {"reason", candidate.reason},
+            {"total_latency_ms", candidate.total_latency_ms},
+            {"estimated_reliability", candidate.estimated_reliability},
+            {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
+            {"deployed_nodes", candidate.deployed_nodes}
+        };
+    }
     
     return candidate;
 }

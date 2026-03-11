@@ -6,6 +6,8 @@
 #include "services/TopologyManager.h"
 #include "services/ResourceManager.h"
 #include "services/InferenceEngine.h"
+#include "services/DynamicSimulationService.h"
+#include "services/DynamicInferenceService.h"
 #include <fstream>
 
 using namespace drogon;
@@ -16,6 +18,8 @@ namespace sfc {
     std::shared_ptr<TopologyManager> g_topo_mgr;
     std::shared_ptr<ResourceManager> g_res_mgr;
     std::shared_ptr<InferenceEngine> g_inference_engine;
+    std::shared_ptr<DynamicSimulationService> g_dynamic_sim;
+    std::shared_ptr<DynamicInferenceService> g_dynamic_inference;
 }
 
 struct Config {
@@ -100,6 +104,22 @@ int main() {
             config.onnx.actor_model,
             config.onnx.num_threads
         );
+        sfc::g_dynamic_sim = std::make_shared<sfc::DynamicSimulationService>(
+            sfc::g_topo_mgr,
+            sfc::g_res_mgr
+        );
+        sfc::g_dynamic_inference = std::make_shared<sfc::DynamicInferenceService>(
+            sfc::g_inference_engine,
+            sfc::g_res_mgr,
+            sfc::g_topo_mgr,
+            sfc::g_dynamic_sim
+        );
+        sfc::g_dynamic_sim->register_snapshot_listener(
+            "dynamic_orchestrator",
+            [service = sfc::g_dynamic_inference](const sfc::TopologySnapshot& snapshot) {
+                if (service) service->on_topology_tick(snapshot);
+            }
+        );
         
         // 启动时不再加载默认星座，等待前端显式生成/导入拓扑后再进行部署
         spdlog::info("No default topology loaded at startup; waiting for /api/v1/topology/generate");
@@ -136,6 +156,44 @@ int main() {
                 callback(http_resp);
             },
             {Get}
+        );
+
+        // 第三阶段：会话级连续推理接口（显式注册，确保动态编排路由稳定可用）
+        static sfc::SFCController sfc_controller;
+        app().registerHandler(
+            "/api/v1/sfc/session/start",
+            [](const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) {
+                sfc_controller.startSession(req, std::move(callback));
+            },
+            {Post}
+        );
+        app().registerHandler(
+            "/api/v1/sfc/session/stop",
+            [](const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) {
+                sfc_controller.stopSession(req, std::move(callback));
+            },
+            {Post}
+        );
+        app().registerHandler(
+            "/api/v1/sfc/sessions",
+            [](const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback) {
+                sfc_controller.listSessions(req, std::move(callback));
+            },
+            {Get}
+        );
+        app().registerHandler(
+            "/api/v1/sfc/session/{1}",
+            [](const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& session_id) {
+                sfc_controller.getSessionStatus(req, std::move(callback), session_id);
+            },
+            {Get}
+        );
+        app().registerHandler(
+            "/api/v1/sfc/session/{1}/recompute",
+            [](const HttpRequestPtr& req, std::function<void(const HttpResponsePtr&)>&& callback, const std::string& session_id) {
+                sfc_controller.recomputeSession(req, std::move(callback), session_id);
+            },
+            {Post}
         );
         
         spdlog::info("Server configured:");

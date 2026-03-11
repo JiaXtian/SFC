@@ -3,11 +3,15 @@
 
 namespace sfc {
 
+std::set<WebSocketConnectionPtr> WSHandler::connections_{};
+std::mutex WSHandler::connections_mutex_{};
+
 void WSHandler::handleNewMessage(
     const WebSocketConnectionPtr& wsConnPtr,
     std::string&& message,
     const WebSocketMessageType& type
 ) {
+    (void)type;
     spdlog::debug("WebSocket message received: {}", message);
     
     // Echo back
@@ -43,6 +47,10 @@ void WSHandler::broadcast(const std::string& message) {
     }
     
     spdlog::debug("Broadcasted to {} connections", connections_.size());
+}
+
+void WSHandler::broadcast_json(const nlohmann::json& payload) {
+    broadcast(payload.dump());
 }
 
 } // namespace sfc

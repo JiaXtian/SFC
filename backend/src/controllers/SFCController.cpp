@@ -1,5 +1,6 @@
 #include "controllers/SFCController.h"
 #include "utils/json_converter.h"
+#include "websocket/WSHandler.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <limits>
 #include <cmath>
+#include <nlohmann/json.hpp>
 
 namespace sfc {
 
@@ -76,6 +78,50 @@ static void normalize_candidate_metrics_for_response(
     }
 }
 
+static bool parse_candidate_from_json(const Json::Value& cand_json, DeploymentCandidate* out) {
+    if (!out || !cand_json.isObject()) return false;
+    DeploymentCandidate cand{};
+    cand.score = cand_json.get("score", 0.0).asDouble();
+    cand.total_latency_ms = cand_json.get("total_latency_ms", 0.0).asDouble();
+    cand.estimated_reliability = cand_json.get("estimated_reliability", 0.0).asDouble();
+    cand.bottleneck_bandwidth_gbps = cand_json.get("bottleneck_bandwidth_gbps", 0.0).asDouble();
+    cand.satisfies_constraints = cand_json.get("satisfies_constraints", true).asBool();
+    cand.reason = cand_json.get("reason", "").asString();
+
+    if (cand_json.isMember("deployed_nodes")) {
+        for (const auto& node : cand_json["deployed_nodes"]) {
+            cand.deployed_nodes.push_back(node.asString());
+        }
+    }
+    if (cand_json.isMember("per_vnf")) {
+        for (const auto& pv_json : cand_json["per_vnf"]) {
+            DeploymentCandidate::PerVNF pv;
+            pv.vnf = pv_json.get("vnf", "").asString();
+            pv.node = pv_json.get("node", "").asString();
+            pv.cpu_used = pv_json.get("cpu_used", 0.0).asDouble();
+            pv.mem_used = pv_json.get("mem_used", 0.0).asDouble();
+            pv.disk_used = pv_json.get("disk_used", pv.mem_used * 2.0).asDouble();
+            cand.per_vnf.push_back(std::move(pv));
+        }
+    }
+    if (cand_json.isMember("link_details")) {
+        for (const auto& ld_json : cand_json["link_details"]) {
+            DeploymentCandidate::LinkDetail ld;
+            ld.src = ld_json.get("src", "").asString();
+            ld.dst = ld_json.get("dst", "").asString();
+            ld.latency_ms = ld_json.get("latency_ms", 0.0).asDouble();
+            ld.bandwidth_gbps = ld_json.get("bandwidth_gbps", 0.0).asDouble();
+            ld.bandwidth_available_gbps = ld_json.get("bandwidth_available_gbps", ld.bandwidth_gbps).asDouble();
+            ld.bandwidth_required_gbps = ld_json.get("bandwidth_required_gbps", 0.0).asDouble();
+            ld.status = ld_json.get("status", "active").asString();
+            ld.reliability = ld_json.get("reliability", 0.999).asDouble();
+            cand.link_details.push_back(std::move(ld));
+        }
+    }
+    *out = std::move(cand);
+    return !out->deployed_nodes.empty() || !out->per_vnf.empty() || !out->link_details.empty();
+}
+
 SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     SFCRequest request;
     
@@ -90,9 +136,20 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.priority = json.get("priority", "medium").asString();
     request.optimize = json.get("optimize", "latency").asString();
     request.topk = json.get("topk", 3).asInt();
+    request.topology_version = json.get("topology_version", -1).asInt();
+    request.sim_time = json.get("sim_time", "").asString();
     request.core_network_load = json.get("core_network_load", 0.5).asDouble();
     request.priority_weight = json.get("priority_weight", 1.0).asDouble();
     request.load_level = json.get("load_level", "medium").asString();
+    request.realtime_mode = json.get("realtime_mode", false).asBool();
+    request.max_planning_attempts = json.get("max_planning_attempts", 0).asInt();
+    request.planning_time_budget_ms = json.get("planning_time_budget_ms", 0.0).asDouble();
+    if (json.isMember("inference")) {
+        const auto& inference = json["inference"];
+        request.realtime_mode = inference.get("realtime_mode", request.realtime_mode).asBool();
+        request.max_planning_attempts = inference.get("max_planning_attempts", request.max_planning_attempts).asInt();
+        request.planning_time_budget_ms = inference.get("planning_time_budget_ms", request.planning_time_budget_ms).asDouble();
+    }
 
     if (json.isMember("score_weights")) {
         const auto& sw = json["score_weights"];
@@ -147,6 +204,8 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.topk = std::max(1, std::min(32, request.topk));
     request.core_network_load = std::max(0.0, std::min(1.0, request.core_network_load));
     request.priority_weight = std::max(0.1, request.priority_weight);
+    request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
+    request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
     request.constraints.min_bandwidth_gbps = std::max(0.01, request.constraints.min_bandwidth_gbps);
     request.constraints.min_reliability = std::max(0.72, std::min(0.995, request.constraints.min_reliability));
@@ -237,7 +296,8 @@ void SFCController::plan(
         spdlog::info("Starting inference: nodes={}, links={}", 
                     topology.nodes.size(), topology.links.size());
         
-        auto candidates = g_inference_engine->inference(sfc_request, topology);
+        nlohmann::json decision_process;
+        auto candidates = g_inference_engine->inference(sfc_request, topology, &decision_process);
         
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -278,6 +338,21 @@ void SFCController::plan(
             response["details"] = "All generated candidates violate constraints";
             
             response["failure_reasons"] = "No SLA-feasible candidate returned by inference engine.";
+            response["topology_version"] = topology.metadata.topology_version;
+            response["sim_time"] = topology.metadata.sim_time;
+            response["decision_process"] = nlohmann_to_jsoncpp(decision_process);
+
+            WSHandler::broadcast_json({
+                {"type", "decision_trace"},
+                {"mode", "single_request"},
+                {"request_id", sfc_request.request_id},
+                {"topology_version", topology.metadata.topology_version},
+                {"sim_time", topology.metadata.sim_time},
+                {"inference_time_ms", static_cast<double>(duration.count())},
+                {"candidate_count", 0},
+                {"message", "No candidate returned by inference engine"},
+                {"decision_process", decision_process}
+            });
             
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k200OK);  // 返回200但标记为无可行方案
@@ -291,9 +366,12 @@ void SFCController::plan(
         response["source_node"] = sfc_request.source_node;
         response["destination_node"] = sfc_request.destination_node;
         response["inference_time_ms"] = static_cast<double>(duration.count());
+        response["topology_version"] = topology.metadata.topology_version;
+        response["sim_time"] = topology.metadata.sim_time;
         response["requested_topk"] = sfc_request.topk;
         response["deployable_count"] = static_cast<int>(feasible_candidates.size());
         response["fallback_only"] = feasible_candidates.empty();
+        response["decision_process"] = nlohmann_to_jsoncpp(decision_process);
 
         std::vector<DeploymentCandidate> response_candidates;
         if (!feasible_candidates.empty()) {
@@ -313,6 +391,7 @@ void SFCController::plan(
         }
         
         Json::Value candidates_json(Json::arrayValue);
+        nlohmann::json trace_candidates = nlohmann::json::array();
         for (auto candidate : response_candidates) {
             normalize_candidate_metrics_for_response(candidate, sfc_request);
             auto cand_json = candidate.to_json();
@@ -322,8 +401,74 @@ void SFCController::plan(
                 cand_json["reason"] = violations.front();
             }
             candidates_json.append(nlohmann_to_jsoncpp(cand_json));
+
+            nlohmann::json trace_per_vnf = nlohmann::json::array();
+            for (const auto& pv : candidate.per_vnf) {
+                trace_per_vnf.push_back({
+                    {"vnf", pv.vnf},
+                    {"node", pv.node},
+                    {"cpu_used", pv.cpu_used},
+                    {"mem_used", pv.mem_used},
+                    {"disk_used", pv.disk_used}
+                });
+            }
+            nlohmann::json trace_link_details = nlohmann::json::array();
+            for (const auto& ld : candidate.link_details) {
+                trace_link_details.push_back({
+                    {"src", ld.src},
+                    {"dst", ld.dst},
+                    {"latency_ms", ld.latency_ms},
+                    {"bandwidth_gbps", ld.bandwidth_gbps},
+                    {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
+                    {"bandwidth_required_gbps", ld.bandwidth_required_gbps},
+                    {"status", ld.status},
+                    {"reliability", ld.reliability}
+                });
+            }
+
+            trace_candidates.push_back({
+                {"score", candidate.score},
+                {"satisfies_constraints", candidate.satisfies_constraints},
+                {"total_latency_ms", candidate.total_latency_ms},
+                {"estimated_reliability", candidate.estimated_reliability},
+                {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
+                {"deployed_nodes", candidate.deployed_nodes},
+                {"per_vnf", trace_per_vnf},
+                {"link_details", trace_link_details},
+                {"reason", candidate.reason}
+            });
         }
         response["candidates"] = candidates_json;
+
+        nlohmann::json trace_request_vnfs = nlohmann::json::array();
+        for (const auto& vnf : sfc_request.vnfs) {
+            trace_request_vnfs.push_back({
+                {"name", vnf.name},
+                {"cpu", vnf.cpu},
+                {"mem", vnf.mem},
+                {"disk", vnf.disk},
+                {"bw_in", vnf.bw_in},
+                {"bw_out", vnf.bw_out}
+            });
+        }
+
+        WSHandler::broadcast_json({
+            {"type", "decision_trace"},
+            {"mode", "single_request"},
+            {"request_id", sfc_request.request_id},
+            {"topology_version", topology.metadata.topology_version},
+            {"sim_time", topology.metadata.sim_time},
+            {"source_node", sfc_request.source_node},
+            {"destination_node", sfc_request.destination_node},
+            {"inference_time_ms", static_cast<double>(duration.count())},
+            {"requested_topk", sfc_request.topk},
+            {"returned_topk", static_cast<int>(response_candidates.size())},
+            {"deployable_count", static_cast<int>(feasible_candidates.size())},
+            {"fallback_only", feasible_candidates.empty()},
+            {"request_vnfs", trace_request_vnfs},
+            {"candidates", trace_candidates},
+            {"decision_process", decision_process}
+        });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);
@@ -438,11 +583,50 @@ void SFCController::deploy(
         
         spdlog::info("✓ Deployment {} completed: {} VNFs on {} nodes",
                     deployment_id, candidate.per_vnf.size(), candidate.deployed_nodes.size());
+
+        {
+            std::lock_guard<std::mutex> lock(g_deployments_mutex);
+            Deployment dep;
+            dep.deployment_id = deployment_id;
+            dep.request_id = request_id;
+            dep.candidate_index = (*json).get("candidate_index", 0).asInt();
+            dep.status = "completed";
+            dep.deployed_nodes = candidate.deployed_nodes;
+            dep.total_latency_ms = candidate.total_latency_ms;
+            dep.progress = 100;
+            auto now_ts = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now_ts);
+            char buf[100];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t));
+            dep.deployed_at = buf;
+            for (const auto& pv : candidate.per_vnf) {
+                VNFDeployment d;
+                d.vnf_id = pv.vnf;
+                d.vnf_type = pv.vnf;
+                d.node = pv.node;
+                d.cpu_used = pv.cpu_used;
+                d.mem_used = pv.mem_used;
+                d.disk_used = pv.disk_used;
+                d.sfc_id = request_id;
+                dep.per_vnf.push_back(std::move(d));
+            }
+            g_deployments.push_back(std::move(dep));
+        }
         
         Json::Value response;
         response["deployment_id"] = deployment_id;
         response["status"] = "completed";
         response["message"] = "Deployment successful";
+
+        WSHandler::broadcast_json({
+            {"type", "deployment_update"},
+            {"deployment_id", deployment_id},
+            {"request_id", request_id},
+            {"status", "completed"},
+            {"progress", 100},
+            {"topology_version", updated_topology.metadata.topology_version},
+            {"sim_time", updated_topology.metadata.sim_time}
+        });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);
@@ -484,11 +668,28 @@ void SFCController::rollback(
             g_topo_mgr->save_current_topology(updated_topology);
             
             spdlog::info("✓ Deployment {} rolled back", deployment_id);
+
+            std::lock_guard<std::mutex> lock(g_deployments_mutex);
+            g_deployments.erase(
+                std::remove_if(
+                    g_deployments.begin(),
+                    g_deployments.end(),
+                    [&](const Deployment& dep) { return dep.deployment_id == deployment_id; }
+                ),
+                g_deployments.end()
+            );
         }
         
         Json::Value response;
         response["status"] = success ? "success" : "failed";
         response["message"] = success ? "Deployment rolled back" : "Deployment not found";
+
+        WSHandler::broadcast_json({
+            {"type", "deployment_update"},
+            {"deployment_id", deployment_id},
+            {"status", success ? "rolled_back" : "rollback_failed"},
+            {"progress", success ? 100 : 0}
+        });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);
@@ -524,6 +725,183 @@ void SFCController::getDeployments(
         Json::Value error;
         error["code"] = 500;
         error["message"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::startSession(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto json = req->getJsonObject();
+        if (!json) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid JSON";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+        if (!g_dynamic_inference) {
+            Json::Value error;
+            error["code"] = 500;
+            error["message"] = "Dynamic inference service unavailable";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k500InternalServerError);
+            callback(resp);
+            return;
+        }
+
+        const bool auto_redeploy = (*json).get("auto_redeploy", true).asBool();
+        const Json::Value request_json = json->isMember("request") ? (*json)["request"] : (*json);
+        auto sfc_request = parse_sfc_request(request_json);
+        if (sfc_request.vnfs.empty() || sfc_request.source_node.empty() || sfc_request.destination_node.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid session request";
+            error["details"] = "source_node/destination_node and vnfs are required";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        DeploymentCandidate initial_candidate;
+        bool has_initial_candidate = false;
+        if (request_json.isMember("initial_candidate")) {
+            has_initial_candidate = parse_candidate_from_json(request_json["initial_candidate"], &initial_candidate);
+        } else if (json->isMember("initial_candidate")) {
+            has_initial_candidate = parse_candidate_from_json((*json)["initial_candidate"], &initial_candidate);
+        }
+
+        auto result = g_dynamic_inference->start_session(
+            sfc_request,
+            auto_redeploy,
+            has_initial_candidate ? &initial_candidate : nullptr
+        );
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(result));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("startSession failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "startSession failed";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::stopSession(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto json = req->getJsonObject();
+        if (!json) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid JSON";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+        const std::string session_id = (*json).get("session_id", "").asString();
+        if (session_id.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "session_id is required";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+        const bool ok = g_dynamic_inference && g_dynamic_inference->stop_session(session_id);
+        Json::Value result;
+        result["ok"] = ok;
+        result["session_id"] = session_id;
+        auto resp = HttpResponse::newHttpJsonResponse(result);
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("stopSession failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "stopSession failed";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::listSessions(
+    const HttpRequestPtr&,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        nlohmann::json sessions = g_dynamic_inference ? g_dynamic_inference->list_sessions() : nlohmann::json::array();
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(sessions));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("listSessions failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "listSessions failed";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::getSessionStatus(
+    const HttpRequestPtr&,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    const std::string& session_id
+) {
+    try {
+        nlohmann::json status = g_dynamic_inference
+            ? g_dynamic_inference->get_session_status(session_id)
+            : nlohmann::json{{"found", false}, {"session_id", session_id}};
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(status));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("getSessionStatus failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "getSessionStatus failed";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::recomputeSession(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback,
+    const std::string& session_id
+) {
+    try {
+        auto json = req->getJsonObject();
+        const std::string trigger = json ? (*json).get("trigger", "manual").asString() : "manual";
+        nlohmann::json result = g_dynamic_inference
+            ? g_dynamic_inference->force_recompute(session_id, trigger)
+            : nlohmann::json{{"ok", false}, {"session_id", session_id}, {"reason", "service_unavailable"}};
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(result));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("recomputeSession failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "recomputeSession failed";
+        error["details"] = e.what();
         auto resp = HttpResponse::newHttpJsonResponse(error);
         resp->setStatusCode(k500InternalServerError);
         callback(resp);

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Html } from '@react-three/drei'
 import * as THREE from 'three'
@@ -27,6 +27,8 @@ export default function Satellites() {
   const instanceRef = useRef<THREE.InstancedMesh>(null)
   const dummy = useMemo(() => new THREE.Object3D(), [])
   const tmpDir = useMemo(() => new THREE.Vector3(), [])
+  const currentPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
+  const targetPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
 
   const vnfHighlightSet = useMemo(() => {
     if (highlightedDeploymentIds.length === 0) return new Set<string>()
@@ -52,14 +54,20 @@ export default function Satellites() {
     return { ingress, egress }
   }, [deployments, highlightedDeploymentIds])
 
-  const { positions, colours } = useMemo(() => {
-    const positions: THREE.Vector3[] = []
+  const satelliteIndexById = useMemo(() => {
+    const m = new Map<string, number>()
+    satellites.forEach((sat, idx) => m.set(sat.id, idx))
+    return m
+  }, [satellites])
+
+  const { targetPositions, colours } = useMemo(() => {
+    const targetPositions: THREE.Vector3[] = []
     const colours: THREE.Color[] = []
     const baseGreen = new THREE.Color('#6afb8e')
     const selectedGreen = new THREE.Color('#8dff3a')
 
     satellites.forEach(sat => {
-      positions.push(satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z))
+      targetPositions.push(satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z))
       if (selectedSatellite?.id === sat.id) {
         colours.push(selectedGreen)
       } else if (vnfHighlightSet.has(sat.id)) {
@@ -68,15 +76,46 @@ export default function Satellites() {
         colours.push(baseGreen)
       }
     })
-    return { positions, colours }
+    return { targetPositions, colours }
   }, [satellites, selectedSatellite, vnfHighlightSet])
+
+  useEffect(() => {
+    const current = currentPosMapRef.current
+    const target = targetPosMapRef.current
+    const liveIds = new Set<string>()
+    satellites.forEach((sat, idx) => {
+      liveIds.add(sat.id)
+      const t = targetPositions[idx] ?? satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z)
+      target.set(sat.id, t.clone())
+      if (!current.has(sat.id)) {
+        current.set(sat.id, t.clone())
+      }
+    })
+    Array.from(current.keys()).forEach((id) => { if (!liveIds.has(id)) current.delete(id) })
+    Array.from(target.keys()).forEach((id) => { if (!liveIds.has(id)) target.delete(id) })
+  }, [satellites, targetPositions])
+
+  const getDisplayPosition = (idx: number) => {
+    const sat = satellites[idx]
+    if (!sat) return null
+    return currentPosMapRef.current.get(sat.id) ?? targetPosMapRef.current.get(sat.id) ?? targetPositions[idx] ?? null
+  }
+
+  const vecToTuple = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z]
 
   useFrame(() => {
     const mesh = instanceRef.current
-    if (!mesh || positions.length === 0) return
-    const n = Math.min(positions.length, mesh.count)
+    if (!mesh || satellites.length === 0) return
+    const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {
-      dummy.position.copy(positions[i])
+      const sat = satellites[i]
+      const cur = currentPosMapRef.current.get(sat.id)
+      const tgt = targetPosMapRef.current.get(sat.id) ?? targetPositions[i]
+      const pos = cur && tgt
+        ? cur.copy(tgt)
+        : (cur ?? tgt)
+      if (!pos) continue
+      dummy.position.copy(pos)
       dummy.updateMatrix()
       mesh.setMatrixAt(i, dummy.matrix)
       mesh.setColorAt(i, colours[i])
@@ -104,7 +143,8 @@ export default function Satellites() {
 
   const handlePick = (idx: number) => {
     if (idx < 0 || idx >= satellites.length) return
-    if (isOccludedByEarth(positions[idx])) return
+    const p = getDisplayPosition(idx)
+    if (!p || isOccludedByEarth(p)) return
     setSelectedSatellite(satellites[idx])
     setSelectedLink(null)
   }
@@ -116,17 +156,26 @@ export default function Satellites() {
       document.body.style.cursor = 'default'
       return
     }
-    const vis = idx >= 0 && !isOccludedByEarth(positions[idx])
+    const p = idx >= 0 ? getDisplayPosition(idx) : null
+    const vis = idx >= 0 && !!p && !isOccludedByEarth(p)
     setHoveredIdx(vis ? idx : -1)
     document.body.style.cursor = vis ? 'pointer' : 'default'
   }
 
+  const markedSatIds = useMemo(() => {
+    const ids = new Set<string>()
+    vnfHighlightSet.forEach((id) => ids.add(id))
+    endpointSets.ingress.forEach((id) => ids.add(id))
+    endpointSets.egress.forEach((id) => ids.add(id))
+    return Array.from(ids)
+  }, [vnfHighlightSet, endpointSets])
+
   if (satellites.length === 0) return null
 
   const hov = hoveredIdx >= 0 ? satellites[hoveredIdx] : null
-  const hovPos = hov ? positions[hoveredIdx] : null
+  const hovPos = hov ? getDisplayPosition(hoveredIdx) : null
   const selectedIdx = selectedSatellite ? satellites.findIndex(s => s.id === selectedSatellite.id) : -1
-  const selectedPos = selectedIdx >= 0 ? positions[selectedIdx] : null
+  const selectedPos = selectedIdx >= 0 ? getDisplayPosition(selectedIdx) : null
 
   return (
     <group>
@@ -159,7 +208,7 @@ export default function Satellites() {
       </instancedMesh>
 
       {selectedPos && (
-        <group position={selectedPos}>
+        <group position={vecToTuple(selectedPos)}>
           <mesh raycast={() => null}>
             <sphereGeometry args={[0.11, 16, 16]} />
             <meshBasicMaterial color="#80fbe1" transparent opacity={0.92} />
@@ -172,8 +221,11 @@ export default function Satellites() {
       )}
 
       {/* Static bulging overlays for deployed nodes (VNF / ingress / egress) */}
-      {highlightedDeploymentIds.length > 0 && positions.map((p, i) => {
-        const satId = satellites[i]?.id ?? ''
+      {highlightedDeploymentIds.length > 0 && markedSatIds.map((satId) => {
+        const idx = satelliteIndexById.get(satId)
+        if (idx == null || idx < 0) return null
+        const p = getDisplayPosition(idx)
+        if (!p) return null
         const isVnf = vnfHighlightSet.has(satId)
         const isIngress = endpointSets.ingress.has(satId)
         const isEgress = endpointSets.egress.has(satId)
@@ -186,7 +238,7 @@ export default function Satellites() {
         const core = blendColors(roleColors)
 
         return (
-          <group key={`mark-${satId}`} position={p}>
+          <group key={`mark-${satId}`} position={vecToTuple(p)}>
             <mesh raycast={() => null}>
               <sphereGeometry args={[0.083, 14, 14]} />
               <meshBasicMaterial color={core} transparent opacity={0.9} />
@@ -200,7 +252,7 @@ export default function Satellites() {
       })}
 
       {hov && hovPos && (
-        <group position={hovPos}>
+        <group position={vecToTuple(hovPos)}>
           <Html distanceFactor={10} zIndexRange={[200, 0]} style={{ pointerEvents: 'none' }}>
             <div style={{
               transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 10,

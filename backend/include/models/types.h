@@ -15,6 +15,7 @@ struct OrbitalParams {
     double raan;
     double true_anomaly;
     double altitude_km;
+    double inclination_deg = 53.0;
     
     json to_json() const {
         return {
@@ -22,7 +23,9 @@ struct OrbitalParams {
             {"position_in_plane", position_in_plane},
             {"raan", raan},
             {"true_anomaly", true_anomaly},
-            {"altitude_km", altitude_km}
+            {"altitude_km", altitude_km},
+            {"inclination_deg", inclination_deg},
+            {"inclination", inclination_deg}
         };
     }
 };
@@ -77,6 +80,8 @@ struct Satellite {
     double disk_available;
     double core_network_load = 0.5;
     double node_reliability = 0.98;
+    std::string status = "active";  // active, down
+    std::string fault_tag = "";
     std::vector<VNFDeployment> vnfs;
     
     json to_json() const {
@@ -98,6 +103,8 @@ struct Satellite {
             {"disk_available", disk_available},
             {"core_network_load", core_network_load},
             {"node_reliability", node_reliability},
+            {"status", status},
+            {"fault_tag", fault_tag},
             {"vnfs", vnfs_json}
         };
     }
@@ -138,6 +145,9 @@ struct Topology {
         int num_planes;
         double altitude_km;
         double inclination_deg;
+        int topology_version = 0;
+        double sampling_interval_sec = 5.0;
+        std::string sim_time = "";
         std::string timestamp;
         
         json to_json() const {
@@ -146,6 +156,9 @@ struct Topology {
                 {"num_planes", num_planes},
                 {"altitude_km", altitude_km},
                 {"inclination_deg", inclination_deg},
+                {"topology_version", topology_version},
+                {"sampling_interval_sec", sampling_interval_sec},
+                {"sim_time", sim_time},
                 {"timestamp", timestamp}
             };
         }
@@ -170,6 +183,46 @@ struct Topology {
             {"topology", {
                 {"nodes", nodes_json},
                 {"links", links_json}
+            }}
+        };
+    }
+};
+
+// 拓扑时序快照（动态仿真统一口径）
+struct TopologySnapshot {
+    std::string sim_time;
+    int topology_version = 0;
+    double sampling_interval_sec = 5.0;
+    Topology topology;
+    struct {
+        int total_nodes = 0;
+        int active_nodes = 0;
+        int down_nodes = 0;
+        int total_links = 0;
+        int active_links = 0;
+        int down_links = 0;
+        int congested_links = 0;
+        double avg_latency_ms = 0.0;
+        double avg_bandwidth_utilization = 0.0;
+    } metrics;
+
+    json to_json() const {
+        return {
+            {"sim_time", sim_time},
+            {"topology_version", topology_version},
+            {"sampling_interval_sec", sampling_interval_sec},
+            {"topology", topology.to_json()["topology"]},
+            {"metadata", topology.metadata.to_json()},
+            {"metrics", {
+                {"total_nodes", metrics.total_nodes},
+                {"active_nodes", metrics.active_nodes},
+                {"down_nodes", metrics.down_nodes},
+                {"total_links", metrics.total_links},
+                {"active_links", metrics.active_links},
+                {"down_links", metrics.down_links},
+                {"congested_links", metrics.congested_links},
+                {"avg_latency_ms", metrics.avg_latency_ms},
+                {"avg_bandwidth_utilization", metrics.avg_bandwidth_utilization}
             }}
         };
     }
@@ -200,9 +253,14 @@ struct SFCRequest {
     } constraints;
     std::string optimize;  // latency, resource, load_balance
     int topk;
+    int topology_version = -1;
+    std::string sim_time = "";
     double core_network_load = 0.5;
     double priority_weight = 1.0;
     std::string load_level = "medium"; // low, medium, high
+    bool realtime_mode = false;
+    int max_planning_attempts = 0;
+    double planning_time_budget_ms = 0.0;
     struct {
         double latency = -1.0;
         double resource = -1.0;

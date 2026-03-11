@@ -4,46 +4,39 @@ import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
 
-function buildPathNodesFromLinks(linkDetails: any[], fallbackSrc?: string, fallbackDst?: string): string[] {
-  if (!Array.isArray(linkDetails) || linkDetails.length === 0) {
-    if (fallbackSrc && fallbackDst && fallbackSrc !== fallbackDst) return [fallbackSrc, fallbackDst]
-    return fallbackSrc ? [fallbackSrc] : []
-  }
-
-  const nextMap = new Map<string, string>()
-  const inDegree = new Map<string, number>()
-  const outDegree = new Map<string, number>()
+function sanitizeLinkDetails(linkDetails: any[]): any[] {
+  if (!Array.isArray(linkDetails)) return []
+  const seen = new Set<string>()
+  const out: any[] = []
   linkDetails.forEach((l: any) => {
-    if (!l?.src || !l?.dst) return
-    if (!nextMap.has(l.src)) nextMap.set(l.src, l.dst)
-    outDegree.set(l.src, (outDegree.get(l.src) || 0) + 1)
-    inDegree.set(l.dst, (inDegree.get(l.dst) || 0) + 1)
-    if (!inDegree.has(l.src)) inDegree.set(l.src, inDegree.get(l.src) || 0)
-    if (!outDegree.has(l.dst)) outDegree.set(l.dst, outDegree.get(l.dst) || 0)
+    const src = String(l?.src ?? '')
+    const dst = String(l?.dst ?? '')
+    if (!src || !dst || src === dst) return
+    const key = `${src}|${dst}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ ...l, src, dst })
   })
+  return out
+}
 
-  let start = fallbackSrc || ''
-  if (!start) {
-    const starts = [...outDegree.keys()].filter(k => (inDegree.get(k) || 0) === 0 && (outDegree.get(k) || 0) > 0)
-    start = starts[0] || linkDetails[0]?.src || ''
-  }
-  if (!start) return []
+function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackDst?: string): string[] {
+  const fromCandidatePath = Array.isArray(cand?.path_nodes)
+    ? cand.path_nodes.map((n: any) => String(n)).filter(Boolean)
+    : []
+  if (fromCandidatePath.length >= 2) return fromCandidatePath
 
-  const nodes: string[] = [start]
-  const seen = new Set<string>([start])
-  for (let i = 0; i < linkDetails.length + 2; i++) {
-    const cur = nodes[nodes.length - 1]
-    const nxt = nextMap.get(cur)
-    if (!nxt) break
-    nodes.push(nxt)
-    if (seen.has(nxt)) break
-    seen.add(nxt)
-  }
-
-  if (fallbackDst && nodes[nodes.length - 1] !== fallbackDst) {
-    nodes.push(fallbackDst)
-  }
-  return nodes
+  const fromPerVnf = Array.isArray(cand?.per_vnf)
+    ? cand.per_vnf.map((p: any) => String(p?.node ?? '')).filter(Boolean)
+    : []
+  const core = fromPerVnf.length > 0
+    ? fromPerVnf
+    : (Array.isArray(cand?.deployed_nodes) ? cand.deployed_nodes.map((n: any) => String(n)).filter(Boolean) : [])
+  const seq = [fallbackSrc ?? '', ...core, fallbackDst ?? ''].filter(Boolean)
+  const dedup = seq.filter((n, idx) => idx === 0 || n !== seq[idx - 1])
+  if (dedup.length >= 2) return dedup
+  if (fallbackSrc && fallbackDst && fallbackSrc !== fallbackDst) return [fallbackSrc, fallbackDst]
+  return fallbackSrc ? [fallbackSrc] : []
 }
 
 function buildViolationDetails(
@@ -76,7 +69,6 @@ export default function CandidateModal() {
     addDeployment,
     setSatellites,
     setLinks,
-    topologyVersion,
     backendTopologySynced,
     satellites,
   } = useStore()
@@ -85,7 +77,19 @@ export default function CandidateModal() {
   const [showScoreInfo, setShowScoreInfo] = useState(false)
 
   if (!candidateResult) return null
-  const { requestId, sfcName, candidates, inferenceTime, scoringConfig, fallbackOnly, deployableCount, sourceNode, destinationNode } = candidateResult
+  const {
+    requestId,
+    sfcName,
+    candidates,
+    inferenceTime,
+    scoringConfig,
+    fallbackOnly,
+    deployableCount,
+    sourceNode,
+    destinationNode,
+    requestPayload,
+    sessionConfig,
+  } = candidateResult
   const cand = candidates[sel] ?? candidates[0]
   if (!cand) return null
 
@@ -129,11 +133,6 @@ export default function CandidateModal() {
       alert('后端拓扑未同步，已禁止部署。请先重新生成/导入星座并完成同步。')
       return
     }
-    if (candidateResult.topologyVersion !== topologyVersion) {
-      alert('当前候选方案对应旧星座，已失效。请重新提交请求生成新方案。')
-      setCandidateResult(null)
-      return
-    }
 
     if (!cand.satisfies_constraints) {
       const details = `\n\n不满足约束:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`
@@ -143,18 +142,57 @@ export default function CandidateModal() {
 
     setBusy(true)
     try {
-      const res = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
+      const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
+      const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
+      const deployResp = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
+      const backendDeploymentId = String(deployResp?.deployment_id ?? `dep-${Date.now()}`)
 
-      const ts = Date.now()
+      let sessionId = ''
+      try {
+        const sessionReq = {
+          ...(requestPayload ?? {
+            request_id: requestId,
+            topology_version: candidateResult.topologyVersion,
+            source_node: sourceNode,
+            destination_node: destinationNode,
+            vnfs: cand.per_vnf?.map((v: any) => ({
+              name: String(v.vnf ?? ''),
+              cpu: Number(v.cpu_used ?? 0),
+              mem: Number(v.mem_used ?? 0),
+              disk: Number(v.disk_used ?? 0),
+              bw_in: 0.1,
+              bw_out: 0.1,
+            })) ?? [],
+            constraints,
+            optimize: scoringConfig?.optimize ?? 'latency',
+            topk: candidateResult.requestedTopk ?? 1,
+          }),
+          request_id: requestId,
+          realtime_mode: true,
+          max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 18),
+          planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
+          initial_candidate: cand,
+        }
+        const sessionResp = await apiClient.startSFCSession({
+          auto_redeploy: Boolean(sessionConfig?.auto_redeploy ?? true),
+          request: sessionReq,
+        })
+        sessionId = String(sessionResp?.session_id ?? '')
+      } catch (e: any) {
+        alert(`初始部署成功，但连续编排会话启动失败: ${e?.message ?? e}`)
+      }
+
+      const deploymentId = sessionId ? `sess-deploy-${sessionId}` : backendDeploymentId
       addDeployment({
-        deployment_id: res.deployment_id || `dep-${ts}`,
+        deployment_id: deploymentId,
+        backend_deployment_id: backendDeploymentId,
         request_id: requestId,
         sfc_name: sfcName || requestId,
         candidate_index: sel,
         status: 'completed',
         source_node: sourceNode,
         destination_node: destinationNode,
-        path_nodes: buildPathNodesFromLinks(cand.link_details ?? [], sourceNode, destinationNode),
+        path_nodes: pathNodes,
         satisfies_constraints: !!cand.satisfies_constraints,
         violation_details: violationDetails,
         bottleneck_bandwidth_gbps: Number(cand.bottleneck_bandwidth_gbps ?? 0),
@@ -177,11 +215,13 @@ export default function CandidateModal() {
         score_constraints: constraints,
         deployed_nodes: cand.deployed_nodes ?? [],
         per_vnf: cand.per_vnf ?? [],
-        link_details: cand.link_details ?? [],
+        link_details: sanitizedLinks,
         total_latency_ms: cand.total_latency_ms ?? 0,
         inference_latency_ms: inferenceTime,
         deployed_at: new Date().toISOString(),
         progress: 100,
+        strategy_mode: sessionId ? 'session_continuous' : 'single_request',
+        session_id: sessionId || undefined,
       })
 
       try {

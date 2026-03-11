@@ -58,6 +58,84 @@ class SFCEnvironment:
         self.resource_snapshots = []
         return self._build_state()
 
+    def get_state(self) -> Optional[Dict]:
+        if self.sfc_request is None:
+            return None
+        if self.current_vnf_idx >= len(self.sfc_request.get("vnf_sequence", [])):
+            return None
+        return self._build_state()
+
+    def advance_topology(self, next_topology: nx.DiGraph, reapply_allocations: bool = True) -> Dict:
+        """推进到下一时刻拓扑，并尽量重放已部署资源占用。"""
+        self.topology = copy.deepcopy(next_topology)
+        if self.sfc_request is None:
+            self.original_topology = copy.deepcopy(next_topology)
+            return {"reapplied": 0, "dropped": 0}
+
+        if self.prev_node not in self.topology.nodes:
+            source = self.sfc_request.get("source_node")
+            self.prev_node = source if source in self.topology.nodes else next(iter(self.topology.nodes), None)
+
+        if not reapply_allocations or not self.deployed_vnfs:
+            self.resource_snapshots = []
+            return {"reapplied": len(self.deployed_vnfs), "dropped": 0}
+
+        valid_allocations = []
+        dropped = 0
+        for alloc in self.deployed_vnfs:
+            node = alloc.get("node")
+            path = alloc.get("path", [])
+            cpu_req = float(alloc.get("cpu_required", 0.0))
+            mem_req = float(alloc.get("mem_required", 0.0))
+            disk_req = float(alloc.get("disk_required_gb", 0.0))
+            bw_req = float(alloc.get("bandwidth_required_gbps", 0.0))
+
+            if node not in self.topology.nodes:
+                dropped += 1
+                continue
+
+            node_data = self.topology.nodes[node]
+            if (
+                float(node_data.get("cpu_available", 0.0)) < cpu_req
+                or float(node_data.get("mem_available", 0.0)) < mem_req
+                or float(node_data.get("disk_available", 0.0)) < disk_req
+            ):
+                dropped += 1
+                continue
+
+            path_ok = True
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                if not self.topology.has_edge(u, v):
+                    path_ok = False
+                    break
+                edge = self.topology[u][v]
+                if int(edge.get("link_status", 1)) == 0:
+                    path_ok = False
+                    break
+                if float(edge.get("bandwidth_available_gbps", 0.0)) < bw_req:
+                    path_ok = False
+                    break
+
+            if not path_ok:
+                dropped += 1
+                continue
+
+            node_data["cpu_available"] = float(node_data.get("cpu_available", 0.0)) - cpu_req
+            node_data["mem_available"] = float(node_data.get("mem_available", 0.0)) - mem_req
+            node_data["disk_available"] = float(node_data.get("disk_available", 0.0)) - disk_req
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                self.topology[u][v]["bandwidth_available_gbps"] = (
+                    float(self.topology[u][v].get("bandwidth_available_gbps", 0.0)) - bw_req
+                )
+
+            valid_allocations.append(alloc)
+
+        self.deployed_vnfs = valid_allocations
+        self.resource_snapshots = []
+        return {"reapplied": len(valid_allocations), "dropped": dropped}
+
     def _extract_sla(self):
         sla = self.sfc_request.get("sla", {})
         base_reliability_req = float(
@@ -252,6 +330,10 @@ class SFCEnvironment:
                 "path": path_to_node,
                 "delay": total_delay,
                 "path_reliability": path_rel,
+                "cpu_required": cpu_req,
+                "mem_required": mem_req,
+                "disk_required_gb": disk_req,
+                "bandwidth_required_gbps": bw_req,
             }
         )
 

@@ -18,6 +18,9 @@ TopologyManager::TopologyManager() {
     current_topology_.metadata.num_planes = 0;
     current_topology_.metadata.altitude_km = 0.0;
     current_topology_.metadata.inclination_deg = 0.0;
+    current_topology_.metadata.topology_version = 0;
+    current_topology_.metadata.sampling_interval_sec = 5.0;
+    current_topology_.metadata.sim_time = "";
     current_topology_.metadata.timestamp = "1970-01-01T00:00:00Z";
 }
 
@@ -38,6 +41,8 @@ Topology TopologyManager::generate_walker_delta(
     topo.metadata.num_planes = num_planes;
     topo.metadata.altitude_km = altitude_km;
     topo.metadata.inclination_deg = inclination_deg;
+    topo.metadata.topology_version = 0;
+    topo.metadata.sampling_interval_sec = 5.0;
     
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -66,6 +71,7 @@ Topology TopologyManager::generate_walker_delta(
             sat.orbital_params.raan = (360.0 / num_planes) * plane;
             sat.orbital_params.true_anomaly = (360.0 / sats_per_plane) * pos;
             sat.orbital_params.altitude_km = altitude_km;
+            sat.orbital_params.inclination_deg = inclination_deg;
             
             sat.coordinates = calculate_position(plane, pos, num_planes, sats_per_plane, altitude_km);
             
@@ -77,6 +83,8 @@ Topology TopologyManager::generate_walker_delta(
             sat.disk_available = sat.disk_total;
             sat.core_network_load = 0.5;
             sat.node_reliability = 0.98;
+            sat.status = "active";
+            sat.fault_tag.clear();
             
             topo.nodes.push_back(sat);
         }

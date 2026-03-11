@@ -22,4 +22,18 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/src/components/UI/MonitoringPage')) return 'monitoring'
+          if (id.includes('node_modules/@react-three') || id.includes('node_modules/three')) return 'three-core'
+          if (id.includes('node_modules/lucide-react')) return 'ui-icons'
+          if (id.includes('node_modules/react') || id.includes('node_modules/zustand') || id.includes('node_modules/axios')) {
+            return 'app-vendor'
+          }
+        },
+      },
+    },
+  },
 })

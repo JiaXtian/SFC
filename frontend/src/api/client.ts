@@ -15,8 +15,48 @@ class APIClient {
   }
   
   async getSatellites() { return (await http.get('/satellites')).data }
+
+  async getDynamicStatus() { return (await http.get('/topology/dynamic/status')).data }
+
+  async startDynamicSimulation(p: {
+    sampling_interval_sec?: number
+    simulation_speed?: number
+    enable_faults?: boolean
+    node_fault_prob_per_tick?: number
+    link_fault_prob_per_tick?: number
+  } = {}) {
+    return (await http.post('/topology/dynamic/start', p)).data
+  }
+
+  async stopDynamicSimulation() {
+    return (await http.post('/topology/dynamic/stop', {})).data
+  }
+
+  async stepDynamicSimulation() {
+    return (await http.post('/topology/dynamic/step', {})).data
+  }
   
   async planSFC(p: any) { return (await http.post('/sfc/plan', p, { timeout: 180000 })).data }
+
+  async startSFCSession(p: any) {
+    return (await http.post('/sfc/session/start', p, { timeout: 180000 })).data
+  }
+
+  async stopSFCSession(sessionId: string) {
+    return (await http.post('/sfc/session/stop', { session_id: sessionId })).data
+  }
+
+  async recomputeSFCSession(sessionId: string, trigger = 'manual') {
+    return (await http.post(`/sfc/session/${sessionId}/recompute`, { trigger })).data
+  }
+
+  async listSFCSessions() {
+    return (await http.get('/sfc/sessions')).data
+  }
+
+  async getSFCSession(sessionId: string) {
+    return (await http.get(`/sfc/session/${sessionId}`)).data
+  }
   
   async deploySFC(p: { 
     request_id: string; 

@@ -2,6 +2,7 @@
 #include <drogon/WebSocketController.h>
 #include <set>
 #include <mutex>
+#include <nlohmann/json.hpp>
 
 using namespace drogon;
 
@@ -19,15 +20,16 @@ public:
     void handleConnectionClosed(const WebSocketConnectionPtr& wsConnPtr) override;
     
     // 广播消息
-    void broadcast(const std::string& message);
+    static void broadcast(const std::string& message);
+    static void broadcast_json(const nlohmann::json& payload);
     
     WS_PATH_LIST_BEGIN
     WS_PATH_ADD("/ws/updates");
     WS_PATH_LIST_END
     
 private:
-    std::set<WebSocketConnectionPtr> connections_;
-    std::mutex connections_mutex_;
+    static std::set<WebSocketConnectionPtr> connections_;
+    static std::mutex connections_mutex_;
 };
 
 } // namespace sfc

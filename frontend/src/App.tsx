@@ -1,4 +1,4 @@
-import { Suspense, useMemo } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Stars } from '@react-three/drei'
 import Earth from './components/Earth/Earth'
@@ -9,12 +9,30 @@ import LeftPanel from './components/UI/LeftPanel'
 import RightPanel from './components/UI/RightPanel'
 import SatelliteDetail from './components/UI/SatelliteDetail'
 import LinkDetailPanel from './components/UI/LinkDetailPanel'
-import CandidateModal from './components/UI/CandidateModal'
 import BottomHub from './components/UI/BottomHub'
+import TimeAxis from './components/UI/TimeAxis'
 import { useStore } from './store/useStore'
+import { useWebSocket } from './hooks/useWebSocket'
+import { useAutoDynamics } from './hooks/useAutoDynamics'
+
+const CandidateModal = lazy(() => import('./components/UI/CandidateModal'))
+const MonitoringPage = lazy(() => import('./components/UI/MonitoringPage'))
 
 export default function App() {
+  useWebSocket()
+  useAutoDynamics()
   const { candidateResult, setSelectedSatellite, setSelectedLink, display } = useStore()
+  const [route, setRoute] = useState<'main' | 'monitor'>(() =>
+    window.location.pathname.startsWith('/monitor') ? 'monitor' : 'main'
+  )
+
+  useEffect(() => {
+    const onPop = () => {
+      setRoute(window.location.pathname.startsWith('/monitor') ? 'monitor' : 'main')
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
   const qualityConfig = useMemo(() => {
     if (display.renderQuality === 'performance') {
       return {
@@ -39,6 +57,14 @@ export default function App() {
       starCount: 7000,
     }
   }, [display.renderQuality])
+
+  if (route === 'monitor') {
+    return (
+      <Suspense fallback={<div className="w-screen h-screen bg-black" />}>
+        <MonitoringPage />
+      </Suspense>
+    )
+  }
 
   return (
     <div className="w-screen h-screen overflow-hidden"
@@ -98,7 +124,12 @@ export default function App() {
         <div className="pointer-events-auto"><SatelliteDetail /></div>
         <div className="pointer-events-auto"><LinkDetailPanel /></div>
         <div className="pointer-events-auto"><BottomHub /></div>
-        {candidateResult && <div className="pointer-events-auto"><CandidateModal /></div>}
+        <div className="pointer-events-auto"><TimeAxis /></div>
+        {candidateResult && (
+          <Suspense fallback={null}>
+            <div className="pointer-events-auto"><CandidateModal /></div>
+          </Suspense>
+        )}
       </div>
     </div>
   )

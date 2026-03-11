@@ -52,7 +52,15 @@ const StatusLabel: Record<string, [string, string]> = {
 }
 
 export default function DeploymentPanel() {
-  const { deployments, removeDeployment, highlightedDeploymentIds, toggleHighlightedDeployment, setSatellites, setLinks } = useStore()
+  const {
+    deployments,
+    removeDeployment,
+    highlightedDeploymentIds,
+    toggleHighlightedDeployment,
+    setSatellites,
+    setLinks,
+    suppressSessionDeployment,
+  } = useStore()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [expandedLinks, setExpandedLinks] = useState<Record<string, boolean>>({})
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
@@ -77,7 +85,14 @@ export default function DeploymentPanel() {
     setRolling(dep.deployment_id)
     setDeleteConfirm(null)
     try {
-      await apiClient.rollbackDeployment(dep.deployment_id)
+      const rollbackTarget = dep.backend_deployment_id || dep.deployment_id
+      await apiClient.rollbackDeployment(rollbackTarget)
+      if ((dep as any).session_id) {
+        try {
+          await apiClient.stopSFCSession((dep as any).session_id)
+        } catch {}
+        suppressSessionDeployment((dep as any).session_id)
+      }
       removeDeployment(dep.deployment_id)
       
       // 🔥 关键修改：刷新卫星资源状态
@@ -151,6 +166,11 @@ export default function DeploymentPanel() {
                   <span className="text-gray-600 font-mono">{dep.total_latency_ms?.toFixed(1)}ms</span>
                   <span className="text-gray-700">{new Date(dep.deployed_at).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}</span>
                 </div>
+                {typeof (dep as any).topology_version_bound === 'number' && (
+                  <div className="mt-1 text-[9px] text-indigo-300 font-mono">
+                    topo_v{(dep as any).topology_version_bound} · 路径重算 {(dep as any).path_recompute_count ?? 0} 次
+                  </div>
+                )}
                 {typeof dep.inference_latency_ms === 'number' && (
                   <div className="mt-1 text-[9px] text-cyan-300 font-mono">
                     推理时延 {dep.inference_latency_ms.toFixed(1)}ms
@@ -171,6 +191,11 @@ export default function DeploymentPanel() {
                   {dep.destination_node && (
                     <span className="px-1.5 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
                       出口 {dep.destination_node}
+                    </span>
+                  )}
+                  {(dep as any).strategy_mode === 'session_continuous' && (
+                    <span className="px-1.5 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(79,70,229,0.18)', border: '1px solid rgba(129,140,248,0.35)', color: '#c7d2fe' }}>
+                      会话连续编排 {(dep as any).session_id ?? ''}
                     </span>
                   )}
                   {dep.deployed_nodes.slice(0,4).map(n => (

@@ -127,6 +127,8 @@ export default function LeftPanel() {
     setCandidateResult,
     bumpTopologyVersion,
     setBackendTopologySynced,
+    setAutoDynamics,
+    setSimulationStatus,
   } = useStore()
   const [type, setType] = useState<ConstellationType>('starlink_v1')
   const [total, setTotal] = useState(72)
@@ -163,10 +165,30 @@ export default function LeftPanel() {
 
       setSatellites(sats as any)
       setLinks(links as any)
+      setAutoDynamics({
+        enabled: true,
+        playing: true,
+        elapsed_sec: 0,
+      })
 
       try {
         const topologyData = prepareTopologyForBackend(sats, links, type, planes)
         await apiClient.generateTopology(topologyData)
+        try {
+          const ad = useStore.getState().autoDynamics
+          await apiClient.startDynamicSimulation({
+            sampling_interval_sec: ad.resource_update_sec,
+            simulation_speed: ad.time_scale,
+            enable_faults: true,
+          })
+          setSimulationStatus({
+            running: true,
+            sampling_interval_sec: ad.resource_update_sec,
+            simulation_speed: ad.time_scale,
+          })
+        } catch (e) {
+          console.warn('动态仿真自动启动失败，将继续使用前端准实时动画模式', e)
+        }
         setBackendTopologySynced(true)
       } catch (err: any) {
         setBackendTopologySynced(false)
@@ -204,6 +226,11 @@ export default function LeftPanel() {
 
       setSatellites(parsed.satellites as any)
       setLinks(parsed.links as any)
+      setAutoDynamics({
+        enabled: true,
+        playing: true,
+        elapsed_sec: 0,
+      })
       clearHighlightedDeployments()
       setCandidateResult(null)
       bumpTopologyVersion()
@@ -222,6 +249,21 @@ export default function LeftPanel() {
           links: parsed.links,
         }
         await apiClient.generateTopology(topologyData)
+        try {
+          const ad = useStore.getState().autoDynamics
+          await apiClient.startDynamicSimulation({
+            sampling_interval_sec: ad.resource_update_sec,
+            simulation_speed: ad.time_scale,
+            enable_faults: true,
+          })
+          setSimulationStatus({
+            running: true,
+            sampling_interval_sec: ad.resource_update_sec,
+            simulation_speed: ad.time_scale,
+          })
+        } catch (e) {
+          console.warn('动态仿真自动启动失败，将继续使用前端准实时动画模式', e)
+        }
         setBackendTopologySynced(true)
         alert(`导入成功并通过校验：${parsed.satellites.length} 颗卫星，${parsed.links.length} 条链路。`)
       } catch (e) {
@@ -238,7 +280,7 @@ export default function LeftPanel() {
   }
 
   return (
-    <div className={`absolute left-0 top-11 bottom-11 z-10 flex transition-all duration-300 ${collapsed ? 'w-8' : 'w-[284px]'}`}>
+    <div className={`absolute left-0 top-11 bottom-11 z-10 flex transition-all duration-300 ${collapsed ? 'w-8' : 'w-[268px]'}`}>
       <button
         onClick={() => setCollapsed(!collapsed)}
         className="absolute -right-3 top-5 w-6 h-6 rounded-full flex items-center justify-center z-20 shadow-lg transition-colors"
@@ -257,12 +299,14 @@ export default function LeftPanel() {
             boxShadow: 'inset -1px 0 0 rgba(103,164,209,0.12), inset -30px 0 60px rgba(34,99,152,0.08)',
           }}
         >
-          <div className="px-3 py-2.5" style={{ borderBottom: '1px solid rgba(95, 128, 156, 0.2)' }}>
-            <div className="text-xs font-bold text-slate-100 uppercase tracking-wider">星座构建</div>
-            <div className="text-[10px] text-slate-400 mt-0.5">星座参数化构型规划接入</div>
+          <div className="px-3 py-2" style={{ borderBottom: '1px solid rgba(95, 128, 156, 0.2)' }}>
+            <div>
+              <div className="text-xs font-bold text-slate-100 uppercase tracking-wider">星座构建</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">星座参数化构型规划接入</div>
+            </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-2.5">
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
             <div>
               <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 uppercase tracking-wide">星座构型</label>
               <select
@@ -325,18 +369,17 @@ export default function LeftPanel() {
               </div>
             </div>
 
-              <div className="space-y-1.5">
+            <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[10px] font-semibold text-slate-400 mb-1 uppercase tracking-wide">卫星总数</label>
                 <input
                   type="number"
                   value={total}
-                  min={0}
-                  max={9999}
+                  min={24}
+                  max={6000}
                   step={1}
-                  onChange={e => setTotal(Math.max(0, Math.min(9999, parseInt(e.target.value) || 0)))}
-                  className="w-full px-2.5 py-1.5 rounded-lg text-sm font-mono text-slate-100 transition"
-                  style={{ background: 'rgba(19,29,45,0.8)', border: '1px solid rgba(112, 140, 166, 0.26)' }}
+                  onChange={e => setTotal(Math.max(24, Math.min(6000, parseInt(e.target.value) || 24)))}
+                  className="w-full h-8 px-2 rounded-lg text-sm font-semibold text-cyan-100 bg-black/30 border border-slate-700/80 outline-none"
                 />
               </div>
               <div>
@@ -345,29 +388,27 @@ export default function LeftPanel() {
                   type="number"
                   value={planes}
                   min={1}
-                  max={50}
+                  max={72}
+                  step={1}
                   onChange={e => setPlanes(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-full px-2.5 py-1.5 rounded-lg text-sm font-mono text-slate-100 transition"
-                  style={{ background: 'rgba(19,29,45,0.8)', border: '1px solid rgba(112, 140, 166, 0.26)' }}
+                  className="w-full h-8 px-2 rounded-lg text-sm font-semibold text-sky-100 bg-black/30 border border-slate-700/80 outline-none"
                 />
               </div>
-
-              <div
-                className="rounded-xl px-2.5 py-1.5 text-center"
-                style={{ background: 'rgba(26, 85, 119, 0.2)', border: '1px solid rgba(88, 153, 194, 0.38)' }}
-              >
-                <div className="text-[9px] text-cyan-300 font-semibold mb-0.5">构型规模预估</div>
-                <div className="text-2xl font-bold text-cyan-100 leading-tight">{actual}</div>
-                <div className="text-[10px] text-slate-300 mt-0.5">{satsPerPlaneMin}~{satsPerPlaneMax} 颗/面 × {planes} 面</div>
-              </div>
             </div>
-          </div>
 
-          <div className="p-2.5" style={{ borderTop: '1px solid rgba(95, 128, 156, 0.2)' }}>
+            <div
+              className="rounded-xl px-2.5 py-1.5 text-center"
+              style={{ background: 'rgba(26, 85, 119, 0.2)', border: '1px solid rgba(88, 153, 194, 0.38)' }}
+            >
+              <div className="text-[9px] text-cyan-300 font-semibold mb-0.5">构型规模预估</div>
+              <div className="text-2xl font-bold text-cyan-100 leading-tight">{actual}</div>
+              <div className="text-[10px] text-slate-300 mt-0.5">{satsPerPlaneMin}~{satsPerPlaneMax} 颗/面 × {planes} 面</div>
+            </div>
+
             <button
               onClick={handleGenerate}
               disabled={loading}
-              className="w-full py-2.5 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 transition shadow-lg"
+              className="w-full py-2 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 transition shadow-lg mt-2"
               style={{ background: loading ? 'rgba(50,50,60,0.8)' : 'linear-gradient(135deg, #12345a 0%, #0f233b 100%)' }}
             >
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />

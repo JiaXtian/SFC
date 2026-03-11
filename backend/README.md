@@ -9,6 +9,7 @@
 - ✅ 资源管理和分配
 - ✅ RESTful API（Drogon框架）
 - ✅ WebSocket实时推送
+- ✅ 动态拓扑仿真（可配置1~30s采样周期）
 - ✅ 线程安全的资源管理
 - ✅ 完整的错误处理
 
@@ -125,6 +126,23 @@ curl -X POST http://localhost:8080/api/v1/sfc/plan \
 ```
 
 完整API文档见项目根目录的 `docs/API.md`
+
+### 动态仿真控制
+```bash
+# 启动动态仿真（默认5s）
+curl -X POST http://localhost:8080/api/v1/topology/dynamic/start \
+  -H "Content-Type: application/json" \
+  -d '{"sampling_interval_sec":5,"simulation_speed":1.0,"enable_faults":true}'
+
+# 单步推进
+curl -X POST http://localhost:8080/api/v1/topology/dynamic/step
+
+# 查看状态
+curl http://localhost:8080/api/v1/topology/dynamic/status
+
+# 停止
+curl -X POST http://localhost:8080/api/v1/topology/dynamic/stop
+```
 
 ## 🧪 测试
 

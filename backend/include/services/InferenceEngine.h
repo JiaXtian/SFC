@@ -18,7 +18,8 @@ public:
     
     std::vector<DeploymentCandidate> inference(
         const SFCRequest& request,
-        const Topology& topology
+        const Topology& topology,
+        nlohmann::json* decision_trace = nullptr
     );
     
 private:
@@ -43,7 +44,8 @@ private:
     
     std::vector<DeploymentCandidate> generate_gha_drl_candidates(
         const SFCRequest& request,
-        const Topology& topology
+        const Topology& topology,
+        nlohmann::json* decision_trace = nullptr
     );
     
     DeploymentCandidate generate_single_deployment(
@@ -51,7 +53,8 @@ private:
         const Topology& topology,
         int seed,
         const std::vector<float>& node_embeddings,
-        const std::unordered_map<std::string, int64_t>& node_id_to_idx
+        const std::unordered_map<std::string, int64_t>& node_id_to_idx,
+        nlohmann::json* candidate_trace = nullptr
     );
     
     std::vector<std::string> filter_candidate_nodes(

@@ -74,6 +74,15 @@ void TopologyController::generateTopology(
             topology.metadata.num_planes = num_planes;
             topology.metadata.altitude_km = altitude;
             topology.metadata.inclination_deg = inclination;
+            topology.metadata.topology_version = json->isMember("metadata")
+                ? (*json)["metadata"].get("topology_version", 0).asInt()
+                : 0;
+            topology.metadata.sampling_interval_sec = json->isMember("metadata")
+                ? (*json)["metadata"].get("sampling_interval_sec", 5.0).asDouble()
+                : 5.0;
+            topology.metadata.sim_time = json->isMember("metadata")
+                ? (*json)["metadata"].get("sim_time", "").asString()
+                : "";
             topology.metadata.timestamp = json->isMember("metadata")
                 ? (*json)["metadata"].get("timestamp", "").asString()
                 : "";
@@ -99,6 +108,7 @@ void TopologyController::generateTopology(
                     sat.orbital_params.raan = op.get("raan", 0.0).asDouble();
                     sat.orbital_params.true_anomaly = op.get("true_anomaly", 0.0).asDouble();
                     sat.orbital_params.altitude_km = op.get("altitude_km", altitude).asDouble();
+                    sat.orbital_params.inclination_deg = op.get("inclination_deg", op.get("inclination", inclination).asDouble()).asDouble();
                     max_plane_idx = std::max(max_plane_idx, sat.orbital_params.plane);
                 }
 
@@ -125,6 +135,8 @@ void TopologyController::generateTopology(
                 );
                 sat.core_network_load = n.get("core_network_load", 1.0 - resource_health).asDouble();
                 sat.node_reliability = n.get("node_reliability", 0.985 + 0.014 * resource_health).asDouble();
+                sat.status = n.get("status", "active").asString();
+                sat.fault_tag = n.get("fault_tag", "").asString();
                 sat.core_network_load = std::max(0.0, std::min(1.0, sat.core_network_load));
                 sat.node_reliability = std::max(0.7, std::min(0.999, sat.node_reliability));
 
@@ -175,6 +187,7 @@ void TopologyController::generateTopology(
         response["topology_id"] = "topo_" + topology.metadata.timestamp;
         response["topology_summary"]["total_nodes"] = static_cast<int>(topology.nodes.size());
         response["topology_summary"]["total_links"] = static_cast<int>(topology.links.size());
+        response["dynamic_status"] = nlohmann_to_jsoncpp(g_dynamic_sim->status_json());
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);
@@ -184,6 +197,107 @@ void TopologyController::generateTopology(
         Json::Value error;
         error["code"] = 500;
         error["message"] = "Failed to generate topology";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void TopologyController::startDynamicSimulation(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto json = req->getJsonObject();
+        const double interval_sec = json ? (*json).get("sampling_interval_sec", 5.0).asDouble() : 5.0;
+        const double sim_speed = json ? (*json).get("simulation_speed", 1.0).asDouble() : 1.0;
+        const bool enable_faults = json ? (*json).get("enable_faults", true).asBool() : true;
+        const double node_fault_prob = json ? (*json).get("node_fault_prob_per_tick", 0.0002).asDouble() : 0.0002;
+        const double link_fault_prob = json ? (*json).get("link_fault_prob_per_tick", 0.0005).asDouble() : 0.0005;
+
+        const bool started = g_dynamic_sim->start(
+            interval_sec,
+            sim_speed,
+            enable_faults,
+            node_fault_prob,
+            link_fault_prob
+        );
+
+        Json::Value response;
+        response["started"] = started;
+        response["status"] = nlohmann_to_jsoncpp(g_dynamic_sim->status_json());
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to start dynamic simulation: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "Failed to start dynamic simulation";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void TopologyController::stopDynamicSimulation(
+    const HttpRequestPtr&,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        g_dynamic_sim->stop();
+        Json::Value response;
+        response["stopped"] = true;
+        response["status"] = nlohmann_to_jsoncpp(g_dynamic_sim->status_json());
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to stop dynamic simulation: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "Failed to stop dynamic simulation";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void TopologyController::stepDynamicSimulation(
+    const HttpRequestPtr&,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        const auto snapshot = g_dynamic_sim->step_once();
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(snapshot.to_json()));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to step dynamic simulation: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "Failed to step dynamic simulation";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void TopologyController::getDynamicSimulationStatus(
+    const HttpRequestPtr&,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto resp = HttpResponse::newHttpJsonResponse(
+            nlohmann_to_jsoncpp(g_dynamic_sim->status_json())
+        );
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to get dynamic simulation status: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "Failed to get dynamic simulation status";
         error["details"] = e.what();
         auto resp = HttpResponse::newHttpJsonResponse(error);
         resp->setStatusCode(k500InternalServerError);

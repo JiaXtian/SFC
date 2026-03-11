@@ -6,7 +6,7 @@ import { useStore } from '@/store/useStore'
 
 export default function RightPanel() {
   const [collapsed, setCollapsed] = useState(false)
-  const [tab, setTab] = useState<'sfc'|'deploy'>('sfc')
+  const [tab, setTab] = useState<'sfc' | 'deploy'>('sfc')
   const { deployments } = useStore()
 
   return (
@@ -20,12 +20,12 @@ export default function RightPanel() {
       {!collapsed && (
         <div className="w-full flex flex-col" style={{ background: 'linear-gradient(180deg, rgba(4,8,14,0.95) 0%, rgba(6,12,21,0.92) 55%, rgba(9,20,33,0.9) 100%)', borderLeft: '1px solid rgba(87, 126, 160, 0.24)', backdropFilter: 'blur(12px)', boxShadow: 'inset 1px 0 0 rgba(103,164,209,0.12), inset 30px 0 60px rgba(34,99,152,0.08)' }}>
           <div className="flex items-stretch" style={{ borderBottom: '1px solid rgba(95, 128, 156, 0.2)' }}>
-            {(['sfc','deploy'] as const).map(t => (
+            {(['sfc', 'deploy'] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold transition relative"
                 style={{ color: tab === t ? '#7dd3fc' : '#64748b' }}>
                 {t === 'sfc' ? <Layers className="w-3.5 h-3.5" /> : <List className="w-3.5 h-3.5" />}
-                {t === 'sfc' ? 'SFC 请求' : (
+                {t === 'sfc' ? 'SFC 请求' : t === 'deploy' ? (
                   <span className="flex items-center gap-1">
                     部署列表
                     {deployments.length > 0 && (
@@ -33,7 +33,7 @@ export default function RightPanel() {
                         style={{ background: '#0f3460', color: '#fff' }}>{deployments.length}</span>
                     )}
                   </span>
-                )}
+                ) : '部署列表'}
                 {tab === t && (
                   <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: '#38bdf8' }} />
                 )}
@@ -41,11 +41,12 @@ export default function RightPanel() {
             ))}
           </div>
 
-          {tab === 'sfc' ? (
+          {tab === 'sfc' && (
             <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
               <SFCForm />
             </div>
-          ) : (
+          )}
+          {tab === 'deploy' && (
             <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
               <DeploymentPanel />
             </div>
