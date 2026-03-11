@@ -176,6 +176,7 @@ export default function Links() {
     const active = new Set(highlightedDeploymentIds)
     deployments.forEach((dep: any) => {
       if (!active.has(dep.deployment_id)) return
+      if (dep.satisfies_constraints === false || dep.status === 'failed') return
       const transitionUntil = Number(dep.path_transition_until ?? 0)
       const inTransition = transitionUntil > nowMs
       const remain = inTransition ? Math.max(0, Math.min(1, (transitionUntil - nowMs) / 900)) : 0

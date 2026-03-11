@@ -3,7 +3,7 @@ import { X, CheckCircle, XCircle, Clock, Server, Zap, ChevronRight, Gauge, Info 
 import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
-import { buildRuntimeTopologyPayload } from '@/utils/topologySync'
+import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
 
 function sanitizeLinkDetails(linkDetails: any[]): any[] {
   if (!Array.isArray(linkDetails)) return []
@@ -40,11 +40,13 @@ function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackD
   return fallbackSrc ? [fallbackSrc] : []
 }
 
-function buildViolationDetails(
+  function buildViolationDetails(
   cand: any,
   constraints: { max_latency_ms: number; min_bandwidth_gbps: number; min_reliability: number }
 ): string[] {
-  if (Array.isArray(cand?.violation_details) && cand.violation_details.length > 0) return cand.violation_details
+  if (Array.isArray(cand?.violation_details) && cand.violation_details.length > 0) {
+    return toChineseFailureList(cand.violation_details)
+  }
   const reasons: string[] = []
   const latency = Number(cand?.total_latency_ms ?? 0)
   const bw = Number(cand?.bottleneck_bandwidth_gbps ?? 0)
@@ -58,7 +60,7 @@ function buildViolationDetails(
   if (constraints.min_reliability > 0 && rel < constraints.min_reliability) {
     reasons.push(`可靠性不足: ${rel.toFixed(4)} < ${constraints.min_reliability.toFixed(4)}`)
   }
-  if (reasons.length === 0 && cand?.reason) reasons.push(String(cand.reason))
+  if (reasons.length === 0 && cand?.reason) reasons.push(toChineseFailureText(String(cand.reason)))
   if (reasons.length === 0) reasons.push('后端未返回详细原因，可能由节点资源、链路约束或策略兼容性导致')
   return reasons
 }
@@ -72,8 +74,6 @@ export default function CandidateModal() {
     setLinks,
     backendTopologySynced,
     satellites,
-    links,
-    simulation,
   } = useStore()
   const [sel, setSel] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -148,19 +148,6 @@ export default function CandidateModal() {
     deployingRef.current = true
     setBusy(true)
     try {
-      try {
-        await apiClient.generateTopology(buildRuntimeTopologyPayload(
-          satellites as any,
-          links as any,
-          simulation.sim_time
-        ))
-      } catch (syncErr: any) {
-        alert(`部署前同步动态拓扑失败：${syncErr?.message ?? syncErr}`)
-        setBusy(false)
-        deployingRef.current = false
-        return
-      }
-
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
       const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
       const deployResp = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
@@ -198,7 +185,7 @@ export default function CandidateModal() {
         })
         sessionId = String(sessionResp?.session_id ?? '')
       } catch (e: any) {
-        alert(`初始部署成功，但连续编排会话启动失败: ${e?.message ?? e}`)
+        alert(`初始部署成功，但连续编排会话启动失败: ${toChineseFailureText(e?.message ?? e)}`)
       }
 
       const deploymentId = sessionId ? `sess-deploy-${sessionId}` : backendDeploymentId
@@ -254,7 +241,7 @@ export default function CandidateModal() {
 
       setCandidateResult(null)
     } catch (e: any) {
-      alert(`部署失败: ${e.message ?? e}`)
+      alert(`部署失败: ${toChineseFailureText(e.message ?? e)}`)
     }
     setBusy(false)
     deployingRef.current = false
@@ -317,7 +304,7 @@ export default function CandidateModal() {
             ) : (
               <>
                 <XCircle className="w-4 h-4 text-red-400" />
-                <span className="text-red-400 font-medium">{cand.reason ?? '不满足'}</span>
+                <span className="text-red-400 font-medium">{toChineseFailureText(cand.reason ?? '不满足')}</span>
               </>
             )}
           </div>

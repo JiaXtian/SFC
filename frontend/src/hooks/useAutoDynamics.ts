@@ -226,6 +226,7 @@ export function useAutoDynamics() {
   const recomputeCooldownRef = useRef<Record<string, number>>({})
   const recomputeInFlightRef = useRef<Set<string>>(new Set())
   const endpointAlertCooldownRef = useRef<Record<string, number>>({})
+  const slaViolationStreakRef = useRef<Record<string, number>>({})
   const topoSyncBeforeRecomputeRef = useRef<number>(0)
   const topoSyncBeforeRecomputeInFlightRef = useRef(false)
 
@@ -330,6 +331,37 @@ export function useAutoDynamics() {
             }
           }
         }
+        if (!reason) {
+          const cons: any = dep?.score_constraints ?? null
+          const routeLinks = Array.isArray(dep?.link_details) ? dep.link_details : []
+          if (cons && routeLinks.length > 0) {
+            const maxLatency = Number(cons.max_latency_ms ?? 0)
+            const minBw = Number(cons.min_bandwidth_gbps ?? 0)
+            const minRel = Number(cons.min_reliability ?? 0)
+            const latency = routeLinks.reduce((acc: number, l: any) => acc + Number(l?.latency_ms ?? 0), 0)
+            let bottleneckBw = Number.POSITIVE_INFINITY
+            let reliability = 1
+            routeLinks.forEach((l: any) => {
+              bottleneckBw = Math.min(bottleneckBw, Number(l?.bandwidth_available_gbps ?? l?.bandwidth_gbps ?? 0))
+              reliability *= Math.max(1e-9, Math.min(1, Number(l?.reliability ?? 0.999)))
+            })
+            deployedNodes.forEach((nodeId: string) => {
+              reliability *= Math.max(1e-9, Math.min(1, Number(satMap.get(nodeId)?.node_reliability ?? 0.998)))
+            })
+            const violated =
+              (maxLatency > 0 && latency > maxLatency * 1.12) ||
+              (minBw > 0 && Number.isFinite(bottleneckBw) && bottleneckBw < minBw * 0.95) ||
+              (minRel > 0 && reliability < minRel * 0.995)
+            const nextStreak = violated ? (slaViolationStreakRef.current[sessionId] ?? 0) + 1 : 0
+            slaViolationStreakRef.current[sessionId] = nextStreak
+            if (violated && nextStreak >= 3) {
+              reason = 'sla_hard_violation'
+              notify = '检测到硬约束持续不满足（时延/带宽/可靠性），触发必要重调度'
+            }
+          } else {
+            slaViolationStreakRef.current[sessionId] = 0
+          }
+        }
         if (!reason) return
 
         const last = recomputeCooldownRef.current[sessionId] ?? 0
@@ -368,10 +400,10 @@ export function useAutoDynamics() {
           const lastPopup = endpointAlertCooldownRef.current[sessionId] ?? 0
           if (now - lastPopup > 12000) {
             endpointAlertCooldownRef.current[sessionId] = now
-            window.alert(`会话 ${sessionId} 需要重调度\n原因：${notify}`)
+            window.alert(`SFC ${sessionId} 需要重调度\n原因：${notify}`)
           }
         } else {
-          useStore.getState().addToast(`会话 ${sessionId}: ${notify}`, 'warning')
+          useStore.getState().addToast(`SFC ${sessionId}: ${notify}`, 'warning')
         }
 
         recomputeInFlightRef.current.add(sessionId)
@@ -583,7 +615,7 @@ export function useAutoDynamics() {
               ? 0
               : (bwAvailPrev > 0 ? Math.min(bwAvailPrev, bwTotal) : bwTotal * 0.85)
             const distFactor = clamp(0, 1, 1 - d / Math.max(1e-6, range))
-            const reliability = clamp(0.7, 0.999, 0.92 + 0.07 * distFactor)
+            const reliability = clamp(0.95, 0.9997, 0.985 + 0.014 * distFactor)
 
             const prevExists = !!prev
             if (!prevExists || nextStatus !== String(prev?.status ?? '') || linkType !== String(prev?.link_type ?? '')) {

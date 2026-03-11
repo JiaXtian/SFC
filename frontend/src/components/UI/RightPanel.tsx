@@ -11,8 +11,12 @@ export default function RightPanel() {
 
   return (
     <div
-      className="absolute right-0 top-11 bottom-11 z-10 flex transition-all duration-300"
-      style={{ width: collapsed ? 32 : 'clamp(320px, 22vw, 470px)' }}
+      className="absolute right-0 z-10 flex transition-all duration-300"
+      style={{
+        top: 'calc(44px * var(--ui-scale, 1))',
+        bottom: 'calc(44px * var(--ui-scale, 1))',
+        width: collapsed ? 32 : 'clamp(320px, 22vw, 470px)',
+      }}
     >
       <button onClick={() => setCollapsed(!collapsed)}
         className="absolute -left-3 top-5 w-6 h-6 rounded-full flex items-center justify-center z-20 shadow-lg"
@@ -21,7 +25,7 @@ export default function RightPanel() {
       </button>
 
       {!collapsed && (
-        <div className="w-full flex flex-col" style={{ background: 'linear-gradient(180deg, rgba(4,8,14,0.95) 0%, rgba(6,12,21,0.92) 55%, rgba(9,20,33,0.9) 100%)', borderLeft: '1px solid rgba(87, 126, 160, 0.24)', backdropFilter: 'blur(12px)', boxShadow: 'inset 1px 0 0 rgba(103,164,209,0.12), inset 30px 0 60px rgba(34,99,152,0.08)' }}>
+        <div className="w-full min-w-0 flex flex-col overflow-hidden" style={{ background: 'linear-gradient(180deg, rgba(4,8,14,0.95) 0%, rgba(6,12,21,0.92) 55%, rgba(9,20,33,0.9) 100%)', borderLeft: '1px solid rgba(87, 126, 160, 0.24)', backdropFilter: 'blur(16px)', boxShadow: 'inset 1px 0 0 rgba(103,164,209,0.12), inset 30px 0 60px rgba(34,99,152,0.08)' }}>
           <div className="flex items-stretch" style={{ borderBottom: '1px solid rgba(95, 128, 156, 0.2)' }}>
             {(['sfc', 'deploy'] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}

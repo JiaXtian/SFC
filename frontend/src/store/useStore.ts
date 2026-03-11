@@ -831,7 +831,12 @@ export const useStore = create<Store>((set, get) => ({
     const hasExisting = !!existing
     const deployments = hasExisting
       ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
-      : [rebuilt, ...s.deployments]
+      : [
+          rebuilt,
+          ...s.deployments.filter((dep) =>
+            !(dep.request_id === trace.request_id && !dep.session_id)
+          ),
+        ]
 
     const highlighted = s.highlightedDeploymentIds.includes(depId)
       ? s.highlightedDeploymentIds

@@ -210,7 +210,12 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.constraints.min_bandwidth_gbps = std::max(0.01, request.constraints.min_bandwidth_gbps);
     request.constraints.min_reliability = std::max(0.72, std::min(0.995, request.constraints.min_reliability));
 
-    const double reliability_cap = request.vnfs.size() >= 4 ? 0.95 : 0.97;
+    double reliability_cap = 0.95;
+    if (request.vnfs.size() >= 4) {
+        reliability_cap = 0.90;
+    } else if (request.vnfs.size() >= 2) {
+        reliability_cap = 0.93;
+    }
     if (request.constraints.min_reliability > reliability_cap) {
         spdlog::warn(
             "Request {} reliability {:.4f} too strict for {} VNFs, capped to {:.4f}",

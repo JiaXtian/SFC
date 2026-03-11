@@ -89,6 +89,7 @@ export default function App() {
   return (
     <div className="w-screen h-screen overflow-hidden"
       style={{
+        ['--ui-scale' as any]: uiScale,
         background:
           'radial-gradient(1200px 520px at 50% 110%, rgba(24,72,115,0.32) 0%, rgba(3,8,16,0.8) 42%, #010206 76%, #000000 100%)',
         fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif',
@@ -140,8 +141,7 @@ export default function App() {
       <div
         className="absolute inset-0 pointer-events-none"
         style={{
-          ['--ui-scale' as any]: uiScale,
-          zIndex: 10,
+          zIndex: 12,
           transform: `scale(${uiScale})`,
           transformOrigin: 'top left',
           width: `${100 / uiScale}%`,

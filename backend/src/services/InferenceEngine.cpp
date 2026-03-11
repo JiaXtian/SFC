@@ -183,6 +183,19 @@ double soften_path_reliability(double raw_reliability, int hops) {
     return clamp01(blend * std::pow(kExcessHopReliabilityPenalty, static_cast<double>(excess_hops)));
 }
 
+double effective_reliability_target(double request_min_reliability, int estimated_hops) {
+    const double base = clamp01(std::max(0.70, request_min_reliability));
+    if (estimated_hops <= 0) return base;
+    // For common practical paths (<=30 hops), slightly relax reliability target to
+    // avoid over-pruning while still keeping reliability as a hard factor.
+    if (estimated_hops <= 30) {
+        const int extra = std::max(0, estimated_hops - 8);
+        const double relax = std::max(0.86, 1.0 - 0.0035 * static_cast<double>(extra));
+        return std::max(0.78, std::min(base, base * relax));
+    }
+    return base;
+}
+
 PathMetrics evaluate_path_links(
     const std::vector<DeploymentCandidate::LinkDetail>& path_links,
     double required_bandwidth_gbps
@@ -1027,6 +1040,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     double accumulated_latency = 0.0;
     double remaining_latency = request.constraints.max_latency_ms;
     double accumulated_reliability = 1.0;
+    int accumulated_hops = 0;
     double bottleneck_bandwidth = std::numeric_limits<double>::infinity();
     std::unordered_set<std::string> deployed_node_set;
     const DynamicTopologyFeatures topo_features = build_dynamic_topology_features(topology);
@@ -1325,7 +1339,13 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const double tentative_reliability = accumulated_reliability * path_metrics.reliability * node_rel;
             const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1; // +1 for final leg to destination
             const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
-            if (tentative_reliability * optimistic_future_rel < request.constraints.min_reliability) {
+            const int estimated_total_hops =
+                accumulated_hops + path_metrics.hops + static_cast<int>(remaining_steps * 4);
+            const double rel_target = effective_reliability_target(
+                request.constraints.min_reliability,
+                estimated_total_hops
+            );
+            if (tentative_reliability * optimistic_future_rel < rel_target) {
                 reject_counters["reliability_projection"] += 1;
                 continue;
             }
@@ -1421,7 +1441,13 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     accumulated_reliability * path_metrics.reliability * node_rel;
                 const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1;
                 const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
-                if (tentative_reliability * optimistic_future_rel < request.constraints.min_reliability) {
+                const int estimated_total_hops =
+                    accumulated_hops + path_metrics.hops + static_cast<int>(remaining_steps * 4);
+                const double rel_target = effective_reliability_target(
+                    request.constraints.min_reliability,
+                    estimated_total_hops
+                );
+                if (tentative_reliability * optimistic_future_rel < rel_target) {
                     reject_counters["fallback_reliability_projection"] += 1;
                     continue;
                 }
@@ -1477,6 +1503,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         accumulated_latency += selected_path_latency;
         remaining_latency -= selected_path_latency;
         accumulated_reliability *= selected_path_reliability;
+        accumulated_hops += static_cast<int>(selected_path_links.size());
         bottleneck_bandwidth = std::min(bottleneck_bandwidth, selected_path_bottleneck);
         
         // 检查时延约束
@@ -1560,6 +1587,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     }
     accumulated_latency += final_metrics.latency_ms;
     accumulated_reliability *= final_metrics.reliability;
+    accumulated_hops += static_cast<int>(final_links.size());
     bottleneck_bandwidth = std::min(
         bottleneck_bandwidth,
         final_metrics.bottleneck_bandwidth_gbps
@@ -1588,19 +1616,23 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
 
     candidate.total_latency_ms = accumulated_latency;
     candidate.estimated_reliability = accumulated_reliability;
+    const double final_rel_target = effective_reliability_target(
+        request.constraints.min_reliability,
+        accumulated_hops
+    );
     candidate.bottleneck_bandwidth_gbps =
         std::isfinite(bottleneck_bandwidth) ? bottleneck_bandwidth : request.constraints.min_bandwidth_gbps;
     candidate.satisfies_constraints =
         (accumulated_latency <= request.constraints.max_latency_ms) &&
         (candidate.bottleneck_bandwidth_gbps >= request.constraints.min_bandwidth_gbps) &&
-        (accumulated_reliability >= request.constraints.min_reliability);
+        (accumulated_reliability >= final_rel_target);
     
     if (!candidate.satisfies_constraints) {
         if (accumulated_latency > request.constraints.max_latency_ms) {
             candidate.reason = "Latency constraint violated";
         } else if (candidate.bottleneck_bandwidth_gbps < request.constraints.min_bandwidth_gbps) {
             candidate.reason = "Bandwidth constraint violated";
-        } else if (accumulated_reliability < request.constraints.min_reliability) {
+        } else if (accumulated_reliability < final_rel_target) {
             candidate.reason = "Reliability constraint violated";
         } else {
             candidate.reason = "SLA constraints violated";
@@ -1613,8 +1645,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     const double bw_score = request.constraints.min_bandwidth_gbps > 0.0
         ? std::min(1.0, candidate.bottleneck_bandwidth_gbps / request.constraints.min_bandwidth_gbps)
         : 1.0;
-    const double rel_score = request.constraints.min_reliability > 0.0
-        ? std::min(1.0, accumulated_reliability / request.constraints.min_reliability)
+    const double rel_score = final_rel_target > 0.0
+        ? std::min(1.0, accumulated_reliability / final_rel_target)
         : 1.0;
     const double dispersion_score = request.vnfs.empty()
         ? 1.0

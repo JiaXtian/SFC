@@ -36,6 +36,7 @@ export default function Satellites() {
     const nodes = new Set<string>()
     deployments.forEach(dep => {
       if (!active.has(dep.deployment_id)) return
+      if (dep.satisfies_constraints === false) return
       dep.deployed_nodes.forEach(nodeId => nodes.add(nodeId))
     })
     return nodes

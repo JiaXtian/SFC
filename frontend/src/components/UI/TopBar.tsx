@@ -1,18 +1,25 @@
 import { useState } from 'react'
-import { Activity, Settings, Satellite } from 'lucide-react'
+import { Activity, Settings, Satellite, Info, ChevronDown } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import SettingsModal from './SettingsModal'
 
 export default function TopBar() {
   const [open, setOpen] = useState(false)
-  const { satellites, links, deployments, simulation, autoDynamics } = useStore()
+  const [aboutOpen, setAboutOpen] = useState(false)
+  const { satellites, links, deployments, simulation } = useStore()
   const orch = simulation.orchestration
-  const dynamicActive = simulation.running || (autoDynamics.enabled && autoDynamics.playing)
   const gotoMonitorPage = () => {
     if (window.location.pathname === '/monitor') return
     window.history.pushState({}, '', '/monitor')
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
+  const iconBtnStyle = {
+    color: 'rgba(186,230,253,0.92)',
+    background: 'transparent',
+    border: 'none',
+    boxShadow: 'none',
+    backdropFilter: 'none',
+  } as const
 
   return (
     <>
@@ -54,12 +61,6 @@ export default function TopBar() {
             <span className="text-violet-300 font-semibold">{deployments.length}</span>
             <span className="text-violet-300/70">SFC 部署</span>
           </div>
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
-            style={{ background: dynamicActive ? 'rgba(16,185,129,0.12)' : 'rgba(100,116,139,0.12)', border: '1px solid rgba(148,163,184,0.25)' }}>
-            <div className={`w-1.5 h-1.5 rounded-full ${dynamicActive ? 'bg-emerald-300 animate-pulse' : 'bg-slate-400'}`} />
-            <span className={dynamicActive ? 'text-emerald-300 font-semibold' : 'text-slate-400 font-semibold'}>{dynamicActive ? '动态中' : '静态'}</span>
-            <span className="text-slate-300/70">v{simulation.topology_version || 0}</span>
-          </div>
           {orch && (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
               style={{ background: 'rgba(14,116,144,0.14)', border: '1px solid rgba(34,211,238,0.28)' }}>
@@ -78,17 +79,55 @@ export default function TopBar() {
           )}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5 relative">
           <button
             onClick={gotoMonitorPage}
-            className="h-8 px-2.5 rounded-lg text-[11px] font-semibold text-cyan-100 inline-flex items-center gap-1"
-            style={{ background: 'rgba(20,58,83,0.45)', border: '1px solid rgba(96,165,250,0.35)' }}
+            title="系统监控中心"
+            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+            style={iconBtnStyle}
           >
-            <Activity className="w-3.5 h-3.5" />
-            监控
+            <Activity className="w-4 h-4" />
           </button>
-          <button onClick={() => setOpen(true)} className="p-2 rounded-xl transition hover:bg-white/5">
-            <Settings className="w-4 h-4 text-gray-400 hover:text-white transition" />
+          <div className="relative">
+            <button
+              onClick={() => setAboutOpen(v => !v)}
+              title="关于系统"
+              className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+              style={iconBtnStyle}
+            >
+              <div className="relative inline-flex items-center justify-center">
+                <Info className="w-4 h-4" />
+                <ChevronDown className={`absolute -bottom-1 -right-1 w-2.5 h-2.5 transition ${aboutOpen ? 'rotate-180' : ''}`} />
+              </div>
+            </button>
+            {aboutOpen && (
+              <div
+                className="absolute right-0 mt-1.5 w-52 rounded-xl p-1.5 z-[180]"
+                style={{
+                  background: 'rgba(7,16,28,0.94)',
+                  border: '1px solid rgba(107,146,179,0.32)',
+                  boxShadow: '0 12px 28px rgba(0,0,0,0.5)',
+                }}
+              >
+                {[
+                  ['系统概览', '动态卫星拓扑与SFC智能编排可视化系统'],
+                  ['算法主线', 'GNN + A2C + 启发式剪枝 + 保底路径策略'],
+                ].map(([k, v]) => (
+                  <div key={k} className="px-2.5 py-1.5 rounded-lg hover:bg-white/5">
+                    <div className="text-[11px] text-cyan-100 font-medium">{k}</div>
+                    <div className="text-[10px] text-slate-400">{v}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => setOpen(true)}
+            title="系统设置"
+            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+            style={iconBtnStyle}
+          >
+            <Settings className="w-4 h-4" />
           </button>
         </div>
       </header>

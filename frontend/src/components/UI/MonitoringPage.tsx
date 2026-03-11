@@ -439,8 +439,13 @@ export default function MonitoringPage() {
         <div className="flex items-center gap-2.5 mb-3">
           <button
             onClick={() => navigateTo('/')}
-            className="h-9 px-3 rounded-lg text-slate-200 text-sm flex items-center gap-1.5"
-            style={{ background: 'rgba(14,22,36,0.62)', border: '1px solid rgba(86,112,136,0.32)' }}
+            className="h-9 px-3 rounded-xl text-cyan-100 text-sm flex items-center gap-1.5 transition hover:brightness-110"
+            style={{
+              background: 'linear-gradient(135deg, rgba(22,52,78,0.52), rgba(11,26,44,0.48))',
+              border: '1px solid rgba(114,172,215,0.34)',
+              boxShadow: '0 8px 20px rgba(0,0,0,0.36), inset 0 1px 0 rgba(160,220,255,0.16)',
+              backdropFilter: 'blur(10px)',
+            }}
           >
             <ArrowLeft className="w-4 h-4" />
             返回主页面
@@ -452,65 +457,58 @@ export default function MonitoringPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-2.5">
-          <div
-            className="col-span-12 rounded-xl px-3 py-2.5"
-            style={{
-              background: 'rgba(8,16,28,0.72)',
-              border: '1px solid rgba(90,125,153,0.28)',
-              backdropFilter: 'blur(10px)',
-              fontFamily: '"Space Grotesk", "Noto Sans SC", sans-serif',
-            }}
-          >
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_1fr_auto] items-end gap-2">
-              <div className="rounded-lg px-2.5 py-2 bg-slate-900/35 border border-slate-700/55">
-                <div className="text-[11px] uppercase tracking-wide text-slate-300 font-semibold flex items-center gap-1.5">
-                  <Activity className="w-4 h-4 text-cyan-300" />
-                  故障注入参数
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">
-                  概率按每个拓扑更新周期生效，建议保持低概率扰动。
-                </div>
-              </div>
-              <label className="text-[10px] text-slate-400 rounded-lg px-2 py-1.5 bg-slate-900/40 border border-slate-700/60">
-                节点故障概率/周期
-                <input
-                  type="number"
-                  min={0}
-                  max={0.05}
-                  step={0.0001}
-                  value={nodeFaultProb}
-                  onChange={(e) => setNodeFaultProb(Math.max(0, Math.min(0.05, Number(e.target.value) || 0)))}
-                  className="w-full mt-1 h-7 px-2 rounded bg-slate-900/65 border border-slate-700/70 text-amber-200 font-mono"
-                />
-              </label>
-              <label className="text-[10px] text-slate-400 rounded-lg px-2 py-1.5 bg-slate-900/40 border border-slate-700/60">
-                链路故障概率/周期
-                <input
-                  type="number"
-                  min={0}
-                  max={0.1}
-                  step={0.0001}
-                  value={linkFaultProb}
-                  onChange={(e) => setLinkFaultProb(Math.max(0, Math.min(0.1, Number(e.target.value) || 0)))}
-                  className="w-full mt-1 h-7 px-2 rounded bg-slate-900/65 border border-slate-700/70 text-orange-200 font-mono"
-                />
-              </label>
-              <div className="flex flex-col gap-1 items-end rounded-lg px-2.5 py-2 bg-slate-900/35 border border-slate-700/55">
-                <label className="inline-flex items-center gap-1.5 text-[10px] text-slate-300">
-                  <input type="checkbox" checked={enableFaults} onChange={(e) => setEnableFaults(e.target.checked)} />
-                  启用故障注入
-                </label>
-                <button
-                  disabled={updatingFaults}
-                  onClick={applyFaultConfig}
-                  className="px-3 py-1.5 rounded-md text-xs text-cyan-100 bg-cyan-700/70"
-                >
-                  {updatingFaults ? '更新中...' : '应用参数'}
-                </button>
-                <div className="text-[9px] text-slate-500 text-right">
-                  周期 {simulation.sampling_interval_sec}s · 倍速 {simulation.simulation_speed.toFixed(1)}x
-                </div>
-              </div>
+          <div className="col-span-12 flex items-center gap-2.5 overflow-x-auto whitespace-nowrap py-0.5">
+            <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-slate-300 font-semibold">
+              <Activity className="w-4 h-4 text-cyan-300" />
+              故障注入参数
+            </div>
+            <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+              节点故障概率/周期
+              <input
+                type="number"
+                min={0}
+                max={0.05}
+                step={0.0001}
+                value={nodeFaultProb}
+                onChange={(e) => setNodeFaultProb(Math.max(0, Math.min(0.05, Number(e.target.value) || 0)))}
+                className="w-28 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-amber-200 font-mono"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+              链路故障概率/周期
+              <input
+                type="number"
+                min={0}
+                max={0.1}
+                step={0.0001}
+                value={linkFaultProb}
+                onChange={(e) => setLinkFaultProb(Math.max(0, Math.min(0.1, Number(e.target.value) || 0)))}
+                className="w-28 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-orange-200 font-mono"
+              />
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300">
+              <input
+                type="checkbox"
+                checked={enableFaults}
+                onChange={(e) => setEnableFaults(e.target.checked)}
+                className="accent-cyan-400 w-3.5 h-3.5"
+              />
+              启用故障注入
+            </label>
+            <button
+              disabled={updatingFaults}
+              onClick={applyFaultConfig}
+              className="px-3.5 py-1.5 rounded-lg text-xs text-cyan-100 transition hover:brightness-110 disabled:opacity-60"
+              style={{
+                background: 'linear-gradient(135deg, rgba(25,101,151,0.84), rgba(16,69,116,0.82))',
+                border: '1px solid rgba(119,194,238,0.38)',
+                boxShadow: '0 6px 14px rgba(0,0,0,0.32), inset 0 1px 0 rgba(184,230,255,0.2)',
+              }}
+            >
+              {updatingFaults ? '更新中...' : '应用参数'}
+            </button>
+            <div className="text-[10px] text-slate-500">
+              周期 {simulation.sampling_interval_sec}s · 倍速 {simulation.simulation_speed.toFixed(1)}x
             </div>
           </div>
 

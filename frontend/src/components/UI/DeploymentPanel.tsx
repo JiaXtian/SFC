@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Trash2, ChevronDown, ChevronUp, CheckCircle, Clock, XCircle, Eye, EyeOff, AlertTriangle } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
+import { toChineseFailureList } from '@/utils/failureText'
 
 function buildPathNodes(dep: Deployment): string[] {
   if (Array.isArray(dep.path_nodes) && dep.path_nodes.length > 0) return dep.path_nodes
@@ -118,7 +119,7 @@ export default function DeploymentPanel() {
         <CheckCircle className="w-7 h-7 opacity-25" />
       </div>
       <div className="text-xs font-medium text-gray-400">暂无部署记录</div>
-      <div className="text-[10px] text-gray-700 text-center px-4">
+      <div className="text-[11px] text-gray-600 text-center px-4">
         提交并确认部署后在此显示
       </div>
     </div>
@@ -126,7 +127,7 @@ export default function DeploymentPanel() {
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-2">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-2.5 space-y-2">
         {sortedDeployments.map(dep => {
           const isExpanded  = expanded === dep.deployment_id
           const isHL        = highlightedDeploymentIds.includes(dep.deployment_id)
@@ -141,7 +142,7 @@ export default function DeploymentPanel() {
               <div className="px-3 py-2.5">
                 <div className="flex items-center gap-2 mb-1.5">
                   <StatusIcon s={dep.status} />
-                  <span className="flex-1 text-[12px] font-semibold text-white truncate">{dep.sfc_name || dep.deployment_id}</span>
+                  <span className="flex-1 text-[14px] font-semibold text-white truncate">{dep.sfc_name || dep.deployment_id}</span>
                   
                   {/* 关键：眼睛图标切换高亮 */}
                   <button onClick={() => toggleHighlight(dep)} title={isHL ? "取消高亮" : "在地球上高亮显示"}
@@ -161,13 +162,13 @@ export default function DeploymentPanel() {
                   </button>
                 </div>
 
-                <div className="flex items-center justify-between text-[10px]">
+                <div className="flex items-center justify-between text-[12px]">
                   <span className={`${lc} font-medium`}>{lbl}</span>
                   <span className="text-gray-600 font-mono">{dep.total_latency_ms?.toFixed(1)}ms</span>
                   <span className="text-gray-700">{new Date(dep.deployed_at).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}</span>
                 </div>
                 {(typeof dep.inference_latency_ms === 'number' || typeof (dep as any).topology_version_bound === 'number') && (
-                  <div className="mt-1 flex items-center justify-between text-[10px] font-mono">
+                  <div className="mt-1 flex items-center justify-between text-[11px] font-mono">
                     <span className="text-cyan-300">
                       {typeof dep.inference_latency_ms === 'number' ? `推理时延 ${dep.inference_latency_ms.toFixed(1)}ms` : '-'}
                     </span>
@@ -181,49 +182,52 @@ export default function DeploymentPanel() {
 
                 <div className="flex flex-wrap gap-1 mt-1.5">
                   {dep.satisfies_constraints === false && (
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold" style={{ background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(248,113,113,0.35)', color: '#fda4af' }}>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold" style={{ background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(248,113,113,0.35)', color: '#fda4af' }}>
                       强制部署(不满足约束)
                     </span>
                   )}
                   {dep.source_node && (
-                    <span className="px-1.5 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
                       入口 {dep.source_node}
                     </span>
                   )}
                   {dep.destination_node && (
-                    <span className="px-1.5 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
                       出口 {dep.destination_node}
                     </span>
                   )}
                   {dep.deployed_nodes.slice(0,4).map(n => (
-                    <span key={n} className="px-1.5 py-0.5 rounded font-mono text-[9px]"
+                    <span key={n} className="px-2 py-0.5 rounded font-mono text-[10px]"
                       style={{ background: 'rgba(0,255,136,0.12)', border: '1px solid rgba(0,255,136,0.25)', color: '#00ff88' }}>
                       {n.length > 18 ? n.slice(0,18)+'…' : n}
                     </span>
                   ))}
                   {dep.deployed_nodes.length > 4 && (
-                    <span className="px-1.5 py-0.5 rounded font-mono text-[9px] text-gray-600">+{dep.deployed_nodes.length - 4}</span>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px] text-gray-500">+{dep.deployed_nodes.length - 4}</span>
                   )}
                 </div>
               </div>
 
               {isExpanded && (
                 <div className="px-3 pb-3 space-y-2" style={{ borderTop: '1px solid rgba(100,100,120,0.08)' }}>
-                  {dep.satisfies_constraints === false && Array.isArray(dep.violation_details) && dep.violation_details.length > 0 && (
+                  {dep.satisfies_constraints === false && (
                     <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
-                      <div className="text-[11px] text-rose-300 font-semibold mb-1">强制部署原因</div>
+                      <div className="text-[13px] text-rose-300 font-semibold mb-1">强制部署原因</div>
                       <div className="space-y-0.5">
-                        {dep.violation_details.map((reason, idx) => (
-                          <div key={idx} className="text-[11px] text-rose-100">- {reason}</div>
+                        {(toChineseFailureList(dep.violation_details).length > 0
+                          ? toChineseFailureList(dep.violation_details)
+                          : ['当前候选不满足SLA硬约束，已按人工强制部署处理']
+                        ).map((reason, idx) => (
+                          <div key={idx} className="text-[12px] text-rose-100">- {reason}</div>
                         ))}
                       </div>
                     </div>
                   )}
                   <div className="mt-2">
-                    <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-1.5 font-semibold">VNF 详情</div>
+                    <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">VNF 详情</div>
                     <div className="space-y-1">
                       {dep.per_vnf?.map((v, i) => (
-                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px]"
+                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[12px]"
                           style={{ background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.12)' }}>
                           <div className="flex items-center gap-2">
                             <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[9px] font-bold"
@@ -232,7 +236,7 @@ export default function DeploymentPanel() {
                             <span className="text-gray-700">→</span>
                             <span className="font-mono text-green-400">{v.node}</span>
                           </div>
-                          <div className="flex gap-2 text-gray-600">
+                          <div className="flex gap-2 text-[11px] text-gray-500">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>
@@ -244,8 +248,8 @@ export default function DeploymentPanel() {
 
                   {dep.link_details && dep.link_details.length > 0 && (
                     <div>
-                      <div className="text-[11px] text-gray-500 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
-                      <div className="mb-1 text-[10px] text-cyan-300 font-mono break-all">
+                      <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
+                      <div className="mb-1 text-[11px] text-cyan-300 font-mono break-all">
                         完整路径: {(() => {
                           const nodes = buildPathNodes(dep)
                           const full = nodes.join(' -> ')
@@ -253,12 +257,12 @@ export default function DeploymentPanel() {
                           return `${full.slice(0, 180)} ...`
                         })()}
                       </div>
-                      <div className="mb-1.5 text-[10px] text-green-400 font-mono">
+                      <div className="mb-1.5 text-[11px] text-green-400 font-mono">
                         路径总时延: {dep.link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0).toFixed(2)}ms
                       </div>
                       <div className="space-y-1">
                         {(expandedLinks[dep.deployment_id] ? dep.link_details : dep.link_details.slice(0, 8)).map((l, i) => (
-                          <div key={i} className="flex items-center justify-between px-2 py-1 rounded text-[10px]"
+                          <div key={i} className="flex items-center justify-between px-2 py-1 rounded text-[11px]"
                             style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.08)' }}>
                             <span className="font-mono text-green-400">
                               <span className="text-green-400">{l.src}</span>
@@ -274,7 +278,7 @@ export default function DeploymentPanel() {
                           onClick={() =>
                             setExpandedLinks(prev => ({ ...prev, [dep.deployment_id]: !prev[dep.deployment_id] }))
                           }
-                          className="mt-1.5 text-[11px] font-medium text-green-400 hover:text-green-300 transition"
+                          className="mt-1.5 text-[12px] font-medium text-green-400 hover:text-green-300 transition"
                         >
                           {expandedLinks[dep.deployment_id] ? '收起链路明细' : `展开全部链路 (+${dep.link_details.length - 8})`}
                         </button>
@@ -282,23 +286,6 @@ export default function DeploymentPanel() {
                     </div>
                   )}
 
-                  {dep.score_breakdown && dep.score_constraints && dep.score_weights && (
-                    <div className="rounded-lg p-2" style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.12)' }}>
-                      <div className="text-[11px] text-cyan-300 font-semibold mb-1">方案评分</div>
-                      <div className="grid grid-cols-3 gap-x-2 gap-y-1 text-[10px] text-slate-300">
-                        <span>总分 {(Number(dep.score_total || 0) * 100).toFixed(1)}</span>
-                        <span>时延 {(dep.score_breakdown.latency * 100).toFixed(1)}</span>
-                        <span>带宽 {(dep.score_breakdown.bandwidth * 100).toFixed(1)}</span>
-                        <span>可靠性 {(dep.score_breakdown.reliability * 100).toFixed(1)}</span>
-                        <span>资源 {(dep.score_breakdown.resource * 100).toFixed(1)}</span>
-                        <span>分散度 {(dep.score_breakdown.dispersion * 100).toFixed(1)}</span>
-                      </div>
-                      <div className="mt-1 text-[10px] text-slate-500 leading-relaxed">
-                        细则: 时延/带宽/可靠性采用连续曲线评分（非阈值即满分）; 低于阈值会连续惩罚，高于阈值仍保留差异。<br />
-                        权重: L {dep.score_weights.latency.toFixed(2)} / R {dep.score_weights.resource.toFixed(2)} / Rel {dep.score_weights.reliability.toFixed(2)} / BW {dep.score_weights.bandwidth.toFixed(2)} / D {dep.score_weights.dispersion.toFixed(2)}。
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
