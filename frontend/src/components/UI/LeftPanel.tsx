@@ -3,7 +3,6 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
-  AlertCircle,
   Orbit,
   Activity,
   Cpu,
@@ -122,18 +121,19 @@ export default function LeftPanel() {
   const {
     setSatellites,
     setLinks,
-    deployments,
+    clearDeployments,
     clearHighlightedDeployments,
     setCandidateResult,
     bumpTopologyVersion,
     setBackendTopologySynced,
     setAutoDynamics,
     setSimulationStatus,
+    setSelectedSatellite,
+    setSelectedLink,
   } = useStore()
   const [type, setType] = useState<ConstellationType>('starlink_v1')
   const [total, setTotal] = useState(72)
   const [planes, setPlanes] = useState(6)
-  const [showWarning, setShowWarning] = useState(false)
   const [showImportExample, setShowImportExample] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
 
@@ -142,19 +142,27 @@ export default function LeftPanel() {
   const satsPerPlaneMax = planes > 0 ? Math.ceil(total / planes) : 0
   const actual = total
 
-  const handleGenerate = async () => {
-    if (deployments.length > 0) {
-      setShowWarning(true)
-      return
+  const clearExistingOrchestrationState = async () => {
+    clearHighlightedDeployments()
+    clearDeployments()
+    setCandidateResult(null)
+    setSelectedSatellite(null)
+    setSelectedLink(null)
+    try {
+      const list = await apiClient.listSFCSessions()
+      if (Array.isArray(list) && list.length > 0) {
+        await Promise.allSettled(
+          list.map((sess: any) => apiClient.stopSFCSession(String(sess?.session_id ?? '')))
+        )
+      }
+    } catch {
+      // Ignore session clear errors; local clear has already completed.
     }
-    doGenerate()
   }
 
   const doGenerate = async () => {
-    setShowWarning(false)
     setLoading(true)
-    clearHighlightedDeployments()
-    setCandidateResult(null)
+    await clearExistingOrchestrationState()
     bumpTopologyVersion()
     setBackendTopologySynced(false)
 
@@ -195,9 +203,8 @@ export default function LeftPanel() {
         console.warn('后端同步失败', err?.message)
         alert('星座已在前端更新，但后端同步失败。为避免部署使用旧星座，请先确保后端可用并重新生成/导入。')
       }
+      clearDeployments()
 
-      const store = useStore.getState()
-      store.deployments.forEach(d => store.removeDeployment(d.deployment_id))
     } finally {
       setLoading(false)
     }
@@ -214,6 +221,7 @@ export default function LeftPanel() {
     if (!file) return
     setLoading(true)
     try {
+      await clearExistingOrchestrationState()
       const text = await file.text()
       const raw = JSON.parse(text)
       const parsed = parseThirdPartyTopology(raw)
@@ -271,6 +279,7 @@ export default function LeftPanel() {
         console.warn('导入拓扑已本地生效，但后端同步失败', e)
         alert('导入拓扑后端同步失败。为避免部署使用旧星座，请先修复后端连接后重新导入。')
       }
+      clearDeployments()
     } catch (e) {
       console.error(e)
       alert('导入失败：请提供合法的 JSON 拓扑文件')
@@ -280,7 +289,10 @@ export default function LeftPanel() {
   }
 
   return (
-    <div className={`absolute left-0 top-11 bottom-11 z-10 flex transition-all duration-300 ${collapsed ? 'w-8' : 'w-[268px]'}`}>
+    <div
+      className="absolute left-0 top-11 bottom-11 z-10 flex transition-all duration-300"
+      style={{ width: collapsed ? 32 : 'clamp(248px, 17vw, 368px)' }}
+    >
       <button
         onClick={() => setCollapsed(!collapsed)}
         className="absolute -right-3 top-5 w-6 h-6 rounded-full flex items-center justify-center z-20 shadow-lg transition-colors"
@@ -306,7 +318,9 @@ export default function LeftPanel() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+          <div className="flex-1 overflow-y-auto px-3 py-2">
+            <div className="min-h-full flex flex-col">
+              <div className="space-y-2">
             <div>
               <label className="block text-[10px] font-semibold text-slate-400 mb-1.5 uppercase tracking-wide">星座构型</label>
               <select
@@ -404,9 +418,12 @@ export default function LeftPanel() {
               <div className="text-2xl font-bold text-cyan-100 leading-tight">{actual}</div>
               <div className="text-[10px] text-slate-300 mt-0.5">{satsPerPlaneMin}~{satsPerPlaneMax} 颗/面 × {planes} 面</div>
             </div>
+              </div>
+
+              <div className="mt-auto pt-2 space-y-2">
 
             <button
-              onClick={handleGenerate}
+              onClick={doGenerate}
               disabled={loading}
               className="w-full py-2 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 transition shadow-lg mt-2"
               style={{ background: loading ? 'rgba(50,50,60,0.8)' : 'linear-gradient(135deg, #12345a 0%, #0f233b 100%)' }}
@@ -451,42 +468,7 @@ export default function LeftPanel() {
               className="hidden"
               onChange={e => onImportThirdParty(e.target.files?.[0])}
             />
-          </div>
-        </div>
-      )}
-
-      {showWarning && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.8)' }}>
-          <div
-            className="w-96 rounded-2xl overflow-hidden shadow-2xl"
-            style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #0a0a15 100%)', border: '1px solid rgba(248,113,113,0.3)' }}
-          >
-            <div
-              className="px-5 py-4 flex items-center gap-3"
-              style={{ background: 'rgba(239,68,68,0.15)', borderBottom: '1px solid rgba(248,113,113,0.2)' }}
-            >
-              <AlertCircle className="w-5 h-5 text-red-400" />
-              <div className="text-sm font-bold text-white">警告：存在活跃部署</div>
-            </div>
-            <div className="px-5 py-4 space-y-3">
-              <p className="text-sm text-gray-300 leading-relaxed">重新生成星座将清除全部 {deployments.length} 个活跃的 SFC 部署。</p>
-              <p className="text-xs text-gray-500">请确认是否继续。</p>
-            </div>
-            <div className="px-5 py-3 flex gap-2" style={{ borderTop: '1px solid rgba(100,100,120,0.15)' }}>
-              <button
-                onClick={() => setShowWarning(false)}
-                className="flex-1 py-2 rounded-lg text-sm font-medium text-gray-300 transition"
-                style={{ background: 'rgba(50,50,60,0.5)' }}
-              >
-                取消
-              </button>
-              <button
-                onClick={doGenerate}
-                className="flex-1 py-2 rounded-lg text-sm font-bold text-white transition"
-                style={{ background: 'linear-gradient(135deg, #dc2626, #b91c1c)' }}
-              >
-                确认清除并重建
-              </button>
+              </div>
             </div>
           </div>
         </div>

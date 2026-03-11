@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
-  RefreshCcw,
   Server,
   ShieldCheck,
   Timer,
@@ -18,54 +17,114 @@ function navigateTo(path: string) {
   window.dispatchEvent(new PopStateEvent('popstate'))
 }
 
-function Sparkline({
+function AxisLineChart({
   values,
   color,
-  height = 52,
-}: { values: number[]; color: string; height?: number }) {
-  const width = 260
+  title,
+  xLabel = '时间',
+  yLabel = '值',
+  height = 156,
+}: {
+  values: number[]
+  color: string
+  title: string
+  xLabel?: string
+  yLabel?: string
+  height?: number
+}) {
+  const width = 420
+  const left = 44
+  const right = 12
+  const top = 16
+  const bottom = 34
+  const plotW = width - left - right
+  const plotH = height - top - bottom
   if (!values.length) {
-    return <div className="text-[10px] text-slate-500">暂无数据</div>
+    return <div className="text-[10px] text-slate-500 text-center py-2">暂无数据</div>
   }
   const min = Math.min(...values)
   const max = Math.max(...values)
   const range = Math.max(1e-9, max - min)
   const points = values
     .map((v, i) => {
-      const x = (i / Math.max(1, values.length - 1)) * width
-      const y = height - ((v - min) / range) * (height - 8) - 4
+      const x = left + (i / Math.max(1, values.length - 1)) * plotW
+      const y = top + (1 - (v - min) / range) * plotH
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
+  const yTicks = [0, 0.5, 1].map((p) => {
+    const y = top + (1 - p) * plotH
+    const val = (min + p * range).toFixed(range >= 10 ? 0 : 2)
+    return { y, val }
+  })
+  const xTickLeft = values.length > 1 ? '早' : '当前'
+  const xTickRight = '新'
+
   return (
-    <svg width={width} height={height} className="overflow-visible">
-      <polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <div className="w-full flex flex-col items-center">
+      <div className="text-[10px] text-slate-400 mb-1">{title}</div>
+      <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="max-w-[460px] overflow-visible">
+        <line x1={left} y1={top} x2={left} y2={top + plotH} stroke="rgba(148,163,184,0.55)" strokeWidth="1" />
+        <line x1={left} y1={top + plotH} x2={left + plotW} y2={top + plotH} stroke="rgba(148,163,184,0.55)" strokeWidth="1" />
+        {yTicks.map((t, idx) => (
+          <g key={`y-${idx}`}>
+            <line x1={left} y1={t.y} x2={left + plotW} y2={t.y} stroke="rgba(71,85,105,0.35)" strokeWidth="1" strokeDasharray="3 3" />
+            <text x={left - 6} y={t.y + 3} textAnchor="end" fontSize="10" fill="#94a3b8">{t.val}</text>
+          </g>
+        ))}
+        <text x={left} y={top + plotH + 18} fontSize="10" fill="#94a3b8">{xTickLeft}</text>
+        <text x={left + plotW} y={top + plotH + 18} textAnchor="end" fontSize="10" fill="#94a3b8">{xTickRight}</text>
+        <text x={left + plotW / 2} y={height - 4} textAnchor="middle" fontSize="10" fill="#94a3b8">{xLabel}</text>
+        <text
+          x={12}
+          y={top + plotH / 2}
+          textAnchor="middle"
+          transform={`rotate(-90 12 ${top + plotH / 2})`}
+          fontSize="10"
+          fill="#94a3b8"
+        >
+          {yLabel}
+        </text>
+        <polyline
+          points={points}
+          fill="none"
+          stroke={color}
+          strokeWidth="2.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </div>
   )
 }
 
-function Histogram({
+function AxisHistogram({
   values,
   bins = 10,
-  width = 300,
-  height = 74,
+  width = 420,
+  height = 168,
   color = '#34d399',
+  title = '分布',
+  xLabel = '区间',
+  yLabel = '频次',
 }: {
   values: number[]
   bins?: number
   width?: number
   height?: number
   color?: string
+  title?: string
+  xLabel?: string
+  yLabel?: string
 }) {
+  const left = 44
+  const right = 12
+  const top = 16
+  const bottom = 34
+  const plotW = width - left - right
+  const plotH = height - top - bottom
   if (!values.length) {
-    return <div className="text-[10px] text-slate-500">暂无数据</div>
+    return <div className="text-[10px] text-slate-500 text-center py-2">暂无数据</div>
   }
   const min = Math.min(...values)
   const max = Math.max(...values)
@@ -78,78 +137,115 @@ function Histogram({
   })
   const maxCount = Math.max(1, ...counts)
   const gap = 2
-  const barW = (width - gap * (counts.length - 1)) / counts.length
+  const barW = (plotW - gap * (counts.length - 1)) / counts.length
   return (
-    <svg width={width} height={height} className="overflow-visible">
-      {counts.map((count, idx) => {
-        const h = (count / maxCount) * (height - 10)
-        const x = idx * (barW + gap)
-        const y = height - h - 4
-        return (
-          <rect
-            key={`bar-${idx}`}
-            x={x}
-            y={y}
-            width={Math.max(1, barW)}
-            height={Math.max(1, h)}
-            rx={1.5}
-            fill={color}
-            opacity={0.8}
-          />
-        )
-      })}
-    </svg>
+    <div className="w-full flex flex-col items-center">
+      <div className="text-[10px] text-slate-400 mb-1">{title}</div>
+      <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="max-w-[460px] overflow-visible">
+        <line x1={left} y1={top} x2={left} y2={top + plotH} stroke="rgba(148,163,184,0.55)" strokeWidth="1" />
+        <line x1={left} y1={top + plotH} x2={left + plotW} y2={top + plotH} stroke="rgba(148,163,184,0.55)" strokeWidth="1" />
+        {[0, 0.5, 1].map((p, idx) => {
+          const y = top + (1 - p) * plotH
+          const val = Math.round(p * maxCount)
+          return (
+            <g key={`h-y-${idx}`}>
+              <line x1={left} y1={y} x2={left + plotW} y2={y} stroke="rgba(71,85,105,0.35)" strokeWidth="1" strokeDasharray="3 3" />
+              <text x={left - 6} y={y + 3} textAnchor="end" fontSize="10" fill="#94a3b8">{val}</text>
+            </g>
+          )
+        })}
+        {counts.map((count, idx) => {
+          const h = (count / maxCount) * plotH
+          const x = left + idx * (barW + gap)
+          const y = top + plotH - h
+          return (
+            <rect
+              key={`bar-${idx}`}
+              x={x}
+              y={y}
+              width={Math.max(1, barW)}
+              height={Math.max(1, h)}
+              rx={1.5}
+              fill={color}
+              opacity={0.82}
+            />
+          )
+        })}
+        <text x={left} y={top + plotH + 18} fontSize="10" fill="#94a3b8">{min.toFixed(1)}</text>
+        <text x={left + plotW} y={top + plotH + 18} textAnchor="end" fontSize="10" fill="#94a3b8">{max.toFixed(1)}</text>
+        <text x={left + plotW / 2} y={height - 4} textAnchor="middle" fontSize="10" fill="#94a3b8">{xLabel}</text>
+        <text
+          x={12}
+          y={top + plotH / 2}
+          textAnchor="middle"
+          transform={`rotate(-90 12 ${top + plotH / 2})`}
+          fontSize="10"
+          fill="#94a3b8"
+        >
+          {yLabel}
+        </text>
+      </svg>
+    </div>
   )
 }
 
 function Heatmap({
   matrix,
   rowLabels,
-  width = 308,
-  height = 120,
+  width = 420,
+  height = 150,
+  title = '热力图',
 }: {
   matrix: number[][]
   rowLabels: string[]
   width?: number
   height?: number
+  title?: string
 }) {
   if (!matrix.length || !matrix[0]?.length) {
-    return <div className="text-[10px] text-slate-500">暂无数据</div>
+    return <div className="text-[10px] text-slate-500 text-center py-2">暂无数据</div>
   }
   const rows = matrix.length
   const cols = matrix[0].length
-  const leftPad = 42
-  const topPad = 4
-  const cellW = (width - leftPad - 2) / cols
-  const cellH = (height - topPad - 12) / rows
+  const leftPad = 52
+  const topPad = 20
+  const bottomPad = 24
+  const cellW = (width - leftPad - 6) / cols
+  const cellH = (height - topPad - bottomPad) / rows
   const maxVal = Math.max(1, ...matrix.flat())
   return (
-    <svg width={width} height={height}>
-      {rowLabels.map((label, r) => (
-        <text key={`lb-${label}`} x={2} y={topPad + r * cellH + cellH * 0.68} fontSize="9" fill="#94a3b8">
-          {label}
+    <div className="w-full flex flex-col items-center">
+      <div className="text-[10px] text-slate-400 mb-1">{title}</div>
+      <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="max-w-[460px]">
+        {rowLabels.map((label, r) => (
+          <text key={`lb-${label}`} x={4} y={topPad + r * cellH + cellH * 0.68} fontSize="9" fill="#94a3b8">
+            {label}
+          </text>
+        ))}
+        {matrix.map((row, r) =>
+          row.map((v, c) => {
+            const t = v / maxVal
+            const alpha = 0.12 + t * 0.78
+            const x = leftPad + c * cellW
+            const y = topPad + r * cellH
+            return (
+              <rect
+                key={`hm-${r}-${c}`}
+                x={x}
+                y={y}
+                width={Math.max(1, cellW - 1)}
+                height={Math.max(1, cellH - 1)}
+                rx={1.5}
+                fill={`rgba(56,189,248,${alpha.toFixed(3)})`}
+              />
+            )
+          })
+        )}
+        <text x={leftPad + (cols * cellW) / 2} y={height - 5} textAnchor="middle" fontSize="10" fill="#94a3b8">
+          时间窗口（由旧到新）
         </text>
-      ))}
-      {matrix.map((row, r) =>
-        row.map((v, c) => {
-          const t = v / maxVal
-          const alpha = 0.12 + t * 0.78
-          const x = leftPad + c * cellW
-          const y = topPad + r * cellH
-          return (
-            <rect
-              key={`hm-${r}-${c}`}
-              x={x}
-              y={y}
-              width={Math.max(1, cellW - 1)}
-              height={Math.max(1, cellH - 1)}
-              rx={1.5}
-              fill={`rgba(56,189,248,${alpha.toFixed(3)})`}
-            />
-          )
-        })
-      )}
-    </svg>
+      </svg>
+    </div>
   )
 }
 
@@ -161,12 +257,14 @@ export default function MonitoringPage() {
     runtimeEvents,
     decisionTraces,
   } = useStore()
-  const [sessionsBusy, setSessionsBusy] = useState(false)
-  const [sessions, setSessions] = useState<any[]>([])
   const [updatingFaults, setUpdatingFaults] = useState(false)
   const [enableFaults, setEnableFaults] = useState(true)
   const [nodeFaultProb, setNodeFaultProb] = useState(0.0002)
   const [linkFaultProb, setLinkFaultProb] = useState(0.0005)
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }))
 
   useEffect(() => {
     let mounted = true
@@ -186,22 +284,15 @@ export default function MonitoringPage() {
     return () => { mounted = false }
   }, [setSimulationStatus])
 
-  const loadSessions = async () => {
-    setSessionsBusy(true)
-    try {
-      const list = await apiClient.listSFCSessions()
-      setSessions(Array.isArray(list) ? list : [])
-    } catch {
-      setSessions([])
-    } finally {
-      setSessionsBusy(false)
-    }
-  }
-
   useEffect(() => {
-    loadSessions()
-    const timer = window.setInterval(loadSessions, 3500)
-    return () => window.clearInterval(timer)
+    const onResize = () => {
+      setViewport({
+        w: window.innerWidth,
+        h: window.innerHeight,
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [])
 
   const applyFaultConfig = async () => {
@@ -226,25 +317,6 @@ export default function MonitoringPage() {
       addToast(`故障参数更新失败: ${e?.message ?? e}`, 'error')
     } finally {
       setUpdatingFaults(false)
-    }
-  }
-
-  const stopSession = async (sessionId: string) => {
-    try {
-      await apiClient.stopSFCSession(sessionId)
-      addToast(`会话 ${sessionId} 已停止`, 'success')
-      loadSessions()
-    } catch (e: any) {
-      addToast(`停止会话失败: ${e?.message ?? e}`, 'error')
-    }
-  }
-
-  const recomputeSession = async (sessionId: string) => {
-    try {
-      await apiClient.recomputeSFCSession(sessionId, 'manual_monitor')
-      addToast(`会话 ${sessionId} 已触发重算`, 'success')
-    } catch (e: any) {
-      addToast(`会话重算失败: ${e?.message ?? e}`, 'error')
     }
   }
 
@@ -338,17 +410,32 @@ export default function MonitoringPage() {
   }, [runtimeEvents])
 
   const recoveryRate = Number(orch?.recovery_success_rate ?? 0) * 100
+  const monitorScale = useMemo(() => {
+    const widthScale = viewport.w / 1680
+    const heightScale = viewport.h / 950
+    const scale = Math.min(widthScale, heightScale)
+    return Math.max(0.92, Math.min(1.34, scale))
+  }, [viewport])
 
   return (
     <div
-      className="fixed inset-0 overflow-y-auto overflow-x-hidden"
+      className="fixed inset-0 z-[120] overflow-y-auto overflow-x-hidden"
       style={{
         background:
           'radial-gradient(1200px 520px at 50% 110%, rgba(24,72,115,0.24) 0%, rgba(3,8,16,0.86) 42%, #010206 76%, #000000 100%)',
         fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif',
       }}
     >
-      <div className="max-w-[1460px] mx-auto px-4 py-3 pb-8">
+      <div
+        className="mx-auto"
+        style={{
+          transform: `scale(${monitorScale})`,
+          transformOrigin: 'top center',
+          width: `${100 / monitorScale}%`,
+          minHeight: `${100 / monitorScale}%`,
+        }}
+      >
+      <div className="mx-auto px-4 py-3 pb-8" style={{ width: 'min(96vw, 1860px)' }}>
         <div className="flex items-center gap-2.5 mb-3">
           <button
             onClick={() => navigateTo('/')}
@@ -365,14 +452,27 @@ export default function MonitoringPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-2.5">
-          <div className="col-span-12 lg:col-span-4 rounded-2xl p-3"
-            style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
-            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <Activity className="w-4 h-4 text-cyan-300" />故障注入参数
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
-              <label className="text-slate-400">
-                节点故障概率/tick
+          <div
+            className="col-span-12 rounded-xl px-3 py-2.5"
+            style={{
+              background: 'rgba(8,16,28,0.72)',
+              border: '1px solid rgba(90,125,153,0.28)',
+              backdropFilter: 'blur(10px)',
+              fontFamily: '"Space Grotesk", "Noto Sans SC", sans-serif',
+            }}
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_1fr_auto] items-end gap-2">
+              <div className="rounded-lg px-2.5 py-2 bg-slate-900/35 border border-slate-700/55">
+                <div className="text-[11px] uppercase tracking-wide text-slate-300 font-semibold flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-cyan-300" />
+                  故障注入参数
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  概率按每个拓扑更新周期生效，建议保持低概率扰动。
+                </div>
+              </div>
+              <label className="text-[10px] text-slate-400 rounded-lg px-2 py-1.5 bg-slate-900/40 border border-slate-700/60">
+                节点故障概率/周期
                 <input
                   type="number"
                   min={0}
@@ -380,11 +480,11 @@ export default function MonitoringPage() {
                   step={0.0001}
                   value={nodeFaultProb}
                   onChange={(e) => setNodeFaultProb(Math.max(0, Math.min(0.05, Number(e.target.value) || 0)))}
-                  className="w-full mt-1 h-8 px-2 rounded bg-slate-900/55 border border-slate-700/70 text-amber-200 font-mono"
+                  className="w-full mt-1 h-7 px-2 rounded bg-slate-900/65 border border-slate-700/70 text-amber-200 font-mono"
                 />
               </label>
-              <label className="text-slate-400">
-                链路故障概率/tick
+              <label className="text-[10px] text-slate-400 rounded-lg px-2 py-1.5 bg-slate-900/40 border border-slate-700/60">
+                链路故障概率/周期
                 <input
                   type="number"
                   min={0}
@@ -392,50 +492,78 @@ export default function MonitoringPage() {
                   step={0.0001}
                   value={linkFaultProb}
                   onChange={(e) => setLinkFaultProb(Math.max(0, Math.min(0.1, Number(e.target.value) || 0)))}
-                  className="w-full mt-1 h-8 px-2 rounded bg-slate-900/55 border border-slate-700/70 text-orange-200 font-mono"
+                  className="w-full mt-1 h-7 px-2 rounded bg-slate-900/65 border border-slate-700/70 text-orange-200 font-mono"
                 />
               </label>
-            </div>
-            <label className="mt-2 inline-flex items-center gap-2 text-[11px] text-slate-300">
-              <input type="checkbox" checked={enableFaults} onChange={(e) => setEnableFaults(e.target.checked)} />
-              启用低概率故障注入
-            </label>
-            <div className="mt-2 flex items-center justify-between gap-2">
-              <div className="text-[10px] text-slate-500">
-                当前动态周期 {simulation.sampling_interval_sec}s · 倍速 {simulation.simulation_speed.toFixed(1)}x
+              <div className="flex flex-col gap-1 items-end rounded-lg px-2.5 py-2 bg-slate-900/35 border border-slate-700/55">
+                <label className="inline-flex items-center gap-1.5 text-[10px] text-slate-300">
+                  <input type="checkbox" checked={enableFaults} onChange={(e) => setEnableFaults(e.target.checked)} />
+                  启用故障注入
+                </label>
+                <button
+                  disabled={updatingFaults}
+                  onClick={applyFaultConfig}
+                  className="px-3 py-1.5 rounded-md text-xs text-cyan-100 bg-cyan-700/70"
+                >
+                  {updatingFaults ? '更新中...' : '应用参数'}
+                </button>
+                <div className="text-[9px] text-slate-500 text-right">
+                  周期 {simulation.sampling_interval_sec}s · 倍速 {simulation.simulation_speed.toFixed(1)}x
+                </div>
               </div>
-              <button
-                disabled={updatingFaults}
-                onClick={applyFaultConfig}
-                className="px-3 py-1.5 rounded-md text-xs text-cyan-100 bg-cyan-700/70"
-              >
-                {updatingFaults ? '更新中...' : '应用参数'}
-              </button>
             </div>
           </div>
 
-          <div className="col-span-12 lg:col-span-4 rounded-2xl p-3"
-            style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
+          <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
+            style={{
+              background: 'rgba(8,16,28,0.66)',
+              border: '1px solid rgba(90,125,153,0.28)',
+              backdropFilter: 'blur(10px)',
+              fontFamily: '"Space Grotesk", "Noto Sans SC", sans-serif',
+            }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <Server className="w-4 h-4 text-cyan-300" />拓扑资源健康
             </div>
-            <div className="text-[11px] text-slate-300 space-y-1">
-              <div>节点活跃: {metrics?.active_nodes ?? 0}/{metrics?.total_nodes ?? 0}</div>
-              <div>链路活跃: {metrics?.active_links ?? 0}/{metrics?.total_links ?? 0}</div>
-              <div>拥塞链路: {metrics?.congested_links ?? 0}</div>
-              <div>平均时延: {(metrics?.avg_latency_ms ?? 0).toFixed(2)} ms</div>
-              <div>平均带宽利用率: {((metrics?.avg_bandwidth_utilization ?? 0) * 100).toFixed(1)}%</div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              说明：用于观察全局节点/链路可用性及资源负载走势，判断是否接近容量瓶颈。
             </div>
-            <div className="mt-2 text-[10px] text-slate-400">链路平均时延趋势</div>
-            <Sparkline values={latencySeries} color="#38bdf8" />
-            <div className="mt-1 text-[10px] text-slate-400">平均带宽利用率趋势</div>
-            <Sparkline values={bwSeries} color="#34d399" />
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] mb-2">
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">节点活跃</div>
+                <div className="text-cyan-200 font-semibold">{metrics?.active_nodes ?? 0}/{metrics?.total_nodes ?? 0}</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">链路活跃</div>
+                <div className="text-cyan-200 font-semibold">{metrics?.active_links ?? 0}/{metrics?.total_links ?? 0}</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">拥塞链路</div>
+                <div className="text-amber-200 font-semibold">{metrics?.congested_links ?? 0}</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">平均时延</div>
+                <div className="text-emerald-200 font-semibold">{(metrics?.avg_latency_ms ?? 0).toFixed(2)} ms</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">平均带宽利用率</div>
+                <div className="text-violet-200 font-semibold">{((metrics?.avg_bandwidth_utilization ?? 0) * 100).toFixed(1)}%</div>
+              </div>
+            </div>
+            <div className="mt-2">
+              <AxisLineChart values={latencySeries} color="#38bdf8" title="链路平均时延趋势" yLabel="毫秒(ms)" xLabel="采样时序" />
+            </div>
+            <div className="mt-1">
+              <AxisLineChart values={bwSeries} color="#34d399" title="平均带宽利用率趋势" yLabel="利用率(%)" xLabel="采样时序" />
+            </div>
           </div>
 
-          <div className="col-span-12 lg:col-span-4 rounded-2xl p-3"
+          <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-emerald-300" />容错恢复指标
+            </div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              说明：展示故障触发后的恢复质量，包括本周期效果与累计恢复结果。
             </div>
             <div className="grid grid-cols-2 gap-2 text-[11px]">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
@@ -443,7 +571,7 @@ export default function MonitoringPage() {
                 <div className="text-emerald-300 text-lg font-semibold">{recoveryRate.toFixed(1)}%</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">本tick恢复</div>
+                <div className="text-slate-400">本周期恢复</div>
                 <div className="text-cyan-200 text-lg font-semibold">{orch?.recovery_success_this_tick ?? 0}/{orch?.recovery_attempts_this_tick ?? 0}</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
@@ -455,29 +583,26 @@ export default function MonitoringPage() {
                 <div className="text-rose-300 text-lg font-semibold">{orch?.total_recovery_failures ?? 0}</div>
               </div>
             </div>
-            <div className="mt-2 text-[10px] text-slate-400">故障链路数量趋势</div>
-            <Sparkline values={downLinkSeries} color="#f59e0b" />
+            <div className="mt-2">
+              <AxisLineChart values={downLinkSeries} color="#f59e0b" title="故障链路数量趋势" yLabel="链路数" xLabel="采样时序" />
+            </div>
           </div>
 
           <div className="col-span-12 lg:col-span-7 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
-            <div className="flex items-center">
-              <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold flex items-center gap-1.5">
-                <Timer className="w-4 h-4 text-violet-300" />编排性能与会话
-              </div>
-              <button onClick={loadSessions} disabled={sessionsBusy}
-                className="ml-auto px-2 py-1 rounded text-[10px] text-slate-200 bg-slate-800/85 border border-slate-700/70 flex items-center gap-1">
-                <RefreshCcw className="w-3 h-3" />
-                {sessionsBusy ? '刷新中' : '刷新会话'}
-              </button>
+            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold flex items-center gap-1.5">
+              <Timer className="w-4 h-4 text-violet-300" />编排性能指标
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1">
+              说明：用于评估编排器在动态拓扑下的吞吐、重部署频率和推理时延稳定性。
             </div>
             <div className="grid grid-cols-2 gap-2 mt-2 text-[11px]">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">活跃会话</div>
+                <div className="text-slate-400">活跃SFC</div>
                 <div className="text-cyan-200 text-lg font-semibold">{orch?.active_sessions ?? 0}</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">本tick决策 / 重部署</div>
+                <div className="text-slate-400">本周期决策 / 重部署</div>
                 <div className="text-cyan-200 text-lg font-semibold">{orch?.decisions_this_tick ?? 0} / {orch?.redeploys_this_tick ?? 0}</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
@@ -489,23 +614,8 @@ export default function MonitoringPage() {
                 <div className="text-cyan-200 text-lg font-semibold">{orch?.total_decisions ?? 0} / {orch?.total_failures ?? 0}</div>
               </div>
             </div>
-            <div className="mt-2 text-[10px] text-slate-400">最近策略推理时延趋势</div>
-            <Sparkline values={inferenceSeries} color="#a78bfa" />
-
-            <div className="mt-2 max-h-52 overflow-y-auto space-y-1">
-              {sessions.map((s: any) => (
-                <div key={s.session_id} className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60 text-[11px]">
-                  <div className="text-slate-200 font-mono">{s.session_id}</div>
-                  <div className="text-slate-400 mt-0.5">
-                    topo_v{s.last_topology_version} · {Number(s.last_inference_time_ms ?? 0).toFixed(1)}ms · 决策{s.decisions_total}
-                  </div>
-                  <div className="flex gap-2 mt-1.5">
-                    <button onClick={() => recomputeSession(s.session_id)} className="px-2 py-0.5 rounded bg-sky-700/70 text-sky-100">重算</button>
-                    <button onClick={() => stopSession(s.session_id)} className="px-2 py-0.5 rounded bg-rose-700/70 text-rose-100">停止</button>
-                  </div>
-                </div>
-              ))}
-              {sessions.length === 0 && <div className="text-[11px] text-slate-500">暂无在线会话</div>}
+            <div className="mt-2">
+              <AxisLineChart values={inferenceSeries} color="#a78bfa" title="最近策略推理时延趋势" yLabel="时延(ms)" xLabel="决策序列" />
             </div>
           </div>
 
@@ -513,6 +623,9 @@ export default function MonitoringPage() {
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <AlertTriangle className="w-4 h-4 text-amber-300" />故障-恢复事件流
+            </div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              说明：按时间展示故障与恢复事件，可用于定位影响范围与恢复链路。
             </div>
             <div className="grid grid-cols-2 gap-2 mb-2 text-[11px]">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
@@ -552,6 +665,9 @@ export default function MonitoringPage() {
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <Timer className="w-4 h-4 text-emerald-300" />恢复时延分布
             </div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              说明：统计“故障事件到恢复事件”的耗时分布，越集中且越靠左表示恢复越快。
+            </div>
             <div className="grid grid-cols-3 gap-2 text-[11px] mb-2">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">样本数</div>
@@ -572,7 +688,14 @@ export default function MonitoringPage() {
                 </div>
               </div>
             </div>
-            <Histogram values={recoveryLatencySec} bins={12} color="#34d399" />
+            <AxisHistogram
+              values={recoveryLatencySec}
+              bins={12}
+              color="#34d399"
+              title="恢复时延直方分布"
+              xLabel="恢复时延区间(s)"
+              yLabel="样本数"
+            />
           </div>
 
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
@@ -580,16 +703,22 @@ export default function MonitoringPage() {
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <AlertTriangle className="w-4 h-4 text-sky-300" />故障热力与会话影响
             </div>
+            <div className="text-[10px] text-slate-500 mb-1">
+              说明：热力图反映时间窗口内不同故障类型密度；曲线展示恢复事件造成的业务影响量。
+            </div>
             <div className="text-[10px] text-slate-400">最近 60 分钟故障热力（5分钟粒度）</div>
-            <Heatmap matrix={faultHeatmap.matrix} rowLabels={faultHeatmap.rows} />
+            <Heatmap matrix={faultHeatmap.matrix} rowLabels={faultHeatmap.rows} title="故障类型时序热力图" />
             <div className="mt-1 text-[10px] text-slate-400">恢复事件会话影响趋势（受影响业务数）</div>
-            <Sparkline values={sessionImpactSeries} color="#22d3ee" />
+            <AxisLineChart values={sessionImpactSeries} color="#22d3ee" title="恢复事件会话影响趋势" yLabel="受影响业务数" xLabel="事件序列" />
           </div>
 
           <div className="col-span-12 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
               <CheckCircle2 className="w-4 h-4 text-cyan-300" />策略决策轨迹（最近20条）
+            </div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              轨迹表说明：`deployable=a/b` 表示返回候选中满足硬约束的方案数/总候选数。
             </div>
             <div className="max-h-56 overflow-y-auto space-y-1">
               {decisionTraces.slice(0, 20).map((t, idx) => (
@@ -600,7 +729,7 @@ export default function MonitoringPage() {
                     <span className="text-slate-400">{t.sim_time}</span>
                   </div>
                   <div className="text-slate-300 mt-0.5">
-                    mode={t.mode ?? 'single'} · topo_v{t.topology_version} · 推理{Number(t.inference_time_ms ?? 0).toFixed(1)}ms ·
+                    topo_v{t.topology_version} · 推理{Number(t.inference_time_ms ?? 0).toFixed(1)}ms ·
                     deployable={t.deployable_count}/{t.returned_topk}
                   </div>
                 </div>
@@ -609,6 +738,7 @@ export default function MonitoringPage() {
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   )

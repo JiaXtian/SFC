@@ -225,54 +225,119 @@ export function useAutoDynamics() {
   const clockEpochMsRef = useRef<number>(Date.now())
   const recomputeCooldownRef = useRef<Record<string, number>>({})
   const recomputeInFlightRef = useRef<Set<string>>(new Set())
+  const endpointAlertCooldownRef = useRef<Record<string, number>>({})
   const topoSyncBeforeRecomputeRef = useRef<number>(0)
   const topoSyncBeforeRecomputeInFlightRef = useRef(false)
 
   useEffect(() => {
-    const maybeTriggerSlaRecompute = async (trigger: string) => {
+    const normalizeNodeStatus = (node: any): 'active' | 'down' => {
+      const status = String(node?.status ?? 'active').toLowerCase()
+      const faultTag = String(node?.fault_tag ?? '')
+      if (faultTag && faultTag !== 'none') return 'down'
+      if (status === 'down' || status === 'fault' || status === 'failed' || status === 'inactive') return 'down'
+      return 'active'
+    }
+
+    const buildActiveAdjacency = (links: any[], downNodes: Set<string>) => {
+      const adj = new Map<string, Set<string>>()
+      links.forEach((l: any) => {
+        const a = String(l?.source ?? '')
+        const b = String(l?.target ?? '')
+        if (!a || !b || a === b) return
+        if (downNodes.has(a) || downNodes.has(b)) return
+        const status = String(l?.status ?? 'active')
+        const avail = Number(l?.bandwidth_available_gbps ?? l?.bandwidth_gbps ?? 0)
+        if (status === 'down' || avail <= 0) return
+        if (!adj.has(a)) adj.set(a, new Set<string>())
+        if (!adj.has(b)) adj.set(b, new Set<string>())
+        adj.get(a)!.add(b)
+        adj.get(b)!.add(a)
+      })
+      return adj
+    }
+
+    const hasPath = (adj: Map<string, Set<string>>, src: string, dst: string) => {
+      if (!src || !dst) return false
+      if (src === dst) return true
+      if (!adj.has(src) || !adj.has(dst)) return false
+      const q: string[] = [src]
+      const visited = new Set<string>([src])
+      while (q.length > 0) {
+        const cur = q.shift()!
+        const neigh = adj.get(cur)
+        if (!neigh) continue
+        for (const n of neigh) {
+          if (visited.has(n)) continue
+          if (n === dst) return true
+          visited.add(n)
+          q.push(n)
+        }
+      }
+      return false
+    }
+
+    const maybeTriggerHardRecompute = async (trigger: string) => {
       const state = useStore.getState()
       const now = Date.now()
-      const sessionsToRecompute: string[] = []
+      const satMap = new Map<string, any>()
+      state.satellites.forEach((s: any) => satMap.set(String(s?.id ?? ''), s))
+      const downNodes = new Set<string>()
+      satMap.forEach((node, id) => {
+        if (normalizeNodeStatus(node) === 'down') downNodes.add(id)
+      })
+      const adj = buildActiveAdjacency(state.links as any[], downNodes)
+      const sessionsToRecompute: Array<{ sessionId: string; reason: string; notify: string; popup: boolean }> = []
+
       state.deployments.forEach((dep: any) => {
         const sessionId = String(dep.session_id ?? '')
         if (!sessionId) return
-        const constraints = dep.score_constraints
-        if (!constraints) return
-        const links = Array.isArray(dep.link_details) ? dep.link_details : []
-        if (links.length === 0) return
 
-        const maxLatency = Number(constraints.max_latency_ms ?? 0)
-        const minBw = Number(constraints.min_bandwidth_gbps ?? 0)
-        const minRel = Number(constraints.min_reliability ?? 0)
-        let totalLatency = 0
-        let bottleneck = Number.POSITIVE_INFINITY
-        let reliability = 1
-        let hasDown = false
-        links.forEach((lk: any) => {
-          const lat = Number(lk.latency_ms ?? 0)
-          const bw = Number(lk.bandwidth_available_gbps ?? lk.bandwidth_gbps ?? 0)
-          const rel = Number(lk.reliability ?? 1)
-          const status = String(lk.status ?? 'active')
-          totalLatency += Math.max(0, lat)
-          bottleneck = Math.min(bottleneck, Math.max(0, bw))
-          reliability *= Math.max(1e-9, rel)
-          if (status === 'down') hasDown = true
-        })
-        if (!Number.isFinite(bottleneck)) bottleneck = 0
+        const sourceNode = String(dep.source_node ?? '')
+        const destinationNode = String(dep.destination_node ?? '')
+        const deployedNodes = Array.isArray(dep.deployed_nodes)
+          ? dep.deployed_nodes.map((n: any) => String(n)).filter(Boolean)
+          : []
+        const anchors = [sourceNode, ...deployedNodes, destinationNode]
+          .filter(Boolean)
+          .filter((v, i, arr) => i === 0 || v !== arr[i - 1])
 
-        const violated =
-          hasDown ||
-          (maxLatency > 0 && totalLatency > maxLatency + 1e-6) ||
-          (minBw > 0 && bottleneck + 1e-9 < minBw) ||
-          (minRel > 0 && reliability + 1e-9 < minRel)
-        if (!violated) return
+        let reason = ''
+        let notify = ''
+        let popup = false
+
+        if (sourceNode && downNodes.has(sourceNode)) {
+          reason = 'source_node_down'
+          notify = `源节点 ${sourceNode} 故障，触发必要重调度`
+          popup = true
+        } else if (destinationNode && downNodes.has(destinationNode)) {
+          reason = 'destination_node_down'
+          notify = `宿节点 ${destinationNode} 故障，触发必要重调度`
+          popup = true
+        } else {
+          const failedDeployNode = deployedNodes.find((id: string) => downNodes.has(id))
+          if (failedDeployNode) {
+            reason = 'deployment_node_down'
+            notify = `部署节点 ${failedDeployNode} 故障，触发必要重调度`
+          } else if (anchors.length >= 2) {
+            for (let i = 0; i + 1 < anchors.length; i++) {
+              const a = anchors[i]
+              const b = anchors[i + 1]
+              if (!hasPath(adj, a, b)) {
+                reason = 'anchor_path_disconnected'
+                notify = `路径断连: ${a} -> ${b} 无可用连通链路，触发必要重调度`
+                break
+              }
+            }
+          }
+        }
+        if (!reason) return
 
         const last = recomputeCooldownRef.current[sessionId] ?? 0
-        if (now - last < 5000) return
+        if (now - last < 8000) return
         if (recomputeInFlightRef.current.has(sessionId)) return
 
         recomputeCooldownRef.current[sessionId] = now
-        sessionsToRecompute.push(sessionId)
+        sessionsToRecompute.push({ sessionId, reason, notify, popup })
       })
 
       if (sessionsToRecompute.length === 0) return
@@ -298,9 +363,19 @@ export function useAutoDynamics() {
         }
       }
 
-      sessionsToRecompute.forEach((sessionId) => {
+      sessionsToRecompute.forEach(({ sessionId, reason, notify, popup }) => {
+        if (popup) {
+          const lastPopup = endpointAlertCooldownRef.current[sessionId] ?? 0
+          if (now - lastPopup > 12000) {
+            endpointAlertCooldownRef.current[sessionId] = now
+            window.alert(`会话 ${sessionId} 需要重调度\n原因：${notify}`)
+          }
+        } else {
+          useStore.getState().addToast(`会话 ${sessionId}: ${notify}`, 'warning')
+        }
+
         recomputeInFlightRef.current.add(sessionId)
-        apiClient.recomputeSFCSession(sessionId, trigger)
+        apiClient.recomputeSFCSession(sessionId, `${trigger}:${reason}`)
           .catch(() => {})
           .finally(() => recomputeInFlightRef.current.delete(sessionId))
       })
@@ -369,7 +444,7 @@ export function useAutoDynamics() {
         })
         if (useStore.getState().deployments.length > 0) {
           useStore.getState().refreshDeploymentPaths()
-          void maybeTriggerSlaRecompute('sla_violation_resource_tick')
+          void maybeTriggerHardRecompute('hard_failure_resource_tick')
         }
       } catch {
         // ignore transient sync failures
@@ -557,7 +632,7 @@ export function useAutoDynamics() {
             if (statusChanged || pathRefreshAccRef.current >= 0.1) {
               pathRefreshAccRef.current = 0
               useStore.getState().refreshDeploymentPaths()
-              void maybeTriggerSlaRecompute('sla_violation_topology_tick')
+              void maybeTriggerHardRecompute('hard_failure_topology_tick')
             }
           }
         }

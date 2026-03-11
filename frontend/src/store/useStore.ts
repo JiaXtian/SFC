@@ -797,7 +797,7 @@ export const useStore = create<Store>((set, get) => ({
       deployment_id: depId,
       backend_deployment_id: existing?.backend_deployment_id,
       request_id: trace.request_id,
-      sfc_name: `会话策略 ${trace.request_id}`,
+      sfc_name: `SFC策略 ${trace.request_id}`,
       candidate_index: 0,
       status: chosen.satisfies_constraints ? 'completed' : 'in-progress',
       inference_latency_ms: Number(trace.inference_time_ms ?? 0),

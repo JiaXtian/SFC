@@ -64,7 +64,7 @@ export default function TopBar() {
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
               style={{ background: 'rgba(14,116,144,0.14)', border: '1px solid rgba(34,211,238,0.28)' }}>
               <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
-              <span className="text-cyan-200 font-semibold">会话 {orch.active_sessions}</span>
+              <span className="text-cyan-200 font-semibold">SFC {orch.active_sessions}</span>
               <span className="text-cyan-300/70">P95 {orch.latency_p95_ms.toFixed(0)}ms</span>
             </div>
           )}

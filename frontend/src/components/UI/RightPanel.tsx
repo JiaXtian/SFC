@@ -10,7 +10,10 @@ export default function RightPanel() {
   const { deployments } = useStore()
 
   return (
-    <div className={`absolute right-0 top-11 bottom-11 z-10 flex transition-all duration-300 ${collapsed ? 'w-8' : 'w-[340px]'}`}>
+    <div
+      className="absolute right-0 top-11 bottom-11 z-10 flex transition-all duration-300"
+      style={{ width: collapsed ? 32 : 'clamp(320px, 22vw, 470px)' }}
+    >
       <button onClick={() => setCollapsed(!collapsed)}
         className="absolute -left-3 top-5 w-6 h-6 rounded-full flex items-center justify-center z-20 shadow-lg"
         style={{ background: 'linear-gradient(135deg, #0f2036, #182f45)' }}>

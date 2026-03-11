@@ -127,11 +127,11 @@ export default function SFCForm() {
     priority_weight: 1.0,
     load_level: 'medium',
   })
-  const [sessionRealtimeConfig, setSessionRealtimeConfig] = useState({
-    max_planning_attempts: 18,
+  const sessionRealtimeConfig = {
+    max_planning_attempts: 20,
     planning_time_budget_ms: 450,
     auto_redeploy: true,
-  })
+  }
   const [trafficEndpoints, setTrafficEndpoints] = useState({
     source_node: '',
     destination_node: '',
@@ -905,55 +905,6 @@ export default function SFCForm() {
             </div>
           </div>
         )}
-      </div>
-
-      <div className="rounded-xl px-3 py-2.5 space-y-2" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
-        <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold">连续编排参数</div>
-        <div className="grid grid-cols-3 gap-2 text-[10px]">
-          <div>
-            <div className="text-slate-500 mb-0.5">最大尝试次数</div>
-            <input
-              type="number"
-              min="4"
-              max="128"
-              value={sessionRealtimeConfig.max_planning_attempts}
-              onChange={(e) =>
-                setSessionRealtimeConfig((p) => ({
-                  ...p,
-                  max_planning_attempts: Math.max(4, Math.min(128, Number(e.target.value) || 18)),
-                }))
-              }
-              className="w-full px-2 py-1 rounded"
-              style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-            />
-          </div>
-          <div>
-            <div className="text-slate-500 mb-0.5">时间预算(ms)</div>
-            <input
-              type="number"
-              min="100"
-              max="2000"
-              step="10"
-              value={sessionRealtimeConfig.planning_time_budget_ms}
-              onChange={(e) =>
-                setSessionRealtimeConfig((p) => ({
-                  ...p,
-                  planning_time_budget_ms: Math.max(100, Math.min(2000, Number(e.target.value) || 450)),
-                }))
-              }
-              className="w-full px-2 py-1 rounded"
-              style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-            />
-          </div>
-          <label className="flex items-end gap-1 text-slate-300 pb-1">
-            <input
-              type="checkbox"
-              checked={sessionRealtimeConfig.auto_redeploy}
-              onChange={(e) => setSessionRealtimeConfig((p) => ({ ...p, auto_redeploy: e.target.checked }))}
-            />
-            自动重部署
-          </label>
-        </div>
       </div>
 
       <button

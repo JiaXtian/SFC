@@ -1,19 +1,19 @@
 import { X, Network, Gauge, Timer, Activity } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 
-const Bar = ({ val = 0, max = 0 }: { val?: number; max?: number }) => {
-  const safeVal = Number(val ?? 0)
-  const safeMax = Number(max ?? 0)
-  const pct = safeMax > 0 ? Math.min(100, (safeVal / safeMax) * 100) : 0
-  const color = pct > 80 ? '#f87171' : pct > 50 ? '#fbbf24' : '#00ff88'
+const Bar = ({ used = 0, total = 0 }: { used?: number; total?: number }) => {
+  const safeUsed = Number(used ?? 0)
+  const safeTotal = Number(total ?? 0)
+  const utilPct = safeTotal > 0 ? Math.min(100, (safeUsed / safeTotal) * 100) : 0
+  const color = utilPct >= 85 ? '#f87171' : utilPct >= 60 ? '#fbbf24' : '#00ff88'
 
   return (
     <div className="flex items-center gap-2.5">
       <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(50,50,60,0.4)' }}>
-        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+        <div className="h-full rounded-full transition-all" style={{ width: `${utilPct}%`, background: color }} />
       </div>
       <span className="text-[10px] font-mono w-9 text-right font-semibold" style={{ color }}>
-        {pct.toFixed(0)}%
+        {utilPct.toFixed(0)}%
       </span>
     </div>
   )
@@ -28,6 +28,9 @@ export default function LinkDetailPanel() {
   const used = Math.max(0, total - avail)
   const status = selectedLink.status ?? 'active'
   const rel = Number(selectedLink.reliability ?? 0.999)
+  const utilPct = total > 0 ? (used / total) * 100 : 0
+  const bwHealthLabel = utilPct >= 85 ? '资源紧张' : utilPct >= 60 ? '资源较少' : '资源充足'
+  const bwHealthColor = utilPct >= 85 ? '#f87171' : utilPct >= 60 ? '#fbbf24' : '#22c55e'
 
   const statusLabel = status === 'down' ? '故障' : status === 'congested' ? '拥塞' : '正常'
   const statusColor = status === 'down' ? '#ef4444' : status === 'congested' ? '#f59e0b' : '#22c55e'
@@ -81,7 +84,10 @@ export default function LinkDetailPanel() {
                 {avail.toFixed(2)} / {total.toFixed(2)} Gbps
               </span>
             </div>
-            <Bar val={avail} max={total} />
+            <Bar used={used} total={total} />
+            <div className="mt-1 text-[10px] font-medium" style={{ color: bwHealthColor }}>
+              带宽状态：{bwHealthLabel}
+            </div>
           </div>
         </div>
 

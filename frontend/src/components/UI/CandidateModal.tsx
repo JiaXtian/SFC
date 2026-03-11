@@ -188,7 +188,7 @@ export default function CandidateModal() {
           }),
           request_id: requestId,
           realtime_mode: true,
-          max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 18),
+          max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 20),
           planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
           initial_candidate: cand,
         }

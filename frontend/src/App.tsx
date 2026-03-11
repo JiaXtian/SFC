@@ -22,6 +22,10 @@ export default function App() {
   useWebSocket()
   useAutoDynamics()
   const { candidateResult, setSelectedSatellite, setSelectedLink, display } = useStore()
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }))
   const [route, setRoute] = useState<'main' | 'monitor'>(() =>
     window.location.pathname.startsWith('/monitor') ? 'monitor' : 'main'
   )
@@ -33,6 +37,30 @@ export default function App() {
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
+
+  useEffect(() => {
+    if (route === 'main') {
+      document.body.style.cursor = 'default'
+    }
+  }, [route])
+
+  useEffect(() => {
+    const onResize = () => {
+      setViewport({
+        w: window.innerWidth,
+        h: window.innerHeight,
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const uiScale = useMemo(() => {
+    const widthScale = viewport.w / 1680
+    const heightScale = viewport.h / 950
+    const scale = Math.min(widthScale, heightScale)
+    return Math.max(0.9, Math.min(1.34, scale))
+  }, [viewport])
   const qualityConfig = useMemo(() => {
     if (display.renderQuality === 'performance') {
       return {
@@ -57,14 +85,6 @@ export default function App() {
       starCount: 7000,
     }
   }, [display.renderQuality])
-
-  if (route === 'monitor') {
-    return (
-      <Suspense fallback={<div className="w-screen h-screen bg-black" />}>
-        <MonitoringPage />
-      </Suspense>
-    )
-  }
 
   return (
     <div className="w-screen h-screen overflow-hidden"
@@ -117,20 +137,39 @@ export default function App() {
       </Canvas>
 
       {/* UI Layer */}
-      <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 10 }}>
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          ['--ui-scale' as any]: uiScale,
+          zIndex: 10,
+          transform: `scale(${uiScale})`,
+          transformOrigin: 'top left',
+          width: `${100 / uiScale}%`,
+          height: `${100 / uiScale}%`,
+        }}
+      >
         <div className="pointer-events-auto"><TopBar /></div>
         <div className="pointer-events-auto"><LeftPanel /></div>
-        <div className="pointer-events-auto"><RightPanel /></div>
         <div className="pointer-events-auto"><SatelliteDetail /></div>
         <div className="pointer-events-auto"><LinkDetailPanel /></div>
         <div className="pointer-events-auto"><BottomHub /></div>
         <div className="pointer-events-auto"><TimeAxis /></div>
+      </div>
+
+      <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 11 }}>
+        <div className="pointer-events-auto"><RightPanel /></div>
         {candidateResult && (
           <Suspense fallback={null}>
             <div className="pointer-events-auto"><CandidateModal /></div>
           </Suspense>
         )}
       </div>
+
+      {route === 'monitor' && (
+        <Suspense fallback={<div className="absolute inset-0 z-[90] bg-black" />}>
+          <MonitoringPage />
+        </Suspense>
+      )}
     </div>
   )
 }

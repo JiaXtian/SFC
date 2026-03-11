@@ -54,7 +54,7 @@ export function useWebSocket() {
                 pushRuntimeEvent({
                   type: 'playback_buffered',
                   sim_time: data?.snapshot?.sim_time,
-                  message: '收到实时拓扑tick（已缓冲，当前为回放模式）',
+                  message: '收到实时拓扑更新周期数据（已缓冲，当前为回放模式）',
                   raw: { topology_version: data?.snapshot?.topology_version },
                 })
               }
@@ -84,7 +84,7 @@ export function useWebSocket() {
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `会话更新 ${data.session_id}: ${data.status} (topo_v${data.topology_version})`,
+                message: `SFC编排更新 ${data.session_id}: ${data.status} (topo_v${data.topology_version})`,
                 raw: data,
               })
               return
