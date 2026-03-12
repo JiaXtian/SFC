@@ -94,6 +94,7 @@ def augment_training_data(
             generate_sfc_requests(
                 num_requests=req_count,
                 node_list=nodes,
+                topology_data=topo,
                 output_file=str(train_request_dir / f"requests_{i:03d}_{j:03d}.json"),
                 load_profile=load_profile,
                 seed=1000 + i * 100 + j,
@@ -120,6 +121,7 @@ def augment_training_data(
         generate_sfc_requests(
             num_requests=val_requests_per_topology,
             node_list=nodes,
+            topology_data=topo,
             output_file=str(val_request_dir / f"requests_{i:03d}.json"),
             load_profile=profile,
             seed=9000 + i,

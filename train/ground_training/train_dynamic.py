@@ -254,6 +254,8 @@ class HeuristicPruner:
             projected_total_hops = int(accumulated_hops + h1 + max(1, h2))
             if projected_total_hops > self.HARD_TOTAL_HOPS:
                 continue
+            if projected_total_hops > self.TARGET_TOTAL_HOPS + 4:
+                continue
 
             node_rel = float(G.nodes[node].get("node_reliability", 0.98))
             optimistic_rel = float(accumulated_reliability) * max(1e-9, min(1.0, node_rel)) * future_rel
@@ -261,7 +263,11 @@ class HeuristicPruner:
                 continue
 
             hop_cost = float(h1) / max(1.0, float(hop_cap))
-            candidates.append((node, total_d + self.HOP_PENALTY_MS * hop_cost))
+            hop_over = max(0, projected_total_hops - self.TARGET_TOTAL_HOPS)
+            hop_ratio = float(projected_total_hops) / max(1.0, float(self.TARGET_TOTAL_HOPS))
+            hop_pressure = max(0.0, hop_ratio - 1.0)
+            score = total_d + self.HOP_PENALTY_MS * hop_cost + 3.0 * float(hop_over) + 5.0 * float(hop_pressure)
+            candidates.append((node, score))
             if len(candidates) >= top_m * 3:
                 break
 

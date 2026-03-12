@@ -2,7 +2,9 @@
 import argparse
 import csv
 import glob
+import heapq
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -26,13 +28,35 @@ from ground_training.training.trainer import SFCTrainer
 
 class HeuristicPruner:
     TARGET_TOTAL_HOPS = 25
+    HARD_TOTAL_HOPS = 30
     MIN_LEG_HOP_CAP = 3
     MAX_LEG_HOP_CAP = 10
     RELAXED_LEG_HOP_CAP = 14
     HOP_PENALTY_MS = 2.5
+    PATH_SOFTENING_EXPONENT = 0.46
+    EXCESS_HOP_RELIABILITY_PENALTY = 0.9988
+    FUTURE_STEP_RELIABILITY_DECAY = 0.9990
 
     def __init__(self, top_m=80):
         self.top_m = top_m
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @classmethod
+    def _softened_path_reliability(cls, raw_reliability: float, hops: int) -> float:
+        if hops <= 0:
+            return 1.0
+        raw = max(1e-9, cls._clamp01(raw_reliability))
+        geometric_mean = raw ** (1.0 / max(1, hops))
+        softened_product = raw ** cls.PATH_SOFTENING_EXPONENT
+        if hops <= 6:
+            blend = 0.7 * softened_product + 0.3 * geometric_mean
+        else:
+            blend = 0.82 * softened_product + 0.18 * geometric_mean
+        excess_hops = max(0, hops - 6)
+        return cls._clamp01(blend * (cls.EXCESS_HOP_RELIABILITY_PENALTY ** excess_hops))
 
     @classmethod
     def _compute_hop_cap(cls, current_hops: int, current_vnf_idx: int, total_vnfs: int) -> int:
@@ -60,6 +84,93 @@ class HeuristicPruner:
             active.add_edge(u, v, **d)
         return active
 
+    @classmethod
+    def _estimate_link_reliability(cls, edge: dict) -> float:
+        if int(edge.get("link_status", 1)) != 1:
+            return 0.0
+        status = str(edge.get("status", "active")).lower()
+        if status == "down":
+            return 0.0
+        bw_total = float(edge.get("bandwidth_gbps", 0.0))
+        bw_avail = float(edge.get("bandwidth_available_gbps", 0.0))
+        bw_ratio = cls._clamp01(bw_avail / bw_total) if bw_total > 1e-9 else 0.0
+        base = cls._clamp01(float(edge.get("link_reliability", edge.get("reliability", 0.98))))
+        bandwidth_factor = 0.98 + 0.02 * bw_ratio
+        status_penalty = 0.985 if status == "congested" else 1.0
+        return cls._clamp01(base * bandwidth_factor * status_penalty)
+
+    @classmethod
+    def _dijkstra_constrained(cls, G, source, target, bw_req: float, max_hops: int):
+        if source == target:
+            return [source], 0.0, 1.0, 0
+        if source not in G or target not in G:
+            return [], float("inf"), 0.0, 0
+
+        dist = {source: 0.0}
+        latency = {source: 0.0}
+        hops = {source: 0}
+        reliability_raw = {source: 1.0}
+        prev = {}
+        pq = [(0.0, source)]
+
+        while pq:
+            cur_cost, u = heapq.heappop(pq)
+            if cur_cost > dist.get(u, float("inf")) + 1e-9:
+                continue
+            if u == target:
+                break
+
+            for v, edge in G[u].items():
+                if int(edge.get("link_status", 1)) != 1:
+                    continue
+                if float(edge.get("bandwidth_available_gbps", 0.0)) + 1e-9 < bw_req:
+                    continue
+
+                next_hops = hops[u] + 1
+                if max_hops > 0 and next_hops > max_hops:
+                    continue
+                next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
+                next_cost = next_latency + cls.HOP_PENALTY_MS * next_hops
+                edge_rel = max(1e-9, cls._estimate_link_reliability(edge))
+                next_rel = reliability_raw[u] * edge_rel
+
+                old_cost = dist.get(v, float("inf"))
+                old_latency = latency.get(v, float("inf"))
+                old_rel = reliability_raw.get(v, 0.0)
+                should_update = (
+                    next_cost + 1e-9 < old_cost
+                    or (
+                        abs(next_cost - old_cost) <= 1e-9
+                        and (
+                            next_latency + 1e-9 < old_latency
+                            or (abs(next_latency - old_latency) <= 1e-9 and next_rel > old_rel + 1e-9)
+                        )
+                    )
+                )
+                if not should_update:
+                    continue
+
+                dist[v] = next_cost
+                latency[v] = next_latency
+                hops[v] = next_hops
+                reliability_raw[v] = next_rel
+                prev[v] = u
+                heapq.heappush(pq, (next_cost, v))
+
+        if target not in prev and target != source:
+            return [], float("inf"), 0.0, 0
+
+        path = [target]
+        while path[-1] != source:
+            nxt = prev.get(path[-1])
+            if nxt is None:
+                return [], float("inf"), 0.0, 0
+            path.append(nxt)
+        path.reverse()
+        hop_count = max(0, len(path) - 1)
+        softened_rel = cls._softened_path_reliability(reliability_raw.get(target, 1.0), hop_count)
+        return path, float(latency.get(target, 0.0)), float(softened_rel), hop_count
+
     def find_path(
         self,
         G,
@@ -70,34 +181,17 @@ class HeuristicPruner:
         current_vnf_idx=0,
         total_vnfs=1,
     ):
-        import networkx as nx
-
-        if source == target:
-            return [source], 0.0, 1.0, 0
-
         active_graph = self._active_graph(G, bw_req=float(bw_req))
         hop_cap = self._compute_hop_cap(current_hops, current_vnf_idx, total_vnfs)
+        path, delay, rel, hops = self._dijkstra_constrained(
+            active_graph, source, target, bw_req=float(bw_req), max_hops=hop_cap
+        )
+        if path:
+            return path, delay, rel, hops
         relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
-
-        for cap in (hop_cap, relaxed_cap):
-            try:
-                path = nx.shortest_path(
-                    active_graph,
-                    source,
-                    target,
-                    weight=lambda _u, _v, d: float(d.get("latency_ms", 0.0)) + self.HOP_PENALTY_MS,
-                )
-            except Exception:
-                continue
-            hop_count = max(0, len(path) - 1)
-            if cap > 0 and hop_count > cap:
-                continue
-            delay = 0.0
-            for i in range(len(path) - 1):
-                delay += float(active_graph[path[i]][path[i + 1]].get("latency_ms", 0.0))
-            return path, float(delay), 1.0, hop_count
-
-        return [], float("inf"), 0.0, 0
+        return self._dijkstra_constrained(
+            active_graph, source, target, bw_req=float(bw_req), max_hops=relaxed_cap
+        )
 
     def prune(
         self,
@@ -108,6 +202,11 @@ class HeuristicPruner:
         remaining_delay,
         top_m=None,
         bandwidth_demand_gbps=0.0,
+        current_vnf_idx=0,
+        total_vnfs=1,
+        accumulated_reliability=1.0,
+        reliability_requirement=0.0,
+        accumulated_hops=0,
         **_kwargs,
     ):
         import networkx as nx
@@ -126,6 +225,8 @@ class HeuristicPruner:
             dist_to_dest = nx.single_source_dijkstra_path_length(
                 reverse_graph, dest_node, weight="latency_ms"
             )
+            hop_from_prev = nx.single_source_shortest_path_length(active_graph, prev_node)
+            hop_to_dest = nx.single_source_shortest_path_length(reverse_graph, dest_node)
         except Exception:
             return []
 
@@ -133,6 +234,10 @@ class HeuristicPruner:
         mem_req = float(vnf.get("mem_required", 0.0))
         disk_req = float(vnf.get("disk_required_gb", 0.0))
         delay_cap = float(remaining_delay)
+        hop_cap = self._compute_hop_cap(accumulated_hops, current_vnf_idx, total_vnfs)
+        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
+        remaining_steps = max(0, int(total_vnfs) - int(current_vnf_idx))
+        future_rel = self.FUTURE_STEP_RELIABILITY_DECAY ** remaining_steps
 
         valid_nodes = [
             n
@@ -153,7 +258,33 @@ class HeuristicPruner:
             total_d = d1 + d2
             if total_d > delay_cap:
                 continue
-            candidates.append((node, total_d))
+            h1 = hop_from_prev.get(node, math.inf)
+            h2 = hop_to_dest.get(node, math.inf)
+            if h1 == math.inf or h2 == math.inf:
+                continue
+            if h1 > relaxed_cap:
+                continue
+            projected_hops = int(accumulated_hops + h1 + max(1, h2))
+            if projected_hops > self.HARD_TOTAL_HOPS:
+                continue
+            if projected_hops > self.TARGET_TOTAL_HOPS + 4:
+                continue
+
+            node_rel = float(G.nodes[node].get("node_reliability", 0.98))
+            optimistic_rel = float(accumulated_reliability) * max(1e-9, min(1.0, node_rel)) * future_rel
+            if optimistic_rel + 1e-9 < float(reliability_requirement) * 0.72:
+                continue
+
+            hop_over = max(0, projected_hops - self.TARGET_TOTAL_HOPS)
+            hop_ratio = float(projected_hops) / max(1.0, float(self.TARGET_TOTAL_HOPS))
+            hop_pressure = max(0.0, hop_ratio - 1.0)
+            score = (
+                total_d
+                + self.HOP_PENALTY_MS * float(h1) / max(1.0, float(hop_cap))
+                + 3.0 * float(hop_over)
+                + 5.0 * float(hop_pressure)
+            )
+            candidates.append((node, score))
             if len(candidates) >= top_m * 3:
                 break
 
@@ -490,6 +621,13 @@ def main():
             - epoch_metrics["avg_algorithm_latency_ms"] * 0.15
             - epoch_metrics["avg_episode_delay_ms"] * 0.05
         )
+        total_req = int(epoch_metrics.get("total_requests", 0))
+        fail_count = int(max(0, round(total_req * (100.0 - float(epoch_metrics["success_rate"])) / 100.0)))
+        print(
+            f"Epoch {epoch} | Score={composite_score:.2f} | Reward={epoch_metrics['avg_reward']:.2f} | "
+            f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
+            f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"
+        )
 
         if composite_score > best_score:
             best_score = composite_score
@@ -498,8 +636,7 @@ def main():
             torch.save(gnn.state_dict(), "models/checkpoints/gnn_best.pth")
             print(
                 "  ✓ 新最佳模型: "
-                f"Score={composite_score:.2f}, Success={epoch_metrics['success_rate']:.2f}%, "
-                f"SLA={epoch_metrics['sla_satisfaction_rate']:.2f}%"
+                f"Score={composite_score:.2f}, Success={epoch_metrics['success_rate']:.2f}%"
             )
             collapse_count = 0
 

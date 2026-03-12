@@ -496,7 +496,7 @@ class SFCEnvironment:
         reward += self.reward_config["sla_bonus"] * max(0.0, 1.0 - delay_ratio) * 0.4
         reward += self.reward_config["sla_bonus"] * max(-0.5, min(0.5, reliability_gap)) * 0.8
         hop_ratio = self.accumulated_hops / max(1.0, float(sla["max_total_hops"]))
-        reward += self.reward_config["sla_bonus"] * max(-0.4, 1.0 - hop_ratio) * 0.18
+        reward += self.reward_config["sla_bonus"] * max(-0.8, 1.0 - hop_ratio) * 0.45
 
         node_usage_count = sum(1 for dep in self.deployed_vnfs if dep["node"] == selected_node)
         if node_usage_count > 1:
@@ -580,6 +580,8 @@ class SFCEnvironment:
             self.accumulated_hops = final_total_hops
             reward += self.reward_config["completion_bonus"]
             reward += self.reward_config["completion_bonus"] * max(0.0, 1.0 - final_total_delay / max(sla["latency_requirement_ms"], 1e-6)) * 0.3
+            final_hop_ratio = final_total_hops / max(1.0, float(sla["max_total_hops"]))
+            reward += self.reward_config["completion_bonus"] * max(-0.5, 1.0 - final_hop_ratio) * 0.2
             info["success"] = True
 
         next_state = None if done else self._build_state()

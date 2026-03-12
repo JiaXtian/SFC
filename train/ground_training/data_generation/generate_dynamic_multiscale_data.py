@@ -108,6 +108,7 @@ def _build_request_timeline(
         payload = build_sfc_requests_payload(
             num_requests=req_per_step,
             node_list=active_nodes,
+            topology_data=step.get("topology", {}),
             load_profile=_load_profile_for_step(step_idx),
             seed=seed_base + step_idx,
             topology_scale=total_sats,

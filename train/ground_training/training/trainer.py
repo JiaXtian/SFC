@@ -24,6 +24,7 @@ class SFCTrainer:
         context_dim=48,
         history_window=0,
         backend_align_context=True,
+        max_probe_candidates=24,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -31,6 +32,7 @@ class SFCTrainer:
         self.context_dim = int(context_dim)
         self.history_window = int(max(0, history_window))
         self.backend_align_context = bool(backend_align_context)
+        self.max_probe_candidates = int(max(6, max_probe_candidates))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -474,25 +476,48 @@ class SFCTrainer:
                 )
 
             action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
-            selected = nodes_list[candidate_indices[action_idx]]
-
             bw_req = max(
                 float(vnf.get("bandwidth_required_gbps", 0.0)),
                 float(state.get("bandwidth_demand_gbps", 0.0)),
             )
-            try:
-                path, delay, _, _ = heuristic_pruner.find_path(
-                    env.topology,
-                    prev_node,
-                    selected,
-                    bw_req=bw_req,
-                    current_hops=int(state.get("accumulated_hops", 0)),
-                    current_vnf_idx=int(state.get("current_vnf_idx", 0)),
-                    total_vnfs=int(state.get("total_vnfs", 1)),
-                )
-                if not path:
-                    raise RuntimeError("no_constrained_path")
-            except Exception:
+            probe_order = [action_idx] + [idx for idx in range(len(candidate_indices)) if idx != action_idx]
+            max_probe = min(self.max_probe_candidates, len(probe_order))
+            probe_candidates = []
+            selected = None
+            path = []
+            delay = 0.0
+            acc_hops = int(state.get("accumulated_hops", 0))
+            target_hops = int(state.get("max_total_hops", 25))
+            remain_vnfs_after_step = max(
+                0,
+                int(state.get("total_vnfs", 1)) - int(state.get("current_vnf_idx", 0)) - 1,
+            )
+            for probe_idx in probe_order[:max_probe]:
+                selected_node = nodes_list[candidate_indices[probe_idx]]
+                try:
+                    p, d, _, h = heuristic_pruner.find_path(
+                        env.topology,
+                        prev_node,
+                        selected_node,
+                        bw_req=bw_req,
+                        current_hops=int(state.get("accumulated_hops", 0)),
+                        current_vnf_idx=int(state.get("current_vnf_idx", 0)),
+                        total_vnfs=int(state.get("total_vnfs", 1)),
+                    )
+                except Exception:
+                    p = []
+                    d = 0.0
+                    h = 0
+                if p:
+                    path_hops = int(max(h, len(p) - 1))
+                    projected_hops = acc_hops + path_hops + 1 + remain_vnfs_after_step * 2
+                    hop_over_penalty = max(0, projected_hops - target_hops)
+                    probe_score = float(d) + 2.2 * float(path_hops) + 6.0 * float(hop_over_penalty)
+                    probe_candidates.append((probe_score, probe_idx, selected_node, p, float(d)))
+            if probe_candidates:
+                probe_candidates.sort(key=lambda x: x[0])
+                _score, action_idx, selected, path, delay = probe_candidates[0]
+            if not path or selected is None:
                 failure_reason = "path_error"
                 return finish_episode(False, failure_reason)
 
@@ -627,15 +652,11 @@ class SFCTrainer:
 
                 if req_idx % 10 == 0:
                     succ_rate = 100.0 * success_count / max(1, total_requests)
-                    sla_rate = 100.0 * sla_met_count / max(1, total_requests)
-                    full_sla_rate = 100.0 * full_sla_met_count / max(1, total_requests)
                     pbar.set_postfix(
                         {
                             "Topo": f"{topo_idx + 1}/{len(train_data)}",
-                            "Mode": "Shared" if use_shared else "Indep",
                             "Succ": f"{succ_rate:.1f}%",
-                            "SLA": f"{sla_rate:.1f}%",
-                            "FullSLA": f"{full_sla_rate:.1f}%",
+                            "Fail": int(total_requests - success_count),
                             "AlgLat": f"{np.mean(decision_lat_means):.2f}ms" if decision_lat_means else "0ms",
                         }
                     )
@@ -671,23 +692,14 @@ class SFCTrainer:
         }
 
         self.logger.info(
-            "Epoch %d | Reward=%.2f | Success=%.2f%% | SLA=%.2f%% | FullSLA=%.2f%% | "
-            "DepDelay=%.2fms | AlgDelay=%.2fms(p95=%.2fms) | ResFail=%d | Req=%d | "
-            "RelScale=%.3f | StrictRelProb=%.2f | Time=%.1fs | Eps=%.3f | TopFail=%s",
+            "Epoch %d | Reward=%.2f | Success=%.2f%% | DepDelay=%.2fms | "
+            "Fail=%d/%d | TopFail=%s",
             epoch,
             avg_reward,
             success_rate,
-            sla_rate,
-            full_sla_rate,
             avg_ep_delay,
-            avg_alg_delay,
-            p95_alg_delay,
-            resource_fail_count,
+            int(total_requests - success_count),
             total_requests,
-            reliability_scale,
-            strict_reliability_prob,
-            epoch_time,
-            epsilon,
             metrics["top_failure_reasons"],
         )
         return metrics
@@ -904,24 +916,48 @@ class SFCTrainer:
                 )
 
             action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
-            selected = nodes_list[candidate_indices[action_idx]]
             bw_req = max(
                 float(vnf.get("bandwidth_required_gbps", 0.0)),
                 float(state_dyn.get("bandwidth_demand_gbps", 0.0)),
             )
-            try:
-                path, delay, _, _ = heuristic_pruner.find_path(
-                    env.topology,
-                    prev_node,
-                    selected,
-                    bw_req=bw_req,
-                    current_hops=int(state_dyn.get("accumulated_hops", 0)),
-                    current_vnf_idx=int(state_dyn.get("current_vnf_idx", 0)),
-                    total_vnfs=int(state_dyn.get("total_vnfs", 1)),
-                )
-                if not path:
-                    raise RuntimeError("no_constrained_path")
-            except Exception:
+            probe_order = [action_idx] + [idx for idx in range(len(candidate_indices)) if idx != action_idx]
+            max_probe = min(self.max_probe_candidates, len(probe_order))
+            probe_candidates = []
+            selected = None
+            path = []
+            delay = 0.0
+            acc_hops = int(state_dyn.get("accumulated_hops", 0))
+            target_hops = int(state_dyn.get("max_total_hops", 25))
+            remain_vnfs_after_step = max(
+                0,
+                int(state_dyn.get("total_vnfs", 1)) - int(state_dyn.get("current_vnf_idx", 0)) - 1,
+            )
+            for probe_idx in probe_order[:max_probe]:
+                selected_node = nodes_list[candidate_indices[probe_idx]]
+                try:
+                    p, d, _, h = heuristic_pruner.find_path(
+                        env.topology,
+                        prev_node,
+                        selected_node,
+                        bw_req=bw_req,
+                        current_hops=int(state_dyn.get("accumulated_hops", 0)),
+                        current_vnf_idx=int(state_dyn.get("current_vnf_idx", 0)),
+                        total_vnfs=int(state_dyn.get("total_vnfs", 1)),
+                    )
+                except Exception:
+                    p = []
+                    d = 0.0
+                    h = 0
+                if p:
+                    path_hops = int(max(h, len(p) - 1))
+                    projected_hops = acc_hops + path_hops + 1 + remain_vnfs_after_step * 2
+                    hop_over_penalty = max(0, projected_hops - target_hops)
+                    probe_score = float(d) + 2.2 * float(path_hops) + 6.0 * float(hop_over_penalty)
+                    probe_candidates.append((probe_score, probe_idx, selected_node, p, float(d)))
+            if probe_candidates:
+                probe_candidates.sort(key=lambda x: x[0])
+                _score, action_idx, selected, path, delay = probe_candidates[0]
+            if not path or selected is None:
                 failure_reason = "path_error"
                 return finish_episode(False, failure_reason, info)
 
@@ -1069,14 +1105,11 @@ class SFCTrainer:
 
                 if total_requests % 10 == 0:
                     succ_rate = 100.0 * success_count / max(1, total_requests)
-                    sla_rate = 100.0 * sla_met_count / max(1, total_requests)
-                    full_sla_rate = 100.0 * full_sla_met_count / max(1, total_requests)
                     pbar.set_postfix(
                         {
                             "Seq": f"{seq_idx + 1}/{len(sequence_data)}",
                             "Succ": f"{succ_rate:.1f}%",
-                            "SLA": f"{sla_rate:.1f}%",
-                            "FullSLA": f"{full_sla_rate:.1f}%",
+                            "Fail": int(total_requests - success_count),
                             "AlgLat": f"{np.mean(decision_lat_means):.2f}ms" if decision_lat_means else "0ms",
                         }
                     )
@@ -1111,18 +1144,14 @@ class SFCTrainer:
             )[:8],
         }
         self.logger.info(
-            "Dynamic Epoch %d | Reward=%.2f | Success=%.2f%% | SLA=%.2f%% | FullSLA=%.2f%% | "
-            "DepDelay=%.2fms | AlgDelay=%.2fms(p95=%.2fms) | Req=%d | Updated=%d | TopFail=%s",
+            "Dynamic Epoch %d | Reward=%.2f | Success=%.2f%% | DepDelay=%.2fms | "
+            "Fail=%d/%d | TopFail=%s",
             epoch,
             avg_reward,
             success_rate,
-            sla_rate,
-            full_sla_rate,
             avg_ep_delay,
-            avg_alg_delay,
-            p95_alg_delay,
+            int(total_requests - success_count),
             total_requests,
-            updated_episodes,
             metrics["top_failure_reasons"],
         )
         return metrics
