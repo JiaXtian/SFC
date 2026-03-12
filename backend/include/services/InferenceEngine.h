@@ -64,6 +64,7 @@ private:
         size_t current_vnf_idx,
         double remaining_latency,
         double accumulated_reliability,
+        int accumulated_hops,
         const std::unordered_set<std::string>& deployed_node_set,
         const Topology& topology
     );

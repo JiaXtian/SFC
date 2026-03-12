@@ -24,7 +24,7 @@ class SatelliteConstellationGenerator:
         link_bw_range=(5.0, 12.0),
         link_latency_base=1.0,
         link_up_probability=0.96,
-        link_reliability_range=(0.96, 0.999),
+        link_reliability_range=(0.985, 0.9997),
     ):
         self.total_sats = total_sats
         self.num_planes = num_planes
@@ -177,6 +177,8 @@ class SatelliteConstellationGenerator:
         latency = max(0.1, distance * self.link_latency_base / 1000.0)
         bw_total = np.random.uniform(*self.link_bw_range)
         bw_avail = bw_total * np.random.uniform(0.55, 0.96)
+        dist_factor = max(0.0, min(1.0, 1.0 - distance / max(1.0, self.isl_range_km)))
+        reliability = float(max(0.95, min(0.9997, 0.985 + 0.014 * dist_factor)))
 
         link_status = 1 if np.random.random() < self.link_up_probability else 0
         if link_status == 0:
@@ -192,9 +194,7 @@ class SatelliteConstellationGenerator:
                 "jitter_ms": round(float(np.random.uniform(0.05, 2.0)), 3),
                 "bandwidth_gbps": round(float(bw_total), 2),
                 "bandwidth_available_gbps": round(float(bw_avail), 2),
-                "link_reliability": round(
-                    float(np.random.uniform(*self.link_reliability_range)), 5
-                ),
+                "link_reliability": round(reliability, 5),
             }
         )
 

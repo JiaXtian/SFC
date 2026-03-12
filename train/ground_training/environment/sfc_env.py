@@ -1,5 +1,6 @@
 """SFC编排环境（完整指标输入 + SLA约束版）"""
 import copy
+import heapq
 from typing import Dict, List, Optional
 
 import networkx as nx
@@ -8,6 +9,12 @@ import torch
 
 
 class SFCEnvironment:
+    TARGET_TOTAL_HOPS = 25
+    HARD_TOTAL_HOPS = 30
+    PATH_SOFTENING_EXPONENT = 0.46
+    EXCESS_HOP_RELIABILITY_PENALTY = 0.9988
+    HOP_PENALTY_MS = 2.5
+
     def __init__(
         self,
         topology: nx.DiGraph,
@@ -41,6 +48,7 @@ class SFCEnvironment:
         self.prev_node = None
         self.accumulated_delay = 0.0
         self.accumulated_reliability = 1.0
+        self.accumulated_hops = 0
         self.deployed_vnfs = []
         self.resource_snapshots = []
 
@@ -50,10 +58,15 @@ class SFCEnvironment:
             return 1.0
         raw = max(1e-9, min(1.0, float(raw_reliability)))
         geometric_mean = raw ** (1.0 / max(1, hops))
-        softened_product = raw ** 0.46
+        softened_product = raw ** SFCEnvironment.PATH_SOFTENING_EXPONENT
         blend = (0.7 * softened_product + 0.3 * geometric_mean) if hops <= 6 else (0.82 * softened_product + 0.18 * geometric_mean)
         excess_hops = max(0, hops - 6)
-        return float(max(0.0, min(1.0, blend * (0.9992 ** excess_hops))))
+        return float(
+            max(
+                0.0,
+                min(1.0, blend * (SFCEnvironment.EXCESS_HOP_RELIABILITY_PENALTY ** excess_hops)),
+            )
+        )
 
     def reset(self, sfc_request: Dict, reset_resources=None) -> Dict:
         should_reset = reset_resources if reset_resources is not None else (not self.shared_resources)
@@ -65,6 +78,7 @@ class SFCEnvironment:
         self.prev_node = sfc_request["source_node"]
         self.accumulated_delay = 0.0
         self.accumulated_reliability = 1.0
+        self.accumulated_hops = 0
         self.deployed_vnfs = []
         self.resource_snapshots = []
         return self._build_state()
@@ -155,6 +169,10 @@ class SFCEnvironment:
         reliability_scale = float(self.sfc_request.get("reliability_scale", 1.0))
         effective_reliability_req = min(0.999, max(0.0, base_reliability_req * reliability_scale))
         strict_reliability = bool(self.sfc_request.get("strict_reliability", self.strict_reliability))
+        max_total_hops = int(self.sfc_request.get("max_total_hops", self.TARGET_TOTAL_HOPS))
+        hard_max_total_hops = int(self.sfc_request.get("hard_max_total_hops", self.HARD_TOTAL_HOPS))
+        max_total_hops = max(8, min(self.HARD_TOTAL_HOPS, max_total_hops))
+        hard_max_total_hops = max(max_total_hops, min(64, hard_max_total_hops))
         return {
             "latency_requirement_ms": float(
                 sla.get("latency_requirement_ms", self.sfc_request.get("max_latency_ms", 100.0))
@@ -166,6 +184,8 @@ class SFCEnvironment:
             "base_reliability_requirement": base_reliability_req,
             "reliability_scale": reliability_scale,
             "strict_reliability": strict_reliability,
+            "max_total_hops": max_total_hops,
+            "hard_max_total_hops": hard_max_total_hops,
         }
 
     def _build_state(self) -> Dict:
@@ -184,6 +204,7 @@ class SFCEnvironment:
             "total_vnfs": len(self.sfc_request["vnf_sequence"]),
             "accumulated_delay": self.accumulated_delay,
             "accumulated_reliability": self.accumulated_reliability,
+            "accumulated_hops": int(self.accumulated_hops),
             "remaining_reliability_margin": remaining_reliability_margin,
             "core_network_load": float(self.sfc_request.get("core_network_load", 0.5)),
             "bandwidth_demand_gbps": sla["bandwidth_demand_gbps"],
@@ -191,6 +212,8 @@ class SFCEnvironment:
             "base_reliability_requirement": sla["base_reliability_requirement"],
             "reliability_scale": sla["reliability_scale"],
             "strict_reliability": sla["strict_reliability"],
+            "max_total_hops": int(sla["max_total_hops"]),
+            "hard_max_total_hops": int(sla["hard_max_total_hops"]),
             "priority_weight": float(self.sfc_request.get("priority_weight", 1.0)),
             "load_level": self.sfc_request.get("load_level", "medium"),
         }
@@ -236,8 +259,97 @@ class SFCEnvironment:
         raw_product = 1.0
         for i in range(len(path) - 1):
             edge_data = topology[path[i]][path[i + 1]]
-            raw_product *= max(1e-9, float(edge_data.get("link_reliability", 0.98)))
+            raw_product *= max(1e-9, SFCEnvironment._estimate_link_reliability(edge_data))
         return SFCEnvironment._softened_path_reliability(raw_product, len(path) - 1)
+
+    @staticmethod
+    def _estimate_link_reliability(edge_data: Dict) -> float:
+        if int(edge_data.get("link_status", 1)) != 1:
+            return 0.0
+        status = str(edge_data.get("status", "active")).lower()
+        if status == "down":
+            return 0.0
+        base = max(0.0, min(1.0, float(edge_data.get("link_reliability", edge_data.get("reliability", 0.98)))))
+        bw_total = float(edge_data.get("bandwidth_gbps", 0.0))
+        bw_avail = float(edge_data.get("bandwidth_available_gbps", 0.0))
+        bw_ratio = max(0.0, min(1.0, bw_avail / bw_total)) if bw_total > 1e-9 else 0.0
+        bandwidth_factor = 0.98 + 0.02 * bw_ratio
+        status_penalty = 0.985 if status == "congested" else 1.0
+        return max(0.0, min(1.0, base * bandwidth_factor * status_penalty))
+
+    def _find_constrained_path(
+        self,
+        source: str,
+        target: str,
+        bw_req: float,
+        max_hops: int,
+    ) -> List[str]:
+        if source == target:
+            return [source]
+        if source not in self.topology.nodes or target not in self.topology.nodes:
+            return []
+
+        dist = {source: 0.0}
+        latency = {source: 0.0}
+        hops = {source: 0}
+        reliability = {source: 1.0}
+        prev = {}
+        pq = [(0.0, source)]
+
+        while pq:
+            cur_cost, u = heapq.heappop(pq)
+            if cur_cost > dist.get(u, float("inf")) + 1e-9:
+                continue
+            if u == target:
+                break
+            for v in self.topology.successors(u):
+                edge = self.topology[u][v]
+                if int(edge.get("link_status", 1)) != 1:
+                    continue
+                if float(edge.get("bandwidth_available_gbps", 0.0)) + 1e-9 < bw_req:
+                    continue
+                next_hops = hops[u] + 1
+                if max_hops > 0 and next_hops > max_hops:
+                    continue
+                next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
+                next_cost = next_latency + self.HOP_PENALTY_MS * next_hops
+                edge_rel = max(1e-9, self._estimate_link_reliability(edge))
+                next_rel = reliability[u] * edge_rel
+
+                old_cost = dist.get(v, float("inf"))
+                old_latency = latency.get(v, float("inf"))
+                old_rel = reliability.get(v, 0.0)
+                should_update = (
+                    next_cost + 1e-9 < old_cost
+                    or (
+                        abs(next_cost - old_cost) <= 1e-9
+                        and (
+                            next_latency + 1e-9 < old_latency
+                            or (abs(next_latency - old_latency) <= 1e-9 and next_rel > old_rel + 1e-9)
+                        )
+                    )
+                )
+                if not should_update:
+                    continue
+
+                dist[v] = next_cost
+                latency[v] = next_latency
+                hops[v] = next_hops
+                reliability[v] = next_rel
+                prev[v] = u
+                heapq.heappush(pq, (next_cost, v))
+
+        if target not in prev:
+            return []
+
+        path = [target]
+        while path[-1] != source:
+            p = prev.get(path[-1])
+            if p is None:
+                return []
+            path.append(p)
+        path.reverse()
+        return path
 
     def step(self, selected_node: str, path_to_node: List[str], path_delay: float):
         vnf = self.sfc_request["vnf_sequence"][self.current_vnf_idx]
@@ -303,7 +415,8 @@ class SFCEnvironment:
                     "failure_reason": "bandwidth_insufficient",
                 }
 
-        processing_delay = 0.25 + 2.5 * float(self.sfc_request.get("core_network_load", 0.5))
+        # 与后端推理引擎对齐：链路传输时延由路径累计，VNF处理时延不再单独叠加。
+        processing_delay = 0.0
         total_delay = path_delay + processing_delay
         new_accumulated_delay = self.accumulated_delay + total_delay
         if new_accumulated_delay > sla["latency_requirement_ms"]:
@@ -313,14 +426,22 @@ class SFCEnvironment:
                 "failure_reason": "delay_exceeded",
             }
 
-        node_rel = float(node_data.get("node_reliability", 0.98))
+        already_deployed_on_node = any(dep.get("node") == selected_node for dep in self.deployed_vnfs)
+        node_rel = 1.0 if already_deployed_on_node else float(node_data.get("node_reliability", 0.98))
         path_rel = self._path_reliability(self.topology, path_to_node)
         new_acc_rel = self.accumulated_reliability * node_rel * path_rel
+        path_hops = max(0, len(path_to_node) - 1)
+        new_acc_hops = int(self.accumulated_hops + path_hops)
+        if new_acc_hops > int(sla["hard_max_total_hops"]):
+            self._rollback_resources()
+            return None, self.reward_config["path_fail"], True, {
+                **info,
+                "failure_reason": "hop_hard_limit_exceeded",
+            }
 
-        # 训练阶段默认不做硬性可靠性剪枝，避免“几乎全部样本不可行”导致学不到策略。
-        # 如果启用 strict_reliability，则保留硬约束。
+        # 与后端判定口径对齐：最后一个VNF放置后，可靠性不足直接判失败。
         is_last_vnf = self.current_vnf_idx + 1 >= len(self.sfc_request["vnf_sequence"])
-        if sla["strict_reliability"] and is_last_vnf and new_acc_rel < sla["reliability_requirement"]:
+        if is_last_vnf and new_acc_rel < sla["reliability_requirement"]:
             self._rollback_resources()
             return None, self.reward_config["reliability_fail"], True, {
                 **info,
@@ -352,6 +473,7 @@ class SFCEnvironment:
 
         self.accumulated_delay = new_accumulated_delay
         self.accumulated_reliability = new_acc_rel
+        self.accumulated_hops = new_acc_hops
         self.prev_node = selected_node
         self.current_vnf_idx += 1
 
@@ -373,6 +495,8 @@ class SFCEnvironment:
         reward += self.reward_config["resource_bonus"] * (1.0 - min(1.0, node_util)) * 0.4
         reward += self.reward_config["sla_bonus"] * max(0.0, 1.0 - delay_ratio) * 0.4
         reward += self.reward_config["sla_bonus"] * max(-0.5, min(0.5, reliability_gap)) * 0.8
+        hop_ratio = self.accumulated_hops / max(1.0, float(sla["max_total_hops"]))
+        reward += self.reward_config["sla_bonus"] * max(-0.4, 1.0 - hop_ratio) * 0.18
 
         node_usage_count = sum(1 for dep in self.deployed_vnfs if dep["node"] == selected_node)
         if node_usage_count > 1:
@@ -384,19 +508,24 @@ class SFCEnvironment:
 
         done = False
         if self.current_vnf_idx >= len(self.sfc_request["vnf_sequence"]):
-            try:
-                active_graph = nx.DiGraph()
-                active_graph.add_nodes_from(self.topology.nodes(data=True))
-                for u, v, d in self.topology.edges(data=True):
-                    if int(d.get("link_status", 1)) == 1:
-                        active_graph.add_edge(u, v, **d)
-                final_path = nx.shortest_path(
-                    active_graph,
+            final_bw_req = float(sla.get("bandwidth_demand_gbps", 0.0))
+            remaining_hop_target = max(1, int(sla["max_total_hops"]) - int(self.accumulated_hops))
+            remaining_hop_hard = max(1, int(sla["hard_max_total_hops"]) - int(self.accumulated_hops))
+            final_hop_cap = max(1, min(10, remaining_hop_target))
+            final_path = self._find_constrained_path(
+                self.prev_node,
+                self.sfc_request["destination_node"],
+                bw_req=final_bw_req,
+                max_hops=final_hop_cap,
+            )
+            if (not final_path) and remaining_hop_hard > final_hop_cap:
+                final_path = self._find_constrained_path(
                     self.prev_node,
                     self.sfc_request["destination_node"],
-                    weight="latency_ms",
+                    bw_req=final_bw_req,
+                    max_hops=min(14, remaining_hop_hard),
                 )
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
+            if not final_path:
                 self._rollback_resources()
                 return None, self.reward_config["path_fail"], True, {
                     **info,
@@ -409,7 +538,6 @@ class SFCEnvironment:
                     **info,
                     "failure_reason": "final_path_link_down",
                 }
-            final_bw_req = float(sla.get("bandwidth_demand_gbps", 0.0))
             for i in range(len(final_path) - 1):
                 bw_avail = float(self.topology[final_path[i]][final_path[i + 1]].get("bandwidth_available_gbps", 0.0))
                 if bw_avail + 1e-9 < final_bw_req:
@@ -424,6 +552,7 @@ class SFCEnvironment:
             )
             final_total_delay = self.accumulated_delay + final_delay
             final_rel = self.accumulated_reliability * self._path_reliability(self.topology, final_path)
+            final_total_hops = int(self.accumulated_hops + max(0, len(final_path) - 1))
 
             if final_total_delay > sla["latency_requirement_ms"]:
                 self._rollback_resources()
@@ -432,16 +561,23 @@ class SFCEnvironment:
                     "failure_reason": "final_delay_exceeded",
                 }
 
-            if sla["strict_reliability"] and final_rel < sla["reliability_requirement"]:
+            if final_rel < sla["reliability_requirement"]:
                 self._rollback_resources()
                 return None, self.reward_config["reliability_fail"], True, {
                     **info,
                     "failure_reason": "final_reliability_not_met",
                 }
+            if final_total_hops > int(sla["max_total_hops"]):
+                self._rollback_resources()
+                return None, self.reward_config["path_fail"], True, {
+                    **info,
+                    "failure_reason": "final_hop_target_exceeded",
+                }
 
             done = True
             self.accumulated_delay = final_total_delay
             self.accumulated_reliability = final_rel
+            self.accumulated_hops = final_total_hops
             reward += self.reward_config["completion_bonus"]
             reward += self.reward_config["completion_bonus"] * max(0.0, 1.0 - final_total_delay / max(sla["latency_requirement_ms"], 1e-6)) * 0.3
             info["success"] = True
@@ -452,12 +588,14 @@ class SFCEnvironment:
                 "reward": float(reward),
                 "accumulated_delay": float(self.accumulated_delay),
                 "accumulated_reliability": float(self.accumulated_reliability),
+                "accumulated_hops": int(self.accumulated_hops),
                 "deployed_vnfs": len(self.deployed_vnfs),
                 "sla_latency_target": sla["latency_requirement_ms"],
                 "sla_reliability_target": sla["reliability_requirement"],
                 "sla_reliability_target_base": sla["base_reliability_requirement"],
                 "reliability_scale": sla["reliability_scale"],
                 "strict_reliability": sla["strict_reliability"],
+                "sla_hop_target": int(sla["max_total_hops"]),
             }
         )
         return next_state, reward, done, info

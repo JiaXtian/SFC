@@ -44,6 +44,8 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
 
     if gnn_path is None:
         gnn_path = _resolve_checkpoint(
+            "models/checkpoints/gnn_dynamic_best.pth",
+            "models/checkpoints/gnn_dynamic_final.pth",
             "models/checkpoints/gnn_best.pth",
             "models/checkpoints/gnn_final.pth",
             "../../models/checkpoints/gnn_best.pth",
@@ -51,6 +53,8 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
         )
     if agent_path is None:
         agent_path = _resolve_checkpoint(
+            "models/checkpoints/model_dynamic_best.pth",
+            "models/checkpoints/model_dynamic_final.pth",
             "models/checkpoints/model_best.pth",
             "models/checkpoints/model_final.pth",
             "../../models/checkpoints/model_best.pth",

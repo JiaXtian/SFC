@@ -25,8 +25,26 @@ from ground_training.training.trainer import SFCTrainer
 
 
 class HeuristicPruner:
+    TARGET_TOTAL_HOPS = 25
+    MIN_LEG_HOP_CAP = 3
+    MAX_LEG_HOP_CAP = 10
+    RELAXED_LEG_HOP_CAP = 14
+    HOP_PENALTY_MS = 2.5
+
     def __init__(self, top_m=80):
         self.top_m = top_m
+
+    @classmethod
+    def _compute_hop_cap(cls, current_hops: int, current_vnf_idx: int, total_vnfs: int) -> int:
+        remaining_vnfs = max(0, int(total_vnfs) - int(current_vnf_idx))
+        remaining_legs = max(1, remaining_vnfs + 1)
+        remaining_budget = max(cls.MIN_LEG_HOP_CAP, cls.TARGET_TOTAL_HOPS - max(0, int(current_hops)))
+        per_leg = remaining_budget // remaining_legs
+        return max(cls.MIN_LEG_HOP_CAP, min(cls.MAX_LEG_HOP_CAP, per_leg + 2))
+
+    @classmethod
+    def _compute_relaxed_hop_cap(cls, hop_cap: int) -> int:
+        return min(max(hop_cap, cls.MIN_LEG_HOP_CAP) + 3, cls.RELAXED_LEG_HOP_CAP)
 
     @staticmethod
     def _active_graph(G, bw_req=0.0):
@@ -42,7 +60,56 @@ class HeuristicPruner:
             active.add_edge(u, v, **d)
         return active
 
-    def prune(self, G, vnf, prev_node, dest_node, remaining_delay, top_m=None, bandwidth_demand_gbps=0.0):
+    def find_path(
+        self,
+        G,
+        source,
+        target,
+        bw_req=0.0,
+        current_hops=0,
+        current_vnf_idx=0,
+        total_vnfs=1,
+    ):
+        import networkx as nx
+
+        if source == target:
+            return [source], 0.0, 1.0, 0
+
+        active_graph = self._active_graph(G, bw_req=float(bw_req))
+        hop_cap = self._compute_hop_cap(current_hops, current_vnf_idx, total_vnfs)
+        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
+
+        for cap in (hop_cap, relaxed_cap):
+            try:
+                path = nx.shortest_path(
+                    active_graph,
+                    source,
+                    target,
+                    weight=lambda _u, _v, d: float(d.get("latency_ms", 0.0)) + self.HOP_PENALTY_MS,
+                )
+            except Exception:
+                continue
+            hop_count = max(0, len(path) - 1)
+            if cap > 0 and hop_count > cap:
+                continue
+            delay = 0.0
+            for i in range(len(path) - 1):
+                delay += float(active_graph[path[i]][path[i + 1]].get("latency_ms", 0.0))
+            return path, float(delay), 1.0, hop_count
+
+        return [], float("inf"), 0.0, 0
+
+    def prune(
+        self,
+        G,
+        vnf,
+        prev_node,
+        dest_node,
+        remaining_delay,
+        top_m=None,
+        bandwidth_demand_gbps=0.0,
+        **_kwargs,
+    ):
         import networkx as nx
 
         if top_m is None:

@@ -174,13 +174,15 @@ def _build_links(nodes: List[Dict], config: DynamicSceneConfig) -> List[Dict]:
             return
         bw_total = random.uniform(8.0, 40.0)
         bw_avail = bw_total * random.uniform(0.3, 0.95)
+        dist_factor = max(0.0, min(1.0, 1.0 - d / max(1.0, float(config.isl_max_distance_km))))
+        reliability = max(0.95, min(0.9997, 0.985 + 0.014 * dist_factor))
         links.append({
             "source": a["id"],
             "target": b["id"],
             "link_type": link_type,
             "status": "active",
             "latency_ms": round((d / LIGHT_SPEED_KMPS) * 1000.0, 5),
-            "reliability": round(random.uniform(0.96, 0.999), 5),
+            "reliability": round(reliability, 5),
             "bandwidth_gbps": round(bw_total, 4),
             "bandwidth_available_gbps": round(bw_avail, 4),
         })

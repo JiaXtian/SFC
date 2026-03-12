@@ -440,6 +440,11 @@ class SFCTrainer:
                 dest_node,
                 remaining_delay,
                 bandwidth_demand_gbps=float(state.get("bandwidth_demand_gbps", 0.0)),
+                current_vnf_idx=int(state.get("current_vnf_idx", 0)),
+                total_vnfs=int(state.get("total_vnfs", 1)),
+                accumulated_reliability=float(state.get("accumulated_reliability", 1.0)),
+                reliability_requirement=float(state.get("reliability_requirement", 0.0)),
+                accumulated_hops=int(state.get("accumulated_hops", 0)),
             )
 
             if not candidates:
@@ -475,10 +480,18 @@ class SFCTrainer:
                 float(vnf.get("bandwidth_required_gbps", 0.0)),
                 float(state.get("bandwidth_demand_gbps", 0.0)),
             )
-            active_graph = self._build_active_graph(env.topology, bw_req=bw_req)
             try:
-                path = nx.shortest_path(active_graph, prev_node, selected, weight="latency_ms")
-                delay = float(sum(active_graph[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1)))
+                path, delay, _, _ = heuristic_pruner.find_path(
+                    env.topology,
+                    prev_node,
+                    selected,
+                    bw_req=bw_req,
+                    current_hops=int(state.get("accumulated_hops", 0)),
+                    current_vnf_idx=int(state.get("current_vnf_idx", 0)),
+                    total_vnfs=int(state.get("total_vnfs", 1)),
+                )
+                if not path:
+                    raise RuntimeError("no_constrained_path")
             except Exception:
                 failure_reason = "path_error"
                 return finish_episode(False, failure_reason)
@@ -512,6 +525,11 @@ class SFCTrainer:
                     next_state.get("dest_node"),
                     next_state.get("remaining_delay", float("inf")),
                     bandwidth_demand_gbps=float(next_state.get("bandwidth_demand_gbps", 0.0)),
+                    current_vnf_idx=int(next_state.get("current_vnf_idx", 0)),
+                    total_vnfs=int(next_state.get("total_vnfs", 1)),
+                    accumulated_reliability=float(next_state.get("accumulated_reliability", 1.0)),
+                    reliability_requirement=float(next_state.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(next_state.get("accumulated_hops", 0)),
                 )
                 traj["next_candidate_indices"] = [
                     next_node_index[c] for c in next_candidates if c in next_node_index
@@ -854,6 +872,11 @@ class SFCTrainer:
                 dest_node,
                 remaining_delay,
                 bandwidth_demand_gbps=float(state_dyn.get("bandwidth_demand_gbps", 0.0)),
+                current_vnf_idx=int(state_dyn.get("current_vnf_idx", 0)),
+                total_vnfs=int(state_dyn.get("total_vnfs", 1)),
+                accumulated_reliability=float(state_dyn.get("accumulated_reliability", 1.0)),
+                reliability_requirement=float(state_dyn.get("reliability_requirement", 0.0)),
+                accumulated_hops=int(state_dyn.get("accumulated_hops", 0)),
             )
             if not candidates:
                 failure_reason = "no_candidates"
@@ -886,10 +909,18 @@ class SFCTrainer:
                 float(vnf.get("bandwidth_required_gbps", 0.0)),
                 float(state_dyn.get("bandwidth_demand_gbps", 0.0)),
             )
-            active_graph = self._build_active_graph(env.topology, bw_req=bw_req)
             try:
-                path = nx.shortest_path(active_graph, prev_node, selected, weight="latency_ms")
-                delay = float(sum(active_graph[path[i]][path[i + 1]]["latency_ms"] for i in range(len(path) - 1)))
+                path, delay, _, _ = heuristic_pruner.find_path(
+                    env.topology,
+                    prev_node,
+                    selected,
+                    bw_req=bw_req,
+                    current_hops=int(state_dyn.get("accumulated_hops", 0)),
+                    current_vnf_idx=int(state_dyn.get("current_vnf_idx", 0)),
+                    total_vnfs=int(state_dyn.get("total_vnfs", 1)),
+                )
+                if not path:
+                    raise RuntimeError("no_constrained_path")
             except Exception:
                 failure_reason = "path_error"
                 return finish_episode(False, failure_reason, info)
@@ -929,6 +960,11 @@ class SFCTrainer:
                     next_state_dyn.get("dest_node"),
                     next_state_dyn.get("remaining_delay", float("inf")),
                     bandwidth_demand_gbps=float(next_state_dyn.get("bandwidth_demand_gbps", 0.0)),
+                    current_vnf_idx=int(next_state_dyn.get("current_vnf_idx", 0)),
+                    total_vnfs=int(next_state_dyn.get("total_vnfs", 1)),
+                    accumulated_reliability=float(next_state_dyn.get("accumulated_reliability", 1.0)),
+                    reliability_requirement=float(next_state_dyn.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(next_state_dyn.get("accumulated_hops", 0)),
                 )
                 traj["next_candidate_indices"] = [next_node_index[c] for c in next_candidates if c in next_node_index]
 

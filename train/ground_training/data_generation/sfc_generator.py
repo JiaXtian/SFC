@@ -122,7 +122,7 @@ def _sample_reliability_requirement(priority, load_level):
     base = {"low": 0.68, "medium": 0.75, "high": 0.82}.get(priority, 0.75)
     if load_level == "high":
         base += 0.015
-    return float(min(0.92, max(0.58, base + np.random.uniform(-0.035, 0.035))))
+    return float(min(0.90, max(0.58, base + np.random.uniform(-0.035, 0.035))))
 
 
 def build_sfc_requests_payload(
@@ -193,10 +193,13 @@ def build_sfc_requests_payload(
             "core_network_load": round(core_network_load, 4),
             "bandwidth_demand_gbps": round(float(bandwidth_demand), 3),
             "reliability_requirement": round(reliability_requirement, 5),
+            "max_total_hops": 25,
+            "hard_max_total_hops": 30,
             "sla": {
                 "bandwidth_demand_gbps": round(float(bandwidth_demand), 3),
                 "latency_requirement_ms": round(latency_budget, 2),
                 "reliability_requirement": round(reliability_requirement, 5),
+                "max_total_hops": 25,
             },
         }
         requests.append(request)

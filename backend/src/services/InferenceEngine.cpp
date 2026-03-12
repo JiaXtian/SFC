@@ -139,7 +139,12 @@ constexpr int kRealtimeActorCandidatePool = 28;
 constexpr int kRealtimeProbePerVnf = 18;
 constexpr double kHopPenaltyMs = 2.5;
 constexpr double kPathSofteningExponent = 0.46;
-constexpr double kExcessHopReliabilityPenalty = 0.9992;
+constexpr double kExcessHopReliabilityPenalty = 0.9988;
+constexpr double kFutureStepReliabilityDecay = 0.9990;
+constexpr int kTargetDeploymentHops = 25;
+constexpr int kHardTotalHopLimit = 30;
+constexpr int kMinLegHopCap = 3;
+constexpr int kMaxLegHopCap = 10;
 
 struct PathMetrics {
     double latency_ms = 0.0;
@@ -156,13 +161,18 @@ struct SearchTree {
     std::vector<int64_t> prev;
 };
 
-int compute_hop_cap(size_t remaining_vnfs) {
-    const int dynamic_cap = 12 + static_cast<int>(std::min<size_t>(remaining_vnfs, 6));
-    return std::max(12, std::min(18, dynamic_cap));
+int compute_hop_cap(size_t remaining_vnfs, int accumulated_hops = 0) {
+    const int used_hops = std::max(0, accumulated_hops);
+    const int remaining_legs = std::max(1, static_cast<int>(remaining_vnfs) + 1); // include final leg to destination
+    const int remaining_budget = std::max(kMinLegHopCap, kTargetDeploymentHops - used_hops);
+    const int per_leg_budget = remaining_budget / remaining_legs;
+    const int adaptive_cap = per_leg_budget + 2;
+    return std::max(kMinLegHopCap, std::min(kMaxLegHopCap, adaptive_cap));
 }
 
-int compute_relaxed_hop_cap(int) {
-    return -1;
+int compute_relaxed_hop_cap(int hop_cap) {
+    if (hop_cap <= 0) return kMaxLegHopCap + 4;
+    return std::min(hop_cap + 3, kMaxLegHopCap + 4);
 }
 
 std::string make_local_path_cache_key(const std::string& node_id, int hop_cap) {
@@ -186,14 +196,23 @@ double soften_path_reliability(double raw_reliability, int hops) {
 double effective_reliability_target(double request_min_reliability, int estimated_hops) {
     const double base = clamp01(std::max(0.70, request_min_reliability));
     if (estimated_hops <= 0) return base;
-    // For common practical paths (<=30 hops), slightly relax reliability target to
+    // For common practical paths (<=25 hops), slightly relax reliability target to
     // avoid over-pruning while still keeping reliability as a hard factor.
-    if (estimated_hops <= 30) {
+    if (estimated_hops <= kTargetDeploymentHops) {
         const int extra = std::max(0, estimated_hops - 8);
-        const double relax = std::max(0.86, 1.0 - 0.0035 * static_cast<double>(extra));
+        const double relax = std::max(0.89, 1.0 - 0.0030 * static_cast<double>(extra));
         return std::max(0.78, std::min(base, base * relax));
     }
     return base;
+}
+
+int estimate_total_hops(
+    int accumulated_hops,
+    int next_leg_hops,
+    size_t remaining_steps
+) {
+    const int optimistic_future = static_cast<int>(remaining_steps) * 3;
+    return std::max(0, accumulated_hops) + std::max(0, next_leg_hops) + optimistic_future;
 }
 
 PathMetrics evaluate_path_links(
@@ -1080,7 +1099,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             request.constraints.min_bandwidth_gbps,
             std::max(vnf.bw_in, vnf.bw_out)
         );
-        const int hop_cap = compute_hop_cap(request.vnfs.size() - i);
+        const int hop_cap = compute_hop_cap(request.vnfs.size() - i, accumulated_hops);
         const int relaxed_hop_cap = compute_relaxed_hop_cap(hop_cap);
 
         auto candidates_set = filter_candidate_nodes(
@@ -1090,6 +1109,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             i,
             remaining_latency,
             accumulated_reliability,
+            accumulated_hops,
             deployed_node_set,
             topology
         );
@@ -1338,9 +1358,14 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     : 1.0;
             const double tentative_reliability = accumulated_reliability * path_metrics.reliability * node_rel;
             const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1; // +1 for final leg to destination
-            const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
+            const double optimistic_future_rel =
+                std::pow(kFutureStepReliabilityDecay, static_cast<double>(remaining_steps));
             const int estimated_total_hops =
-                accumulated_hops + path_metrics.hops + static_cast<int>(remaining_steps * 4);
+                estimate_total_hops(accumulated_hops, path_metrics.hops, remaining_steps);
+            if (estimated_total_hops > kHardTotalHopLimit) {
+                reject_counters["total_hop_projection"] += 1;
+                continue;
+            }
             const double rel_target = effective_reliability_target(
                 request.constraints.min_reliability,
                 estimated_total_hops
@@ -1440,9 +1465,14 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 const double tentative_reliability =
                     accumulated_reliability * path_metrics.reliability * node_rel;
                 const size_t remaining_steps = request.vnfs.size() - (i + 1) + 1;
-                const double optimistic_future_rel = std::pow(0.9992, static_cast<double>(remaining_steps));
+                const double optimistic_future_rel =
+                    std::pow(kFutureStepReliabilityDecay, static_cast<double>(remaining_steps));
                 const int estimated_total_hops =
-                    accumulated_hops + path_metrics.hops + static_cast<int>(remaining_steps * 4);
+                    estimate_total_hops(accumulated_hops, path_metrics.hops, remaining_steps);
+                if (estimated_total_hops > kHardTotalHopLimit) {
+                    reject_counters["fallback_total_hop_projection"] += 1;
+                    continue;
+                }
                 const double rel_target = effective_reliability_target(
                     request.constraints.min_reliability,
                     estimated_total_hops
@@ -1505,6 +1535,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         accumulated_reliability *= selected_path_reliability;
         accumulated_hops += static_cast<int>(selected_path_links.size());
         bottleneck_bandwidth = std::min(bottleneck_bandwidth, selected_path_bottleneck);
+        if (accumulated_hops > kHardTotalHopLimit) {
+            return finalize_failure("Hop budget exceeded during VNF placement");
+        }
         
         // 检查时延约束
         if (accumulated_latency > request.constraints.max_latency_ms) {
@@ -1540,7 +1573,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     std::vector<std::string> final_path;
     bool final_path_relaxed_bw = false;
     if (prev_node != request.destination_node) {
-        const int final_hop_cap = compute_hop_cap(0);
+        const int final_hop_cap = compute_hop_cap(0, accumulated_hops);
         final_path = find_shortest_path(
             prev_node,
             request.destination_node,
@@ -1588,6 +1621,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     accumulated_latency += final_metrics.latency_ms;
     accumulated_reliability *= final_metrics.reliability;
     accumulated_hops += static_cast<int>(final_links.size());
+    if (accumulated_hops > kHardTotalHopLimit) {
+        return finalize_failure("Final path exceeds hop budget");
+    }
     bottleneck_bandwidth = std::min(
         bottleneck_bandwidth,
         final_metrics.bottleneck_bandwidth_gbps
@@ -1625,7 +1661,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     candidate.satisfies_constraints =
         (accumulated_latency <= request.constraints.max_latency_ms) &&
         (candidate.bottleneck_bandwidth_gbps >= request.constraints.min_bandwidth_gbps) &&
-        (accumulated_reliability >= final_rel_target);
+        (accumulated_reliability >= final_rel_target) &&
+        (accumulated_hops <= kTargetDeploymentHops);
     
     if (!candidate.satisfies_constraints) {
         if (accumulated_latency > request.constraints.max_latency_ms) {
@@ -1634,6 +1671,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             candidate.reason = "Bandwidth constraint violated";
         } else if (accumulated_reliability < final_rel_target) {
             candidate.reason = "Reliability constraint violated";
+        } else if (accumulated_hops > kTargetDeploymentHops) {
+            candidate.reason = "Hop target exceeded";
         } else {
             candidate.reason = "SLA constraints violated";
         }
@@ -1730,6 +1769,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             {"total_latency_ms", candidate.total_latency_ms},
             {"estimated_reliability", candidate.estimated_reliability},
             {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
+            {"total_hops", accumulated_hops},
             {"deployed_nodes", candidate.deployed_nodes}
         };
     }
@@ -1744,13 +1784,14 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
     size_t current_vnf_idx,
     double remaining_latency,
     double accumulated_reliability,
+    int accumulated_hops,
     const std::unordered_set<std::string>& deployed_node_set,
     const Topology& topology
 ) {
     std::vector<std::string> candidates;
     auto& cache = get_topology_cache(topology);
     const double required_bw = std::max(request.constraints.min_bandwidth_gbps, std::max(vnf.bw_in, vnf.bw_out));
-    const int hop_cap = compute_hop_cap(request.vnfs.size() - current_vnf_idx);
+    const int hop_cap = compute_hop_cap(request.vnfs.size() - current_vnf_idx, accumulated_hops);
     const std::vector<double>* prev_distances = nullptr;
     const std::vector<double>* dest_distances = nullptr;
     const SearchTree* prev_tree = nullptr;
@@ -1819,7 +1860,18 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                     : 1.0;
             double optimistic_rel =
                 accumulated_reliability * node_rel * prev_path_rel *
-                std::pow(0.9997, static_cast<double>(remaining_steps));
+                std::pow(kFutureStepReliabilityDecay, static_cast<double>(remaining_steps));
+            const int projected_total_hops = estimate_total_hops(
+                accumulated_hops,
+                (prev_tree && idx < prev_tree->hops.size() &&
+                 prev_tree->hops[idx] != std::numeric_limits<int>::max())
+                    ? prev_tree->hops[idx]
+                    : 0,
+                remaining_steps
+            );
+            if (projected_total_hops > kHardTotalHopLimit) {
+                continue;
+            }
             if (enforce_dest_budget && dest_tree && idx < dest_tree->reliability.size() &&
                 dest_tree->reliability[idx] > 0.0 &&
                 dest_tree->hops[idx] != std::numeric_limits<int>::max()) {
@@ -1921,7 +1973,18 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                     : 1.0;
             const double optimistic_rel =
                 accumulated_reliability * node_rel * path_reliability *
-                std::pow(0.9992, static_cast<double>(remaining_steps));
+                std::pow(kFutureStepReliabilityDecay, static_cast<double>(remaining_steps));
+            const int projected_total_hops = estimate_total_hops(
+                accumulated_hops,
+                (exhaustive_prev_tree && idx < exhaustive_prev_tree->hops.size() &&
+                 exhaustive_prev_tree->hops[idx] != std::numeric_limits<int>::max())
+                    ? exhaustive_prev_tree->hops[idx]
+                    : 0,
+                remaining_steps
+            );
+            if (projected_total_hops > kHardTotalHopLimit) {
+                continue;
+            }
             if (optimistic_rel + 1e-9 < request.constraints.min_reliability * 0.45) {
                 continue;
             }
