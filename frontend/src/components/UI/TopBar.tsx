@@ -84,15 +84,14 @@ export default function TopBar() {
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
               style={{ background: 'rgba(14,116,144,0.14)', border: '1px solid rgba(34,211,238,0.28)' }}>
               <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
-              <span className="text-cyan-200 font-semibold">SFC {orch.active_sessions}</span>
-              <span className="text-cyan-300/70">P95 {p95LatencyMs.toFixed(0)}ms</span>
+              <span className="text-cyan-300/70">P95 推理时延 {p95LatencyMs.toFixed(0)}ms</span>
             </div>
           )}
           {orch && (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
               style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(74,222,128,0.28)' }}>
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse" />
-              <span className="text-emerald-200 font-semibold">恢复 {Number((orch.recovery_success_rate ?? 0) * 100).toFixed(0)}%</span>
+              <span className="text-emerald-200 font-semibold">故障恢复 {Number((orch.recovery_success_rate ?? 0) * 100).toFixed(0)}%</span>
               <span className="text-emerald-300/70">{orch.total_recovery_success ?? 0}/{orch.total_recovery_attempts ?? 0}</span>
             </div>
           )}
@@ -130,7 +129,6 @@ export default function TopBar() {
               >
                 {[
                   ['系统概览', '动态卫星拓扑与SFC智能编排可视化系统'],
-                  ['算法主线', 'GNN + A2C + 启发式剪枝 + 保底路径策略'],
                 ].map(([k, v]) => (
                   <div key={k} className="px-2.5 py-1.5 rounded-lg hover:bg-white/5">
                     <div className="text-[11px] text-cyan-100 font-medium">{k}</div>
