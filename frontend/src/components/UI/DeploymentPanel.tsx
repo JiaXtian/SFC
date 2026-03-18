@@ -58,8 +58,7 @@ export default function DeploymentPanel() {
     removeDeployment,
     highlightedDeploymentIds,
     toggleHighlightedDeployment,
-    setSatellites,
-    setLinks,
+    applyTopologySnapshot,
     suppressSessionDeployment,
   } = useStore()
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -96,12 +95,10 @@ export default function DeploymentPanel() {
       }
       removeDeployment(dep.deployment_id)
       
-      // 🔥 关键修改：刷新卫星资源状态
+      // 回滚后合并后端快照，保留当前动态位置连续性，仅刷新资源态
       try {
         const topo = await apiClient.getTopology()
-        const topology = topo?.topology ?? topo
-        if (Array.isArray(topology?.nodes)) setSatellites(topology.nodes)
-        if (Array.isArray(topology?.links)) setLinks(topology.links)
+        applyTopologySnapshot(topo)
         console.log('[资源释放] 已刷新卫星资源状态')
       } catch (e) {
         console.warn('[资源释放] 刷新失败:', e)

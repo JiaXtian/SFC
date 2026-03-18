@@ -70,8 +70,7 @@ export default function CandidateModal() {
     candidateResult,
     setCandidateResult,
     addDeployment,
-    setSatellites,
-    setLinks,
+    applyTopologySnapshot,
     backendTopologySynced,
     satellites,
   } = useStore()
@@ -233,9 +232,7 @@ export default function CandidateModal() {
 
       try {
         const topo = await apiClient.getTopology()
-        const topology = topo?.topology ?? topo
-        if (Array.isArray(topology?.nodes)) setSatellites(topology.nodes)
-        if (Array.isArray(topology?.links)) setLinks(topology.links)
+        applyTopologySnapshot(topo)
       } catch (e) {
         console.warn('[资源更新] 刷新失败:', e)
       }
