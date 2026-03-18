@@ -4,41 +4,9 @@ import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
 import { toChineseFailureList } from '@/utils/failureText'
 
-function buildPathNodes(dep: Deployment): string[] {
-  if (Array.isArray(dep.path_nodes) && dep.path_nodes.length > 0) return dep.path_nodes
-  if (!dep.link_details || dep.link_details.length === 0) {
-    if (dep.source_node && dep.destination_node) return [dep.source_node, dep.destination_node]
-    return dep.deployed_nodes || []
-  }
-  const nextMap = new Map<string, string>()
-  const inDegree = new Map<string, number>()
-  const outDegree = new Map<string, number>()
-  dep.link_details.forEach((l: any) => {
-    if (!l?.src || !l?.dst) return
-    if (!nextMap.has(l.src)) nextMap.set(l.src, l.dst)
-    outDegree.set(l.src, (outDegree.get(l.src) || 0) + 1)
-    inDegree.set(l.dst, (inDegree.get(l.dst) || 0) + 1)
-    if (!inDegree.has(l.src)) inDegree.set(l.src, inDegree.get(l.src) || 0)
-    if (!outDegree.has(l.dst)) outDegree.set(l.dst, outDegree.get(l.dst) || 0)
-  })
-  let start = dep.source_node || ''
-  if (!start) {
-    start = [...outDegree.keys()].find(k => (inDegree.get(k) || 0) === 0 && (outDegree.get(k) || 0) > 0) || dep.link_details[0]?.src || ''
-  }
-  if (!start) return dep.deployed_nodes || []
-  const nodes = [start]
-  const seen = new Set<string>([start])
-  for (let i = 0; i < dep.link_details.length + 2; i++) {
-    const nxt = nextMap.get(nodes[nodes.length - 1])
-    if (!nxt) break
-    nodes.push(nxt)
-    if (seen.has(nxt)) break
-    seen.add(nxt)
-  }
-  if (dep.destination_node && nodes[nodes.length - 1] !== dep.destination_node) {
-    nodes.push(dep.destination_node)
-  }
-  return nodes
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value))
 }
 
 const StatusIcon = ({ s }: { s: string }) =>
@@ -246,14 +214,6 @@ export default function DeploymentPanel() {
                   {dep.link_details && dep.link_details.length > 0 && (
                     <div>
                       <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
-                      <div className="mb-1 text-[11px] text-cyan-300 font-mono break-all">
-                        完整路径: {(() => {
-                          const nodes = buildPathNodes(dep)
-                          const full = nodes.join(' -> ')
-                          if (expandedLinks[dep.deployment_id] || full.length <= 180) return full
-                          return `${full.slice(0, 180)} ...`
-                        })()}
-                      </div>
                       <div className="mb-1.5 text-[11px] text-green-400 font-mono">
                         路径总时延: {dep.link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0).toFixed(2)}ms
                       </div>
@@ -263,19 +223,50 @@ export default function DeploymentPanel() {
                           const availBw = Number((l as any)?.bandwidth_available_gbps ?? totalBw)
                           const reqBw = Number((l as any)?.bandwidth_required_gbps ?? 0)
                           const usedBw = Math.max(0, totalBw - availBw)
+                          const sfcUsedBw = Math.max(0, Math.min(totalBw, reqBw))
+                          const otherUsedBw = Math.max(0, Math.min(totalBw, usedBw) - sfcUsedBw)
+                          const usedPct = clampPercent(totalBw > 1e-9 ? (usedBw / totalBw) * 100 : 0)
+                          const sfcPct = clampPercent(totalBw > 1e-9 ? (sfcUsedBw / totalBw) * 100 : 0)
+                          const otherPct = clampPercent(totalBw > 1e-9 ? (otherUsedBw / totalBw) * 100 : 0)
+                          const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps`
                           return (
                             <div key={i} className="px-2 py-1 rounded text-[11px]"
                               style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.08)' }}>
                               <div className="flex items-center justify-between">
                                 <span className="font-mono text-green-400">
+                                  <span className="text-gray-500 mr-1">{String(i + 1).padStart(2, '0')}.</span>
                                   <span className="text-green-400">{l.src}</span>
                                   <span className="text-gray-700 mx-1">→</span>
                                   <span className="text-green-400">{l.dst}</span>
                                 </span>
                                 <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
                               </div>
-                              <div className="mt-0.5 text-[10px] text-cyan-300 font-mono">
-                                SFC需 {reqBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
+                              <div className="mt-1.5" title={hoverText}>
+                                <div className="flex items-center justify-between text-[10px] mb-1">
+                                  <span className="text-cyan-300">链路占用分布</span>
+                                  <span className="text-cyan-300 font-mono">{usedPct.toFixed(1)}%</span>
+                                </div>
+                                <div className="h-2 rounded-full bg-slate-900/80 border border-cyan-500/20 overflow-hidden flex">
+                                  <div
+                                    className="h-full"
+                                    style={{
+                                      width: `${otherPct}%`,
+                                      background: 'linear-gradient(90deg, rgba(59,130,246,0.84), rgba(56,189,248,0.78))',
+                                    }}
+                                    title={`其他业务占用 ${otherUsedBw.toFixed(2)}Gbps`}
+                                  />
+                                  <div
+                                    className="h-full"
+                                    style={{
+                                      width: `${sfcPct}%`,
+                                      background: 'linear-gradient(90deg, rgba(74,222,128,0.88), rgba(16,185,129,0.76))',
+                                    }}
+                                    title={`当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps`}
+                                  />
+                                </div>
+                              </div>
+                              <div className="mt-1 text-[10px] text-cyan-300 font-mono" title={hoverText}>
+                                SFC需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
                               </div>
                             </div>
                           )

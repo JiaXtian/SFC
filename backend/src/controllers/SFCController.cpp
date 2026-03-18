@@ -212,9 +212,9 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
 
     double reliability_cap = 0.95;
     if (request.vnfs.size() >= 4) {
-        reliability_cap = 0.90;
+        reliability_cap = 0.88;
     } else if (request.vnfs.size() >= 2) {
-        reliability_cap = 0.93;
+        reliability_cap = 0.91;
     }
     if (request.constraints.min_reliability > reliability_cap) {
         spdlog::warn(
@@ -764,6 +764,12 @@ void SFCController::startSession(
         const bool auto_redeploy = (*json).get("auto_redeploy", true).asBool();
         const std::string initial_deployment_id = (*json).get("initial_deployment_id", "").asString();
         const Json::Value request_json = json->isMember("request") ? (*json)["request"] : (*json);
+        double initial_inference_time_ms = -1.0;
+        if ((*json).isMember("initial_inference_time_ms")) {
+            initial_inference_time_ms = (*json)["initial_inference_time_ms"].asDouble();
+        } else if (request_json.isMember("initial_inference_time_ms")) {
+            initial_inference_time_ms = request_json["initial_inference_time_ms"].asDouble();
+        }
         auto sfc_request = parse_sfc_request(request_json);
         if (sfc_request.vnfs.empty() || sfc_request.source_node.empty() || sfc_request.destination_node.empty()) {
             Json::Value error;
@@ -788,7 +794,8 @@ void SFCController::startSession(
             sfc_request,
             auto_redeploy,
             has_initial_candidate ? &initial_candidate : nullptr,
-            initial_deployment_id
+            initial_deployment_id,
+            initial_inference_time_ms
         );
         auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(result));
         callback(resp);

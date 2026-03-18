@@ -27,7 +27,8 @@ public:
         const SFCRequest& request,
         bool auto_redeploy,
         const DeploymentCandidate* initial_candidate = nullptr,
-        const std::string& initial_deployment_id = ""
+        const std::string& initial_deployment_id = "",
+        double initial_inference_time_ms = -1.0
     );
     bool stop_session(const std::string& session_id);
     nlohmann::json list_sessions() const;

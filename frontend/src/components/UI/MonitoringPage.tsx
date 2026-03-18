@@ -33,8 +33,10 @@ function rescheduleReasonLabel(trigger: string): string {
       return '会话启动'
     case 'manual_initial_candidate':
       return '手动初始方案'
+    case 'unlabeled':
+      return '未标注触发器'
     default:
-      return trigger || '无'
+      return trigger && trigger !== 'unknown' ? trigger : '未标注触发器'
   }
 }
 
@@ -345,6 +347,10 @@ export default function MonitoringPage() {
   const metrics = simulation.metrics
   const orch = simulation.orchestration
   const history = simulation.history.slice(-120)
+  const orchestrationTraces = useMemo(
+    () => decisionTraces.filter((t: any) => String(t?.mode ?? '') === 'session_continuous'),
+    [decisionTraces]
+  )
 
   const latencySeries = useMemo(
     () => history.map((h) => Number(h.metrics?.avg_latency_ms ?? 0)),
@@ -359,8 +365,12 @@ export default function MonitoringPage() {
     [history]
   )
   const inferenceSeries = useMemo(
-    () => decisionTraces.slice(0, 40).reverse().map((t) => Number(t.inference_time_ms ?? 0)),
-    [decisionTraces]
+    () => orchestrationTraces
+      .slice(0, 40)
+      .reverse()
+      .map((t) => Number(t.inference_time_ms ?? 0))
+      .filter((v) => Number.isFinite(v) && v > 0),
+    [orchestrationTraces]
   )
 
   const faultEvents = useMemo(
@@ -371,32 +381,6 @@ export default function MonitoringPage() {
     () => runtimeEvents.filter((e) => e.type === 'recovery_event').slice(0, 20),
     [runtimeEvents]
   )
-  const recoveryLatencySec = useMemo(() => {
-    const ordered = [...runtimeEvents]
-      .filter((e) => e.type === 'fault_event' || e.type === 'recovery_event')
-      .reverse()
-    const faultAt = new Map<string, number>()
-    const latencies: number[] = []
-    ordered.forEach((e) => {
-      const entityType = String(e.raw?.entity_type ?? 'entity')
-      const entityId = String(e.raw?.entity_id ?? '')
-      if (!entityId) return
-      const key = `${entityType}|${entityId}`
-      const ts = Date.parse(String(e.sim_time ?? ''))
-      if (!Number.isFinite(ts)) return
-      if (e.type === 'fault_event') {
-        faultAt.set(key, ts)
-        return
-      }
-      const prev = faultAt.get(key)
-      if (!prev || ts < prev) return
-      const sec = (ts - prev) / 1000
-      if (Number.isFinite(sec) && sec >= 0) latencies.push(sec)
-      faultAt.delete(key)
-    })
-    return latencies.slice(-160)
-  }, [runtimeEvents])
-
   const faultHeatmap = useMemo(() => {
     const rows = ['node', 'link', 'session', 'other']
     const cols = 12
@@ -431,10 +415,86 @@ export default function MonitoringPage() {
     return vals.slice(-80)
   }, [runtimeEvents])
 
+  const decisionQuality = useMemo(() => {
+    const traces = orchestrationTraces.slice(0, 240)
+    const total = traces.length
+    let deployableHits = 0
+    let latencySum = 0
+    let latencyCount = 0
+    const byTrigger = new Map<string, { count: number; deployable: number; latencySum: number; latencyCount: number }>()
+    traces.forEach((t: any) => {
+      const rawTrigger = String(t?.trigger ?? '')
+      const trigger = rawTrigger && rawTrigger !== 'unknown' ? rawTrigger : 'unlabeled'
+      const deployable = Number(t?.deployable_count ?? 0) > 0
+      const latency = Number(t?.inference_time_ms ?? 0)
+      if (deployable) deployableHits += 1
+      if (Number.isFinite(latency) && latency > 0) {
+        latencySum += latency
+        latencyCount += 1
+      }
+      const row = byTrigger.get(trigger) ?? { count: 0, deployable: 0, latencySum: 0, latencyCount: 0 }
+      row.count += 1
+      if (deployable) row.deployable += 1
+      if (Number.isFinite(latency) && latency > 0) {
+        row.latencySum += latency
+        row.latencyCount += 1
+      }
+      byTrigger.set(trigger, row)
+    })
+    const rows = Array.from(byTrigger.entries())
+      .map(([trigger, row]) => ({
+        trigger,
+        label: rescheduleReasonLabel(trigger),
+        count: row.count,
+        deployableRate: row.count > 0 ? (row.deployable / row.count) * 100 : 0,
+        avgLatencyMs: row.latencyCount > 0 ? row.latencySum / row.latencyCount : 0,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8)
+    return {
+      total,
+      deployableRate: total > 0 ? (deployableHits / total) * 100 : 0,
+      avgLatencyMs: latencyCount > 0 ? latencySum / latencyCount : 0,
+      rows,
+    }
+  }, [orchestrationTraces])
+
+  const decisionSuccessSeries = useMemo(() => {
+    const seq = orchestrationTraces
+      .slice(0, 80)
+      .reverse()
+      .map((t) => (Number(t.deployable_count ?? 0) > 0 ? 100 : 0))
+    const window = 8
+    const out: number[] = []
+    for (let i = 0; i < seq.length; i++) {
+      let sum = 0
+      let count = 0
+      for (let k = Math.max(0, i - window + 1); k <= i; k++) {
+        sum += seq[k]
+        count += 1
+      }
+      out.push(count > 0 ? sum / count : 0)
+    }
+    return out
+  }, [orchestrationTraces])
+
+  const inferredP95Latency = useMemo(() => {
+    const direct = Number(orch?.latency_p95_ms ?? 0)
+    if (direct > 0) return direct
+    const values = orchestrationTraces
+      .slice(0, 200)
+      .map((t) => Number(t.inference_time_ms ?? 0))
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b)
+    if (values.length === 0) return 0
+    const idx = Math.min(values.length - 1, Math.floor((values.length - 1) * 0.95))
+    return values[idx]
+  }, [orch?.latency_p95_ms, orchestrationTraces])
+
   const recoveryRate = Number(orch?.recovery_success_rate ?? 0) * 100
   const stabilityRows = useMemo(() => {
     const tracesBySession = new Map<string, any[]>()
-    decisionTraces.forEach((trace: any) => {
+    orchestrationTraces.forEach((trace: any) => {
       const sid = String(trace?.session_id ?? '')
       if (!sid) return
       if (!tracesBySession.has(sid)) tracesBySession.set(sid, [])
@@ -487,7 +547,7 @@ export default function MonitoringPage() {
         }
       })
       .sort((a, b) => a.stabilityScore - b.stabilityScore)
-  }, [deployments, decisionTraces])
+  }, [deployments, orchestrationTraces])
 
   const maxRescheduleCount = useMemo(() => {
     if (stabilityRows.length === 0) return 1
@@ -688,7 +748,7 @@ export default function MonitoringPage() {
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">P95 算法时延</div>
-                <div className="text-cyan-200 text-lg font-semibold">{(orch?.latency_p95_ms ?? 0).toFixed(1)}ms</div>
+                <div className="text-cyan-200 text-lg font-semibold">{inferredP95Latency.toFixed(1)}ms</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">累计决策 / 失败</div>
@@ -744,39 +804,55 @@ export default function MonitoringPage() {
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <Timer className="w-4 h-4 text-emerald-300" />恢复时延分布
+              <Timer className="w-4 h-4 text-emerald-300" />编排决策质量分布
             </div>
             <div className="text-[10px] text-slate-500 mb-2">
-              说明：统计“故障事件到恢复事件”的耗时分布，越集中且越靠左表示恢复越快。
+              说明：展示最近决策的可部署率、平均推理时延和触发来源分布，更直接反映编排器质量。
             </div>
             <div className="grid grid-cols-3 gap-2 text-[11px] mb-2">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">样本数</div>
-                <div className="text-emerald-300 text-lg font-semibold">{recoveryLatencySec.length}</div>
+                <div className="text-emerald-300 text-lg font-semibold">{decisionQuality.total}</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">平均恢复时延</div>
-                <div className="text-emerald-300 text-lg font-semibold">
-                  {recoveryLatencySec.length > 0
-                    ? `${(recoveryLatencySec.reduce((a, b) => a + b, 0) / recoveryLatencySec.length).toFixed(1)}s`
-                    : '-'}
-                </div>
+                <div className="text-slate-400">可部署率</div>
+                <div className="text-emerald-300 text-lg font-semibold">{decisionQuality.deployableRate.toFixed(1)}%</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">最大恢复时延</div>
-                <div className="text-emerald-300 text-lg font-semibold">
-                  {recoveryLatencySec.length > 0 ? `${Math.max(...recoveryLatencySec).toFixed(1)}s` : '-'}
-                </div>
+                <div className="text-slate-400">平均推理时延</div>
+                <div className="text-emerald-300 text-lg font-semibold">{decisionQuality.avgLatencyMs.toFixed(1)}ms</div>
               </div>
             </div>
-            <AxisHistogram
-              values={recoveryLatencySec}
-              bins={12}
-              color="#34d399"
-              title="恢复时延直方分布"
-              xLabel="恢复时延区间(s)"
-              yLabel="样本数"
-            />
+            <div className="mt-2">
+              <AxisLineChart values={decisionSuccessSeries} color="#34d399" title="最近决策可部署率趋势(滚动窗口)" yLabel="可部署率(%)" xLabel="决策序列" />
+            </div>
+            <div className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-slate-700/60 bg-slate-900/35">
+              <table className="w-full text-[11px]">
+                <thead className="sticky top-0 bg-slate-900/85">
+                  <tr className="text-slate-400">
+                    <th className="text-left px-2 py-1 font-medium">触发来源</th>
+                    <th className="text-right px-2 py-1 font-medium">次数</th>
+                    <th className="text-right px-2 py-1 font-medium">可部署率</th>
+                    <th className="text-right px-2 py-1 font-medium">均值时延</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {decisionQuality.rows.map((row) => (
+                    <tr key={row.trigger} className="border-t border-slate-800/80">
+                      <td className="px-2 py-1.5 text-cyan-200">{row.label}</td>
+                      <td className="px-2 py-1.5 text-right text-slate-200">{row.count}</td>
+                      <td className="px-2 py-1.5 text-right text-emerald-200">{row.deployableRate.toFixed(1)}%</td>
+                      <td className="px-2 py-1.5 text-right text-violet-200">{row.avgLatencyMs.toFixed(1)}ms</td>
+                    </tr>
+                  ))}
+                  {decisionQuality.rows.length === 0 && (
+                    <tr>
+                      <td className="px-2 py-2 text-slate-500" colSpan={4}>暂无决策数据</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
@@ -871,7 +947,7 @@ export default function MonitoringPage() {
               轨迹表说明：`deployable=a/b` 表示返回候选中满足硬约束的方案数/总候选数。
             </div>
             <div className="max-h-56 overflow-y-auto space-y-1">
-              {decisionTraces.slice(0, 20).map((t, idx) => (
+              {orchestrationTraces.slice(0, 20).map((t, idx) => (
                 <div key={`${t.request_id}-${t.topology_version}-${idx}`}
                   className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60 text-[11px]">
                   <div className="flex items-center justify-between">
@@ -884,7 +960,7 @@ export default function MonitoringPage() {
                   </div>
                 </div>
               ))}
-              {decisionTraces.length === 0 && <div className="text-[11px] text-slate-500">暂无决策轨迹</div>}
+              {orchestrationTraces.length === 0 && <div className="text-[11px] text-slate-500">暂无决策轨迹</div>}
             </div>
           </div>
         </div>

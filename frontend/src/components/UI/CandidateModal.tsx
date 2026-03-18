@@ -178,11 +178,15 @@ export default function CandidateModal() {
           planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
           initial_candidate: cand,
         }
-        const sessionResp = await apiClient.startSFCSession({
+        const sessionStartPayload: any = {
           auto_redeploy: Boolean(sessionConfig?.auto_redeploy ?? true),
           initial_deployment_id: backendDeploymentId,
           request: sessionReq,
-        })
+        }
+        if (typeof inferenceTime === 'number' && Number.isFinite(inferenceTime) && inferenceTime > 0) {
+          sessionStartPayload.initial_inference_time_ms = Number(inferenceTime)
+        }
+        const sessionResp = await apiClient.startSFCSession(sessionStartPayload)
         sessionId = String(sessionResp?.session_id ?? '')
       } catch (e: any) {
         alert(`初始部署成功，但连续编排会话启动失败: ${toChineseFailureText(e?.message ?? e)}`)

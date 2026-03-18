@@ -618,7 +618,8 @@ nlohmann::json DynamicInferenceService::start_session(
     const SFCRequest& request,
     bool auto_redeploy,
     const DeploymentCandidate* initial_candidate,
-    const std::string& initial_deployment_id
+    const std::string& initial_deployment_id,
+    double initial_inference_time_ms
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     SessionState session;
@@ -642,6 +643,10 @@ nlohmann::json DynamicInferenceService::start_session(
     if (snapshot.topology.nodes.empty()) {
         snapshot = build_snapshot_fallback(res_mgr_->export_current_topology());
     }
+    const double seeded_inference_ms =
+        (std::isfinite(initial_inference_time_ms) && initial_inference_time_ms > 0.0)
+            ? initial_inference_time_ms
+            : 0.0;
     if (initial_candidate && (!initial_candidate->deployed_nodes.empty() || !initial_candidate->per_vnf.empty())) {
         DeploymentCandidate chosen = *initial_candidate;
         chosen.per_vnf = ensure_per_vnf_filled(chosen, sessions_[session.session_id].request);
@@ -655,7 +660,7 @@ nlohmann::json DynamicInferenceService::start_session(
         sessions_[session.session_id].last_sim_time = !snapshot.sim_time.empty()
             ? snapshot.sim_time
             : snapshot.topology.metadata.sim_time;
-        sessions_[session.session_id].last_inference_time_ms = 0.0;
+        sessions_[session.session_id].last_inference_time_ms = seeded_inference_ms;
 
         if (sessions_[session.session_id].active_resource_deployment_id.empty()) {
             const std::string alloc_id = make_session_resource_deployment_id(session.session_id);
@@ -678,7 +683,7 @@ nlohmann::json DynamicInferenceService::start_session(
                         {"status", "decision_failed"},
                         {"topology_version", sessions_[session.session_id].last_topology_version},
                         {"sim_time", sessions_[session.session_id].last_sim_time},
-                        {"inference_time_ms", 0.0},
+                        {"inference_time_ms", seeded_inference_ms},
                         {"reason", "resource_allocation_failed"}
                     }}
                 };
@@ -738,7 +743,7 @@ nlohmann::json DynamicInferenceService::start_session(
             {"sim_time", sessions_[session.session_id].last_sim_time},
             {"source_node", sessions_[session.session_id].request.source_node},
             {"destination_node", sessions_[session.session_id].request.destination_node},
-            {"inference_time_ms", 0.0},
+            {"inference_time_ms", seeded_inference_ms},
             {"requested_topk", sessions_[session.session_id].request.topk},
             {"returned_topk", 1},
             {"deployable_count", chosen.satisfies_constraints ? 1 : 0},
@@ -751,8 +756,10 @@ nlohmann::json DynamicInferenceService::start_session(
         sessions_[session.session_id].last_decision_trace = trace_payload;
         sessions_[session.session_id].decisions_total += 1;
         total_decisions_ += 1;
-        latency_window_ms_.push_back(0.0);
-        trim_latency_window_locked();
+        if (seeded_inference_ms > 0.0) {
+            latency_window_ms_.push_back(seeded_inference_ms);
+            trim_latency_window_locked();
+        }
 
         WSHandler::broadcast_json(trace_payload);
         WSHandler::broadcast_json({
@@ -777,7 +784,7 @@ nlohmann::json DynamicInferenceService::start_session(
                 {"status", "deployed"},
                 {"topology_version", sessions_[session.session_id].last_topology_version},
                 {"sim_time", sessions_[session.session_id].last_sim_time},
-                {"inference_time_ms", 0.0}
+                {"inference_time_ms", seeded_inference_ms}
             }}
         };
     }

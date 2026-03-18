@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Activity, Settings, Satellite, Info, ChevronDown } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { shallow } from 'zustand/shallow'
@@ -7,12 +7,26 @@ import SettingsModal from './SettingsModal'
 export default function TopBar() {
   const [open, setOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
-  const { satCount, linkCount, deployCount, orch } = useStore((s) => ({
+  const { satCount, linkCount, deployCount, orch, decisionTraces } = useStore((s) => ({
     satCount: s.satellites.length,
     linkCount: s.links.length,
     deployCount: s.deployments.length,
     orch: s.simulation.orchestration,
+    decisionTraces: s.decisionTraces,
   }), shallow)
+  const p95LatencyMs = useMemo(() => {
+    const direct = Number(orch?.latency_p95_ms ?? 0)
+    if (direct > 0) return direct
+    const samples = decisionTraces
+      .filter((t: any) => String(t?.mode ?? '') === 'session_continuous')
+      .slice(0, 120)
+      .map((t) => Number(t.inference_time_ms ?? 0))
+      .filter((v) => Number.isFinite(v) && v > 0)
+      .sort((a, b) => a - b)
+    if (samples.length === 0) return 0
+    const idx = Math.min(samples.length - 1, Math.floor((samples.length - 1) * 0.95))
+    return samples[idx]
+  }, [orch?.latency_p95_ms, decisionTraces])
   const gotoMonitorPage = () => {
     if (window.location.pathname === '/monitor') return
     window.history.pushState({}, '', '/monitor')
@@ -71,7 +85,7 @@ export default function TopBar() {
               style={{ background: 'rgba(14,116,144,0.14)', border: '1px solid rgba(34,211,238,0.28)' }}>
               <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
               <span className="text-cyan-200 font-semibold">SFC {orch.active_sessions}</span>
-              <span className="text-cyan-300/70">P95 {orch.latency_p95_ms.toFixed(0)}ms</span>
+              <span className="text-cyan-300/70">P95 {p95LatencyMs.toFixed(0)}ms</span>
             </div>
           )}
           {orch && (

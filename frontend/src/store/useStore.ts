@@ -537,6 +537,19 @@ function pathSignature(linkDetails: LinkDetail[] | undefined): string {
   return linkDetails.map((l) => `${l.src}->${l.dst}`).join('|')
 }
 
+function decisionTraceSignature(trace: DecisionTrace): string {
+  const mode = String(trace?.mode ?? '')
+  const trigger = String(trace?.trigger ?? '')
+  const sessionId = String(trace?.session_id ?? '')
+  const requestId = String(trace?.request_id ?? '')
+  const topo = Number(trace?.topology_version ?? 0)
+  const simTime = String(trace?.sim_time ?? '')
+  const ms = Number(trace?.inference_time_ms ?? 0).toFixed(3)
+  const deployable = Number(trace?.deployable_count ?? 0)
+  const returned = Number(trace?.returned_topk ?? 0)
+  return [mode, trigger, sessionId, requestId, topo, simTime, ms, deployable, returned].join('|')
+}
+
 function pickTracePerVnf(trace: DecisionTrace): VNFDeploy[] {
   const requestVnfs = Array.isArray(trace?.request_vnfs) ? trace.request_vnfs : []
   const bestCandidate = Array.isArray(trace?.candidates) ? trace.candidates[0] : null
@@ -905,7 +918,12 @@ export const useStore = create<Store>((set, get) => ({
     get().refreshDeploymentPaths()
   },
   pushDecisionTrace: (trace) => set((s) => ({
-    decisionTraces: [trace, ...s.decisionTraces].slice(0, 50),
+    decisionTraces: (() => {
+      const sig = decisionTraceSignature(trace)
+      const duplicated = s.decisionTraces.some((t) => decisionTraceSignature(t) === sig)
+      if (duplicated) return s.decisionTraces
+      return [trace, ...s.decisionTraces].slice(0, 80)
+    })(),
   })),
   pushRuntimeEvent: (evt) => set((s) => ({
     runtimeEvents: [{ ...evt, id: `${Date.now()}_${Math.random().toString(16).slice(2, 6)}` }, ...s.runtimeEvents].slice(0, 120),
@@ -920,6 +938,12 @@ export const useStore = create<Store>((set, get) => ({
     const perVnf = pickTracePerVnf(trace)
 
     const existing = s.deployments.find((d) => d.deployment_id === depId)
+    const incomingInference = Number(trace.inference_time_ms ?? Number.NaN)
+    const existingInference = Number(existing?.inference_latency_ms ?? Number.NaN)
+    const resolvedInference =
+      Number.isFinite(incomingInference) && incomingInference > 0
+        ? incomingInference
+        : (Number.isFinite(existingInference) ? existingInference : 0)
     if (!chosen) {
       if (!existing) return {}
       return {
@@ -946,7 +970,7 @@ export const useStore = create<Store>((set, get) => ({
       sfc_name: `SFC策略 ${trace.request_id}`,
       candidate_index: 0,
       status: chosen.satisfies_constraints ? 'completed' : 'in-progress',
-      inference_latency_ms: Number(trace.inference_time_ms ?? 0),
+      inference_latency_ms: resolvedInference,
       source_node: trace.source_node,
       destination_node: trace.destination_node,
       path_nodes: anchors,

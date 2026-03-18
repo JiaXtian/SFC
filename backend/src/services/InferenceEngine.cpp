@@ -138,10 +138,10 @@ constexpr int kMaxProbePerVnf = 48;
 constexpr int kRealtimeActorCandidatePool = 28;
 constexpr int kRealtimeProbePerVnf = 18;
 constexpr double kHopPenaltyMs = 2.5;
-constexpr double kPathSofteningExponent = 0.46;
-constexpr double kExcessHopReliabilityPenalty = 0.9988;
-constexpr double kFutureStepReliabilityDecay = 0.9990;
-constexpr int kTargetDeploymentHops = 25;
+constexpr double kPathSofteningExponent = 0.40;
+constexpr double kExcessHopReliabilityPenalty = 0.9993;
+constexpr double kFutureStepReliabilityDecay = 0.9995;
+constexpr int kTargetDeploymentHops = 30;
 constexpr int kHardTotalHopLimit = 30;
 constexpr int kMinLegHopCap = 3;
 constexpr int kMaxLegHopCap = 10;
@@ -196,12 +196,12 @@ double soften_path_reliability(double raw_reliability, int hops) {
 double effective_reliability_target(double request_min_reliability, int estimated_hops) {
     const double base = clamp01(std::max(0.70, request_min_reliability));
     if (estimated_hops <= 0) return base;
-    // For common practical paths (<=25 hops), slightly relax reliability target to
+    // For common practical paths (<=30 hops), moderately relax reliability target to
     // avoid over-pruning while still keeping reliability as a hard factor.
     if (estimated_hops <= kTargetDeploymentHops) {
         const int extra = std::max(0, estimated_hops - 8);
-        const double relax = std::max(0.89, 1.0 - 0.0030 * static_cast<double>(extra));
-        return std::max(0.78, std::min(base, base * relax));
+        const double relax = std::max(0.84, 1.0 - 0.0045 * static_cast<double>(extra));
+        return std::max(0.76, std::min(base, base * relax));
     }
     return base;
 }
@@ -400,8 +400,8 @@ double estimate_link_reliability_inline(const Link& link) {
     const double base = clamp01(link.reliability);
     // Keep residual-bandwidth influence mild: as long as the link still has usable headroom,
     // reliability should not collapse on moderately loaded long-but-feasible paths.
-    const double bandwidth_factor = 0.98 + 0.02 * bw_ratio;
-    const double status_penalty = (link.status == "congested") ? 0.985 : 1.0;
+    const double bandwidth_factor = 0.992 + 0.008 * bw_ratio;
+    const double status_penalty = (link.status == "congested") ? 0.992 : 1.0;
     return clamp01(base * bandwidth_factor * status_penalty);
 }
 
@@ -745,7 +745,8 @@ double InferenceEngine::estimate_node_reliability(
     const double disk_ratio = node.disk_total > 0.0 ? node.disk_available / node.disk_total : 0.0;
     const double health = clamp01((cpu_ratio + mem_ratio + disk_ratio) / 3.0);
     const double base = clamp01(node.node_reliability);
-    return clamp01(base * (0.9 + 0.1 * health));
+    const double rel = clamp01(base * (0.96 + 0.04 * health));
+    return std::max(0.90, rel);
 }
 
 double InferenceEngine::estimate_link_reliability(const Link& link) const {
@@ -823,7 +824,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     int attempts_done = 0;
     bool stop_search = false;
 
-    std::vector<double> relax_levels = {1.0, 0.98, 0.95, 0.92, 0.88};
+    std::vector<double> relax_levels = {1.0, 0.98, 0.95, 0.92, 0.88, 0.85};
     if (request.constraints.min_reliability <= 0.75) {
         relax_levels = {1.0};
     }

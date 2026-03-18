@@ -293,8 +293,8 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(double sim_dt
 
         const double dist_factor = clamp(1.0 - d_km / std::max(1.0, max_isl_range_km(alt_km)), 0.0, 1.0);
         // Keep dynamic-link reliability in an engineering-realistic high band.
-        // This avoids practical multi-hop paths (target <=25 hops) being rejected too aggressively.
-        link.reliability = clamp(0.985 + 0.014 * dist_factor, 0.95, 0.9997);
+        // This avoids practical multi-hop paths (target <=30 hops) being rejected too aggressively.
+        link.reliability = clamp(0.989 + 0.010 * dist_factor, 0.97, 0.9998);
     }
 
     TopologySnapshot snapshot;
