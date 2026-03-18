@@ -1,0 +1,6 @@
+{
+  "node_feature_dim": 8,
+  "vnf_feature_dim": 4,
+  "context_feature_dim": 48,
+  "gnn_output_dim": 192
+}

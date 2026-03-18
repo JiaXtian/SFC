@@ -76,6 +76,12 @@ Topology ResourceManager::export_current_topology() const {
     return topo;
 }
 
+void ResourceManager::reset_all_allocations() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    deployments_.clear();
+    link_allocated_gbps_.clear();
+}
+
 bool ResourceManager::check_node_resources(
     const std::string& node_id,
     double cpu_required,
@@ -181,6 +187,7 @@ bool ResourceManager::allocate_resources(
                 it->second.status = "active";
             }
             snapshot.bw_allocations.push_back({link_detail.src, link_detail.dst, bw_needed});
+            link_allocated_gbps_[make_canonical_link_key(link_detail.src, link_detail.dst)] += bw_needed;
 
             // 双向键都更新，保持状态一致
             if (key1 != key2) {
@@ -234,6 +241,7 @@ bool ResourceManager::release_resources(const std::string& deployment_id) {
         // 🔥 双向查找
         std::string key1 = make_link_key(src, dst);
         std::string key2 = make_link_key(dst, src);
+        const std::string canonical = make_canonical_link_key(src, dst);
         
         auto link_it = links_.find(key1);
         if (link_it == links_.end()) {
@@ -257,6 +265,14 @@ bool ResourceManager::release_resources(const std::string& deployment_id) {
                 links_[key2] = link_it->second;
             }
         }
+
+        auto alloc_it = link_allocated_gbps_.find(canonical);
+        if (alloc_it != link_allocated_gbps_.end()) {
+            alloc_it->second -= bw_amount;
+            if (alloc_it->second <= 1e-9) {
+                link_allocated_gbps_.erase(alloc_it);
+            }
+        }
     }
     
     deployments_.erase(it);
@@ -271,8 +287,25 @@ Satellite ResourceManager::get_satellite(const std::string& node_id) const {
     throw std::runtime_error("Satellite not found: " + node_id);
 }
 
+double ResourceManager::get_allocated_link_bandwidth(
+    const std::string& src,
+    const std::string& dst
+) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = link_allocated_gbps_.find(make_canonical_link_key(src, dst));
+    if (it == link_allocated_gbps_.end()) return 0.0;
+    return std::max(0.0, it->second);
+}
+
 std::string ResourceManager::make_link_key(const std::string& src, const std::string& dst) const {
     return src + "->" + dst;
+}
+
+std::string ResourceManager::make_canonical_link_key(const std::string& src, const std::string& dst) const {
+    if (src <= dst) {
+        return src + "<->" + dst;
+    }
+    return dst + "<->" + src;
 }
 
 } // namespace sfc

@@ -261,17 +261,28 @@ export default function DeploymentPanel() {
                         路径总时延: {dep.link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0).toFixed(2)}ms
                       </div>
                       <div className="space-y-1">
-                        {(expandedLinks[dep.deployment_id] ? dep.link_details : dep.link_details.slice(0, 8)).map((l, i) => (
-                          <div key={i} className="flex items-center justify-between px-2 py-1 rounded text-[11px]"
-                            style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.08)' }}>
-                            <span className="font-mono text-green-400">
-                              <span className="text-green-400">{l.src}</span>
-                              <span className="text-gray-700 mx-1">→</span>
-                              <span className="text-green-400">{l.dst}</span>
-                            </span>
-                            <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
-                          </div>
-                        ))}
+                        {(expandedLinks[dep.deployment_id] ? dep.link_details : dep.link_details.slice(0, 8)).map((l, i) => {
+                          const totalBw = Number((l as any)?.bandwidth_gbps ?? 0)
+                          const availBw = Number((l as any)?.bandwidth_available_gbps ?? totalBw)
+                          const reqBw = Number((l as any)?.bandwidth_required_gbps ?? 0)
+                          const usedBw = Math.max(0, totalBw - availBw)
+                          return (
+                            <div key={i} className="px-2 py-1 rounded text-[11px]"
+                              style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.08)' }}>
+                              <div className="flex items-center justify-between">
+                                <span className="font-mono text-green-400">
+                                  <span className="text-green-400">{l.src}</span>
+                                  <span className="text-gray-700 mx-1">→</span>
+                                  <span className="text-green-400">{l.dst}</span>
+                                </span>
+                                <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
+                              </div>
+                              <div className="mt-0.5 text-[10px] text-cyan-300 font-mono">
+                                SFC需 {reqBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
+                              </div>
+                            </div>
+                          )
+                        })}
                       </div>
                       {dep.link_details.length > 8 && (
                         <button

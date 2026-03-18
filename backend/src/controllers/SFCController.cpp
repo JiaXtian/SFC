@@ -762,6 +762,7 @@ void SFCController::startSession(
         }
 
         const bool auto_redeploy = (*json).get("auto_redeploy", true).asBool();
+        const std::string initial_deployment_id = (*json).get("initial_deployment_id", "").asString();
         const Json::Value request_json = json->isMember("request") ? (*json)["request"] : (*json);
         auto sfc_request = parse_sfc_request(request_json);
         if (sfc_request.vnfs.empty() || sfc_request.source_node.empty() || sfc_request.destination_node.empty()) {
@@ -786,7 +787,8 @@ void SFCController::startSession(
         auto result = g_dynamic_inference->start_session(
             sfc_request,
             auto_redeploy,
-            has_initial_candidate ? &initial_candidate : nullptr
+            has_initial_candidate ? &initial_candidate : nullptr,
+            initial_deployment_id
         );
         auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(result));
         callback(resp);

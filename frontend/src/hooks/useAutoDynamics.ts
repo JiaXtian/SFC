@@ -103,115 +103,75 @@ function distanceKm(a: Vec3, b: Vec3) {
 }
 
 function buildDynamicLinkPlan(sats: any[], prevLinks: any[]) {
+  const dedup = new Set<string>()
+  const out: Array<{ source: string; target: string; link_type: 'intra_orbit' | 'inter_orbit' }> = []
+  const add = (source: string, target: string, linkType: 'intra_orbit' | 'inter_orbit') => {
+    if (!source || !target || source === target) return
+    const k = pairKey(source, target)
+    if (dedup.has(k)) return
+    dedup.add(k)
+    out.push({ source, target, link_type: linkType })
+  }
+
+  // Keep backend-provided link pairing stable; otherwise inter-orbit links may be remapped
+  // frame-to-frame and lose resource-accounting consistency.
+  if (Array.isArray(prevLinks) && prevLinks.length > 0) {
+    prevLinks.forEach((l: any) => {
+      const source = String(l?.source ?? '')
+      const target = String(l?.target ?? '')
+      const linkType: 'intra_orbit' | 'inter_orbit' =
+        String(l?.link_type ?? '') === 'intra_orbit' ? 'intra_orbit' : 'inter_orbit'
+      add(source, target, linkType)
+    })
+    if (out.length > 0) return out
+  }
+
+  // Fallback for the very first local frame when no links exist yet.
   const byPlane = new Map<number, any[]>()
-  sats.forEach((sat, idx) => {
+  sats.forEach((sat) => {
     const plane = Number(sat?.orbital_params?.plane ?? 0)
     if (!byPlane.has(plane)) byPlane.set(plane, [])
-    byPlane.get(plane)!.push({ sat, idx })
+    byPlane.get(plane)!.push(sat)
   })
   byPlane.forEach((arr) => {
     arr.sort((a, b) => {
-      const pa = Number(a?.sat?.orbital_params?.position_in_plane ?? 0)
-      const pb = Number(b?.sat?.orbital_params?.position_in_plane ?? 0)
+      const pa = Number(a?.orbital_params?.position_in_plane ?? 0)
+      const pb = Number(b?.orbital_params?.position_in_plane ?? 0)
       return pa - pb
     })
   })
   const planeIds = Array.from(byPlane.keys()).sort((a, b) => a - b)
-  const dedup = new Set<string>()
-  const out: Array<{ source: string; target: string; link_type: 'intra_orbit' | 'inter_orbit' }> = []
-  const prevPartner = new Map<string, string>()
-  prevLinks.forEach((l: any) => {
-    if (String(l?.link_type ?? '') !== 'inter_orbit') return
-    const s = String(l?.source ?? '')
-    const t = String(l?.target ?? '')
-    if (!s || !t) return
-    prevPartner.set(s, t)
-    prevPartner.set(t, s)
-  })
-
-  const add = (a: string, b: string, t: 'intra_orbit' | 'inter_orbit') => {
-    if (!a || !b || a === b) return false
-    const k = pairKey(a, b)
-    if (dedup.has(k)) return false
-    dedup.add(k)
-    if (a < b) out.push({ source: a, target: b, link_type: t })
-    else out.push({ source: b, target: a, link_type: t })
-    return true
-  }
 
   byPlane.forEach((arr) => {
     const n = arr.length
     if (n < 2) return
     for (let i = 0; i < n; i++) {
-      add(String(arr[i].sat.id), String(arr[(i + 1) % n].sat.id), 'intra_orbit')
+      add(String(arr[i]?.id ?? ''), String(arr[(i + 1) % n]?.id ?? ''), 'intra_orbit')
     }
   })
-
-  if (planeIds.length < 2) return out
 
   for (let p = 0; p < planeIds.length; p++) {
     const aPlane = byPlane.get(planeIds[p]) ?? []
     const bPlane = byPlane.get(planeIds[(p + 1) % planeIds.length]) ?? []
-    if (aPlane.length === 0 || bPlane.length === 0) continue
-    const bIdSet = new Set<string>(bPlane.map((x) => String(x.sat.id)))
-    const nA = aPlane.length
-    const nB = bPlane.length
-    const localWindow = nB <= 16 ? nB : (nB > 96 ? 2 : (nB > 48 ? 3 : 4))
-
-    for (let i = 0; i < nA; i++) {
-      const aSat = aPlane[i].sat
-      const aPos: Vec3 = aSat.coordinates
-      if (!aPos) continue
-
-      const slotA = Number(aSat?.orbital_params?.position_in_plane ?? i)
-      const ratio = nA > 0 ? (slotA / Math.max(1, nA)) : 0
-      const base = ((Math.round(ratio * nB) % nB) + nB) % nB
-      const candidateIndices: number[] = []
-      if (nB <= 16) {
-        for (let j = 0; j < nB; j++) candidateIndices.push(j)
-      } else {
-        for (let off = -localWindow; off <= localWindow; off++) {
-          const idx = ((base + off) % nB + nB) % nB
-          if (!candidateIndices.includes(idx)) candidateIndices.push(idx)
-        }
-      }
-
-      const evalCandidate = (idx: number) => {
-        const bSat = bPlane[idx]?.sat
-        if (!bSat) return null
-        const bPos: Vec3 = bSat.coordinates
-        if (!bPos) return null
-        const d = distanceKm(aPos, bPos)
-        const los = hasLineOfSight(aPos, bPos)
-        const reachable = los && d <= practicalIslRangeKm(norm(aPos), norm(bPos), 'inter_orbit')
-        if (!reachable) return null
-        return { sat: bSat, d }
-      }
-
-      let best: { sat: any; d: number } | null = null
-      candidateIndices.forEach((idx) => {
-        const c = evalCandidate(idx)
-        if (!c) return
-        if (!best || c.d < best.d) best = c
-      })
-
-      const prev = prevPartner.get(String(aSat.id))
-      if (prev && bIdSet.has(prev)) {
-        const prevIdx = bPlane.findIndex((x) => String(x.sat.id) === prev)
-        if (prevIdx >= 0) {
-          const pv = evalCandidate(prevIdx)
-          if (pv && (!best || pv.d <= best.d * 1.08)) {
-            best = pv
-          }
-        }
-      }
-
-      if (best) {
-        add(String(aSat.id), String(best.sat.id), 'inter_orbit')
-      }
+    const n = Math.min(aPlane.length, bPlane.length)
+    for (let i = 0; i < n; i++) {
+      add(String(aPlane[i]?.id ?? ''), String(bPlane[i]?.id ?? ''), 'inter_orbit')
     }
   }
   return out
+}
+
+function remapSelectedLink(selectedLink: any, links: any[]) {
+  if (!selectedLink) return null
+  const src = String(selectedLink?.source ?? '')
+  const dst = String(selectedLink?.target ?? '')
+  if (!src || !dst) return null
+  const found = links.find((l: any) => {
+    const a = String(l?.source ?? '')
+    const b = String(l?.target ?? '')
+    return (a === src && b === dst) || (a === dst && b === src)
+  })
+  return found ?? null
 }
 
 export function useAutoDynamics() {
@@ -266,6 +226,7 @@ export function useAutoDynamics() {
             const src = linkMap.get(linkKey(String(l.source), String(l.target)))
             if (!src) return l
             const resourceStatus = String(src.status ?? l.status ?? 'active')
+            const visibleStatus = String(l.status ?? resourceStatus ?? 'active')
             return {
               ...l,
               bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
@@ -273,12 +234,16 @@ export function useAutoDynamics() {
               reliability: Number(src.reliability ?? src.link_reliability ?? l.reliability ?? 0.999),
               __resource_status: resourceStatus,
               __resource_status_seed: resourceStatus,
-              status: resourceStatus,
+              // Preserve the current visual status; only resource status is refreshed
+              // from backend to avoid periodic cross-orbit flash.
+              status: visibleStatus,
             }
           })
+          const selectedLink = remapSelectedLink(s.selectedLink, mergedLinks)
           return {
             satellites: mergedNodes,
             links: mergedLinks,
+            selectedLink,
             autoDynamics: {
               ...s.autoDynamics,
               last_resource_sync_at: new Date().toISOString(),
@@ -438,6 +403,7 @@ export function useAutoDynamics() {
           useStore.setState((prev) => ({
             satellites: newSats,
             links: newLinks,
+            selectedLink: remapSelectedLink(prev.selectedLink, newLinks),
             simulation: {
               ...prev.simulation,
               sim_time: simIso,

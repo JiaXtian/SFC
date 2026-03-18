@@ -273,9 +273,15 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(double sim_dt
 
         const size_t hv = std::hash<std::string>{}(link.source + "|" + link.target);
         const double phase = 0.001 * static_cast<double>(topology_version_ * 37 + static_cast<int>(hv % 4096));
-        const double dynamic_factor = clamp(0.15, 1.0, 0.62 + 0.24 * std::sin(phase) + 0.14 * std::cos(phase * 0.73));
-        link.bandwidth_available_gbps = clamp(
+        const double dynamic_factor = clamp(0.62 + 0.24 * std::sin(phase) + 0.14 * std::cos(phase * 0.73), 0.15, 1.0);
+        const double dynamic_capacity_gbps = clamp(
             link.bandwidth_gbps * dynamic_factor,
+            0.0,
+            link.bandwidth_gbps
+        );
+        const double allocated_gbps = res_mgr_->get_allocated_link_bandwidth(link.source, link.target);
+        link.bandwidth_available_gbps = clamp(
+            dynamic_capacity_gbps - allocated_gbps,
             0.0,
             link.bandwidth_gbps
         );

@@ -174,12 +174,14 @@ void TopologyController::generateTopology(
             }
 
             g_topo_mgr->save_current_topology(topology);
+            g_res_mgr->reset_all_allocations();
             g_res_mgr->load_topology(topology);
             spdlog::info("Loaded external topology: {} nodes, {} links",
                         topology.nodes.size(), topology.links.size());
         } else {
             spdlog::info("Generating: sats={}, planes={}, alt={}", total_sats, num_planes, altitude);
             topology = g_topo_mgr->generate_walker_delta(total_sats, num_planes, altitude, inclination, 42);
+            g_res_mgr->reset_all_allocations();
             g_res_mgr->load_topology(topology);
         }
         

@@ -181,6 +181,7 @@ export default function CandidateModal() {
         }
         const sessionResp = await apiClient.startSFCSession({
           auto_redeploy: Boolean(sessionConfig?.auto_redeploy ?? true),
+          initial_deployment_id: backendDeploymentId,
           request: sessionReq,
         })
         sessionId = String(sessionResp?.session_id ?? '')

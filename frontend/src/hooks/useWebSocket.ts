@@ -2,10 +2,11 @@ import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
 
 function defaultWsUrl() {
+  const envUrl = (import.meta as any)?.env?.VITE_WS_URL?.trim?.()
+  if (envUrl) return envUrl
+
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const host = window.location.hostname || 'localhost'
-  const port = window.location.port === '8080' ? window.location.port : '8080'
-  return `${protocol}://${host}:${port}/ws/updates`
+  return `${protocol}://${window.location.host}/ws/updates`
 }
 
 export function useWebSocket() {

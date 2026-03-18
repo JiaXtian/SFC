@@ -285,6 +285,21 @@ function linkKey(src: string, dst: string) {
   return `${src}|${dst}`
 }
 
+function remapSelectedLink(selectedLink: LinkData | null, links: LinkData[]): LinkData | null {
+  if (!selectedLink) return null
+  const src = String((selectedLink as any)?.source ?? '')
+  const dst = String((selectedLink as any)?.target ?? '')
+  if (!src || !dst || !Array.isArray(links)) return null
+  for (const l of links as any[]) {
+    const a = String(l?.source ?? '')
+    const b = String(l?.target ?? '')
+    if ((a === src && b === dst) || (a === dst && b === src)) {
+      return l as LinkData
+    }
+  }
+  return null
+}
+
 function buildAdjacency(links: LinkData[]): PathGraph {
   const adj = new Map<string, string[]>()
   const linkMap = new Map<string, LinkData>()
@@ -445,6 +460,21 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
   const anchors = buildAnchorsForDeployment(dep)
   if (anchors.length < 2) return dep
 
+  const requiredByEdge = new Map<string, number>()
+  const requiredSamples: number[] = []
+  ;(Array.isArray(dep.link_details) ? dep.link_details : []).forEach((l) => {
+    const req = Number(l?.bandwidth_required_gbps ?? 0)
+    if (req <= 1e-9) return
+    const a = String(l?.src ?? '')
+    const b = String(l?.dst ?? '')
+    if (!a || !b) return
+    requiredByEdge.set(linkKey(a, b), req)
+    requiredSamples.push(req)
+  })
+  const requiredFallback = requiredSamples.length > 0
+    ? Math.max(...requiredSamples)
+    : Math.max(0.1, Number(dep.score_constraints?.min_bandwidth_gbps ?? 0))
+
   const chainValid = followsSingleChain(dep, anchors)
   if (chainValid && linksAreStillUsable(dep, linkMap)) {
     const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
@@ -473,13 +503,14 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
       if (newNodes[newNodes.length - 1] !== src) newNodes.push(src)
       newNodes.push(dst)
       const lk = linkMap.get(linkKey(src, dst))
+      const req = Number(requiredByEdge.get(linkKey(src, dst)) ?? requiredFallback)
       newLinks.push({
         src,
         dst,
         latency_ms: Number((lk as any)?.latency_ms ?? 0),
         bandwidth_gbps: Number((lk as any)?.bandwidth_gbps ?? 0),
         bandwidth_available_gbps: Number((lk as any)?.bandwidth_available_gbps ?? 0),
-        bandwidth_required_gbps: 0,
+        bandwidth_required_gbps: req,
         status: (lk as any)?.status ?? 'down',
         reliability: Number((lk as any)?.reliability ?? (lk as any)?.link_reliability ?? 0),
       })
@@ -631,6 +662,7 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
     const src = byKey.get(linkKey(String(lk.source), String(lk.target)))
     if (!src) return lk
     const resourceStatus = String(src.status ?? lk.__resource_status ?? lk.status ?? 'active')
+    const visibleStatus = String(lk.status ?? resourceStatus ?? 'active')
     return {
       ...lk,
       bandwidth_gbps: Number(src.bandwidth_gbps ?? lk.bandwidth_gbps ?? 0),
@@ -638,7 +670,9 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
       reliability: Number(src.reliability ?? src.link_reliability ?? lk.reliability ?? 0.999),
       __resource_status: resourceStatus,
       __resource_status_seed: resourceStatus,
-      status: resourceStatus,
+      // Keep current visual/link-topology status stable in realtime mode to avoid
+      // periodic flicker from backend snapshot cadence.
+      status: visibleStatus,
     }
   })
 }
@@ -775,10 +809,12 @@ export const useStore = create<Store>((set, get) => ({
         const idx = next.history.length - 1
         if (idx >= 0) {
           const frame = next.history[idx]
+          const nextLinks = frame.links as LinkData[]
           return {
             simulation: { ...next, history_cursor: idx },
             satellites: frame.nodes,
-            links: frame.links,
+            links: nextLinks,
+            selectedLink: remapSelectedLink(s.selectedLink, nextLinks),
             topologyVersion: frame.topology_version || s.topologyVersion,
           }
         }
@@ -793,6 +829,7 @@ export const useStore = create<Store>((set, get) => ({
       if (history.length === 0) return {}
       const idx = Math.max(0, Math.min(history.length - 1, cursor))
       const frame = history[idx]
+      const nextLinks = frame.links as LinkData[]
       return {
         simulation: {
           ...s.simulation,
@@ -803,7 +840,8 @@ export const useStore = create<Store>((set, get) => ({
           metrics: frame.metrics ?? s.simulation.metrics,
         },
         satellites: frame.nodes,
-        links: frame.links,
+        links: nextLinks,
+        selectedLink: remapSelectedLink(s.selectedLink, nextLinks),
         topologyVersion: frame.topology_version || s.topologyVersion,
       }
     })
@@ -845,9 +883,11 @@ export const useStore = create<Store>((set, get) => ({
       const tailIdx = history.length - 1
       const realtime = s.simulation.view_mode === 'realtime'
       const activeFrame = realtime && tailIdx >= 0 ? history[tailIdx] : null
+      const activeLinks = (activeFrame ? activeFrame.links : s.links) as LinkData[]
       return {
         satellites: activeFrame ? activeFrame.nodes : s.satellites,
-        links: activeFrame ? activeFrame.links : s.links,
+        links: activeLinks,
+        selectedLink: remapSelectedLink(s.selectedLink, activeLinks),
         topologyVersion: activeFrame
           ? activeFrame.topology_version
           : (topoVersion > 0 ? topoVersion : s.topologyVersion + 1),

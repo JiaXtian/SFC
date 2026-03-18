@@ -74,6 +74,30 @@ std::vector<DeploymentCandidate::PerVNF> ensure_per_vnf_filled(
     return out;
 }
 
+double default_required_bandwidth(const SFCRequest& request) {
+    double required = std::max(0.01, request.constraints.min_bandwidth_gbps);
+    for (const auto& v : request.vnfs) {
+        required = std::max(required, std::max(v.bw_in, v.bw_out));
+    }
+    return required;
+}
+
+void normalize_candidate_bandwidth_requirements(DeploymentCandidate* candidate, const SFCRequest& request) {
+    if (!candidate) return;
+    const double fallback = default_required_bandwidth(request);
+    for (auto& ld : candidate->link_details) {
+        if (ld.bandwidth_required_gbps <= 1e-9) {
+            ld.bandwidth_required_gbps = fallback;
+        }
+    }
+}
+
+std::string make_session_resource_deployment_id(const std::string& session_id) {
+    const auto now = std::chrono::system_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    return "sess_alloc_" + session_id + "_" + std::to_string(ms);
+}
+
 nlohmann::json request_vnfs_json(const SFCRequest& request) {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& v : request.vnfs) {
@@ -380,6 +404,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     if (static_cast<int>(response_candidates.size()) > session.request.topk) {
         response_candidates.resize(static_cast<size_t>(session.request.topk));
     }
+    for (auto& c : response_candidates) {
+        normalize_candidate_bandwidth_requirements(&c, session.request);
+    }
     const int deployable_count = static_cast<int>(std::count_if(
         response_candidates.begin(),
         response_candidates.end(),
@@ -459,13 +486,86 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     if (!response_candidates.empty()) {
         auto chosen = response_candidates.front();
         chosen.per_vnf = ensure_per_vnf_filled(chosen, session.request);
+        normalize_candidate_bandwidth_requirements(&chosen, session.request);
         const std::string sig = candidate_signature(chosen);
         const bool changed = (!session.has_last_candidate) || (sig != session.last_candidate_signature);
         const std::string status = changed ? (session.has_last_candidate ? "redeployed" : "deployed") : "stable";
+
         if (changed) {
+            const std::string previous_allocation_id = session.active_resource_deployment_id;
+            const bool had_previous_allocation = !previous_allocation_id.empty();
+            const DeploymentCandidate previous_candidate = session.last_candidate;
+            bool released_previous = true;
+            if (had_previous_allocation) {
+                released_previous = res_mgr_->release_resources(previous_allocation_id);
+                if (!released_previous) {
+                    spdlog::warn(
+                        "Session {} failed to release previous allocation {} before redeploy",
+                        session.session_id,
+                        previous_allocation_id
+                    );
+                }
+            }
+
+            const std::string new_allocation_id = make_session_resource_deployment_id(session.session_id);
+            const bool allocated = res_mgr_->allocate_resources(new_allocation_id, chosen, session.request.vnfs);
+            if (!allocated) {
+                bool restored_previous = false;
+                if (had_previous_allocation && released_previous && session.has_last_candidate) {
+                    DeploymentCandidate restore_candidate = previous_candidate;
+                    restore_candidate.per_vnf = ensure_per_vnf_filled(restore_candidate, session.request);
+                    normalize_candidate_bandwidth_requirements(&restore_candidate, session.request);
+                    restored_previous = res_mgr_->allocate_resources(
+                        previous_allocation_id,
+                        restore_candidate,
+                        session.request.vnfs
+                    );
+                    if (restored_previous) {
+                        session.active_resource_deployment_id = previous_allocation_id;
+                    }
+                }
+
+                session.failures_total += 1;
+                total_failures_ += 1;
+                const std::string fail_reason = restored_previous
+                    ? "resource_allocation_failed_restored_previous"
+                    : "resource_allocation_failed";
+                spdlog::error(
+                    "Session {} resource apply failed on trigger {}: {}",
+                    session.session_id,
+                    trigger,
+                    fail_reason
+                );
+
+                WSHandler::broadcast_json(trace_payload);
+                WSHandler::broadcast_json({
+                    {"type", "session_update"},
+                    {"session_id", session.session_id},
+                    {"request_id", session.request.request_id},
+                    {"status", "decision_failed"},
+                    {"trigger", trigger},
+                    {"topology_version", session.last_topology_version},
+                    {"sim_time", session.last_sim_time},
+                    {"path_changed", false},
+                    {"reason", fail_reason}
+                });
+                return {
+                    {"session_id", session.session_id},
+                    {"status", "decision_failed"},
+                    {"topology_version", session.last_topology_version},
+                    {"sim_time", session.last_sim_time},
+                    {"inference_time_ms", inference_ms},
+                    {"reason", fail_reason}
+                };
+            }
+
+            session.active_resource_deployment_id = new_allocation_id;
+            auto updated_topology = res_mgr_->export_current_topology();
+            topo_mgr_->save_current_topology(updated_topology);
             session.redeploy_total += 1;
             total_redeploys_ += 1;
         }
+
         session.last_candidate = chosen;
         session.last_candidate_signature = sig;
         session.has_last_candidate = true;
@@ -517,7 +617,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
 nlohmann::json DynamicInferenceService::start_session(
     const SFCRequest& request,
     bool auto_redeploy,
-    const DeploymentCandidate* initial_candidate
+    const DeploymentCandidate* initial_candidate,
+    const std::string& initial_deployment_id
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     SessionState session;
@@ -544,15 +645,49 @@ nlohmann::json DynamicInferenceService::start_session(
     if (initial_candidate && (!initial_candidate->deployed_nodes.empty() || !initial_candidate->per_vnf.empty())) {
         DeploymentCandidate chosen = *initial_candidate;
         chosen.per_vnf = ensure_per_vnf_filled(chosen, sessions_[session.session_id].request);
+        normalize_candidate_bandwidth_requirements(&chosen, sessions_[session.session_id].request);
         sessions_[session.session_id].last_candidate = chosen;
         sessions_[session.session_id].last_candidate_signature = candidate_signature(chosen);
         sessions_[session.session_id].has_last_candidate = true;
+        sessions_[session.session_id].active_resource_deployment_id = initial_deployment_id;
         sessions_[session.session_id].last_topology_version =
             snapshot.topology_version > 0 ? snapshot.topology_version : snapshot.topology.metadata.topology_version;
         sessions_[session.session_id].last_sim_time = !snapshot.sim_time.empty()
             ? snapshot.sim_time
             : snapshot.topology.metadata.sim_time;
         sessions_[session.session_id].last_inference_time_ms = 0.0;
+
+        if (sessions_[session.session_id].active_resource_deployment_id.empty()) {
+            const std::string alloc_id = make_session_resource_deployment_id(session.session_id);
+            const bool allocated = res_mgr_->allocate_resources(
+                alloc_id,
+                chosen,
+                sessions_[session.session_id].request.vnfs
+            );
+            if (!allocated) {
+                sessions_[session.session_id].active = false;
+                sessions_[session.session_id].failures_total += 1;
+                total_failures_ += 1;
+                return {
+                    {"session_id", session.session_id},
+                    {"active", false},
+                    {"auto_redeploy", auto_redeploy},
+                    {"request_id", sessions_[session.session_id].request.request_id},
+                    {"initial_result", {
+                        {"session_id", session.session_id},
+                        {"status", "decision_failed"},
+                        {"topology_version", sessions_[session.session_id].last_topology_version},
+                        {"sim_time", sessions_[session.session_id].last_sim_time},
+                        {"inference_time_ms", 0.0},
+                        {"reason", "resource_allocation_failed"}
+                    }}
+                };
+            }
+            sessions_[session.session_id].active_resource_deployment_id = alloc_id;
+            auto updated_topology = res_mgr_->export_current_topology();
+            topo_mgr_->save_current_topology(updated_topology);
+        }
+
         sessions_[session.session_id].redeploy_total += 1;
         total_redeploys_ += 1;
 
@@ -661,6 +796,20 @@ bool DynamicInferenceService::stop_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) return false;
+    if (!it->second.active_resource_deployment_id.empty()) {
+        const bool released = res_mgr_->release_resources(it->second.active_resource_deployment_id);
+        if (!released) {
+            spdlog::debug(
+                "Session {} failed to release allocation {} on stop",
+                session_id,
+                it->second.active_resource_deployment_id
+            );
+        } else {
+            auto updated_topology = res_mgr_->export_current_topology();
+            topo_mgr_->save_current_topology(updated_topology);
+        }
+        it->second.active_resource_deployment_id.clear();
+    }
     it->second.active = false;
     return true;
 }

@@ -159,7 +159,7 @@ fi
 have_cmd python || die "未找到 python 命令"
 
 echo "=========================================="
-echo "  SFC智能编排系统 - 单次长训练流水线"
+echo "  SFC智能编排系统 训练与推理流程"
 echo "=========================================="
 echo "项目目录: $SCRIPT_DIR"
 echo "跳过阶段: data=$SKIP_DATA train=$SKIP_TRAIN val_eval=$SKIP_VAL_EVAL export=$SKIP_EXPORT build=$SKIP_BUILD infer=$SKIP_INFER"
@@ -298,7 +298,6 @@ else
 fi
 
 echo -e "\n=========================================="
-echo "  ✓ 单次长训练流程执行完成"
 echo "  训练指标: logs/training_metrics.json"
 echo "  验证指标: logs/val_eval.json"
 echo "  推理结果: results/final_results.json"

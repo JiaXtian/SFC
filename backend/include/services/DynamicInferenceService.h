@@ -26,7 +26,8 @@ public:
     nlohmann::json start_session(
         const SFCRequest& request,
         bool auto_redeploy,
-        const DeploymentCandidate* initial_candidate = nullptr
+        const DeploymentCandidate* initial_candidate = nullptr,
+        const std::string& initial_deployment_id = ""
     );
     bool stop_session(const std::string& session_id);
     nlohmann::json list_sessions() const;
@@ -52,6 +53,7 @@ private:
         std::string last_candidate_signature;
         std::string last_required_recompute_signature;
         nlohmann::json last_decision_trace;
+        std::string active_resource_deployment_id;
     };
 
     static std::string make_session_id();
