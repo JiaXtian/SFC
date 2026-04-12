@@ -23,6 +23,7 @@ public:
     ADD_METHOD_TO(TopologyController::startDynamicSimulation, "/api/v1/topology/dynamic/start", Post);
     ADD_METHOD_TO(TopologyController::stopDynamicSimulation, "/api/v1/topology/dynamic/stop", Post);
     ADD_METHOD_TO(TopologyController::stepDynamicSimulation, "/api/v1/topology/dynamic/step", Post);
+    ADD_METHOD_TO(TopologyController::injectDynamicFaults, "/api/v1/topology/dynamic/faults/inject", Post);
     ADD_METHOD_TO(TopologyController::getDynamicSimulationStatus, "/api/v1/topology/dynamic/status", Get);
     METHOD_LIST_END
     
@@ -47,6 +48,9 @@ public:
 
     void stepDynamicSimulation(const HttpRequestPtr& req,
                                std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void injectDynamicFaults(const HttpRequestPtr& req,
+                             std::function<void(const HttpResponsePtr&)>&& callback);
 
     void getDynamicSimulationStatus(const HttpRequestPtr& req,
                                     std::function<void(const HttpResponsePtr&)>&& callback);

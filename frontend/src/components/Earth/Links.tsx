@@ -14,6 +14,8 @@ type RenderLink = {
   source: string
   target: string
   link_type?: string
+  status?: string
+  fault_tag?: string
   latency_ms?: number
   bandwidth_gbps?: number
   bandwidth_available_gbps?: number
@@ -94,18 +96,20 @@ export default function Links() {
   const groups = useMemo(() => {
     const normalIntra: RenderLink[] = []
     const normalInter: RenderLink[] = []
+    const fault: RenderLink[] = []
     const selected: RenderLink[] = []
 
     for (const link of links as any[]) {
       const key = `${link.source}|${link.target}`
       const isSelected = selectedKey.has(key)
       const status = String(link?.status ?? 'active')
-      const availBw = Number(link?.bandwidth_available_gbps ?? link?.bandwidth_gbps ?? 0)
+      const faultTag = String(link?.fault_tag ?? '')
+      const isFault = status === 'down' && faultTag !== 'line_of_sight_loss' && faultTag !== 'topology_inconsistent'
 
-      if (!display.showLinks && !isSelected) continue
-      if (!isSelected && (status === 'down' || availBw <= 0)) continue
+      if (!display.showLinks && !isSelected && !isFault) continue
 
       if (isSelected) selected.push(link)
+      else if (isFault) fault.push(link)
       else if (link.link_type === 'intra_orbit') normalIntra.push(link)
       else normalInter.push(link)
     }
@@ -127,10 +131,10 @@ export default function Links() {
       const sampledInter: RenderLink[] = []
       normalIntra.forEach((l, i) => { if (i % stride === 0) sampledIntra.push(l) })
       normalInter.forEach((l, i) => { if (i % stride === 0) sampledInter.push(l) })
-      return { normalIntra: sampledIntra, normalInter: sampledInter, selected }
+      return { normalIntra: sampledIntra, normalInter: sampledInter, fault, selected }
     }
 
-    return { normalIntra, normalInter, selected }
+    return { normalIntra, normalInter, fault, selected }
   }, [links, display.showLinks, selectedKey, display.renderQuality, satellites.length])
 
   const meshes = useMemo(() => {
@@ -151,6 +155,7 @@ export default function Links() {
     return {
       intra: make(groups.normalIntra),
       inter: make(groups.normalInter),
+      fault: make(groups.fault),
       selected: make(groups.selected),
     }
   }, [groups, satMap])
@@ -231,6 +236,7 @@ export default function Links() {
     return () => {
       meshes.intra?.geometry.dispose()
       meshes.inter?.geometry.dispose()
+      meshes.fault?.geometry.dispose()
       meshes.selected?.geometry.dispose()
     }
   }, [meshes])
@@ -280,7 +286,7 @@ export default function Links() {
     setSelectedSatellite(null)
   }
 
-  if (!meshes.intra && !meshes.inter && !meshes.selected && highlightedLines.length === 0) return null
+  if (!meshes.intra && !meshes.inter && !meshes.fault && !meshes.selected && highlightedLines.length === 0) return null
 
   return (
     <group>
@@ -290,7 +296,7 @@ export default function Links() {
           raycast={raycastNormalLink}
           onClick={(e) => handleLinkPick(meshes.intra, e)}
         >
-          <lineBasicMaterial color="#65ff7f" transparent opacity={display.linkOpacity * 0.93} depthWrite={false} />
+          <lineBasicMaterial color="#4dfa7d" transparent opacity={display.linkOpacity * 0.9} depthWrite={false} />
         </lineSegments>
       )}
       {meshes.inter && (
@@ -299,7 +305,16 @@ export default function Links() {
           raycast={raycastNormalLink}
           onClick={(e) => handleLinkPick(meshes.inter, e)}
         >
-          <lineBasicMaterial color="#8b5bf9" transparent opacity={display.linkOpacity * 0.8} depthWrite={false} />
+          <lineBasicMaterial color="#2ed96f" transparent opacity={display.linkOpacity * 0.78} depthWrite={false} />
+        </lineSegments>
+      )}
+      {meshes.fault && (
+        <lineSegments
+          geometry={meshes.fault.geometry}
+          raycast={raycastNormalLink}
+          onClick={(e) => handleLinkPick(meshes.fault, e)}
+        >
+          <lineBasicMaterial color="#ff3b30" transparent opacity={Math.max(0.65, display.linkOpacity * 0.95)} depthWrite={false} />
         </lineSegments>
       )}
 
@@ -327,12 +342,30 @@ export default function Links() {
         </group>
       ))}
 
-      {selectedLines.map(item => (
+      {selectedLines.map(item => {
+        const status = String((item.link as any)?.status ?? 'active')
+        const isFault = status === 'down'
+        return (
         <group key={item.key}>
-          <Line points={item.points} color="#7df9ff" lineWidth={4.5} transparent opacity={1} raycast={() => null} />
-          <Line points={item.points} color="#22d3ee" lineWidth={10.5} transparent opacity={0.3} raycast={() => null} />
+          <Line
+            points={item.points}
+            color={isFault ? '#ff6b63' : '#7df9ff'}
+            lineWidth={4.5}
+            transparent
+            opacity={1}
+            raycast={() => null}
+          />
+          <Line
+            points={item.points}
+            color={isFault ? '#ff3b30' : '#22d3ee'}
+            lineWidth={10.5}
+            transparent
+            opacity={0.3}
+            raycast={() => null}
+          />
         </group>
-      ))}
+        )
+      })}
     </group>
   )
 }

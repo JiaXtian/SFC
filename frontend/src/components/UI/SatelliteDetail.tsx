@@ -1,6 +1,18 @@
 import { X, Cpu, HardDrive, Navigation, Zap } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 
+function nodeFaultTypeLabel(tag: string): string {
+  const map: Record<string, string> = {
+    power_failure: '供电故障',
+    cpu_overload: '计算过载',
+    thermal_shutdown: '过热保护停机',
+    control_plane_sync_loss: '控制面同步丢失',
+    software_crash: '软件崩溃',
+    clock_drift: '时钟漂移',
+  }
+  return map[tag] ?? (tag || '无')
+}
+
 /**
  * 安全资源条组件
  */
@@ -41,6 +53,9 @@ export default function SatelliteDetail() {
   if (!selectedSatellite) return null
 
   const sat = selectedSatellite
+  const satStatus = String((sat as any)?.status ?? 'active')
+  const satFaultTag = String((sat as any)?.fault_tag ?? '')
+  const isFault = satStatus === 'down'
 
 
   const cpuTotal = Number(sat?.cpu_total ?? 0)
@@ -90,7 +105,7 @@ export default function SatelliteDetail() {
         width: 260,
         background:
           'linear-gradient(180deg, rgba(20,20,35,0.97), rgba(10,10,20,0.97))',
-        border: '1px solid rgba(0,255,136,0.3)',
+        border: isFault ? '1px solid rgba(239,68,68,0.45)' : '1px solid rgba(0,255,136,0.3)',
         backdropFilter: 'blur(20px)'
       }}
     >
@@ -99,7 +114,9 @@ export default function SatelliteDetail() {
         className="relative px-4 py-3"
         style={{
           background:
-            'linear-gradient(135deg, rgba(0,255,136,0.12), rgba(0,200,100,0.12))',
+            isFault
+              ? 'linear-gradient(135deg, rgba(239,68,68,0.18), rgba(153,27,27,0.16))'
+              : 'linear-gradient(135deg, rgba(0,255,136,0.12), rgba(0,200,100,0.12))',
           borderBottom: '1px solid rgba(100,100,120,0.15)'
         }}
       >
@@ -110,16 +127,27 @@ export default function SatelliteDetail() {
           <X className="w-3.5 h-3.5 text-gray-500" />
         </button>
 
-        <div className="text-xs font-bold text-green-300 font-mono mb-1">
+        <div className={`text-xs font-bold font-mono mb-1 ${isFault ? 'text-rose-300' : 'text-green-300'}`}>
           {sat?.id ?? 'Unknown'}
         </div>
 
         <div className="flex items-center gap-2 text-[10px]">
-          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          <span className="text-green-400 font-medium">运行正常</span>
+          <div
+            className={`w-2 h-2 rounded-full ${isFault ? '' : 'animate-pulse'}`}
+            style={{ background: isFault ? '#ef4444' : '#22c55e' }}
+          />
+          <span
+            className="font-medium"
+            style={{ color: isFault ? '#ef4444' : '#22c55e' }}
+          >
+            {isFault ? '故障' : '运行正常'}
+          </span>
+          <span className="text-slate-400">
+            · 故障类型 {isFault ? nodeFaultTypeLabel(satFaultTag) : '无'}
+          </span>
           {vnfsHere.length > 0 && (
             <span className="text-yellow-400">
-              · {vnfsHere.length} VNF
+              · {vnfsHere.length} 网元
             </span>
           )}
         </div>
@@ -148,8 +176,8 @@ export default function SatelliteDetail() {
               ],
               [
                 '倾角',
-                orbital?.inclination != null
-                  ? `${Number(orbital.inclination).toFixed(1)}°`
+                (orbital?.inclination ?? orbital?.inclination_deg) != null
+                  ? `${Number(orbital?.inclination ?? orbital?.inclination_deg).toFixed(1)}°`
                   : '-'
               ],
               [
@@ -221,11 +249,11 @@ export default function SatelliteDetail() {
           </div>
         </div>
 
-        {/* VNF */}
+        {/* Core NF */}
         <div>
           <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
             <Zap className="w-3 h-3" />
-            运行中 VNF ({vnfsHere.length})
+            运行中核心网网元 ({vnfsHere.length})
           </div>
 
           {vnfsHere.length > 0 ? (
@@ -242,7 +270,7 @@ export default function SatelliteDetail() {
                 >
                   <div className="flex items-center justify-between mb-0.5">
                     <span className="text-[11px] font-semibold text-green-300">
-                      {item?.vnf ?? 'Unknown'}
+                      {item?.core_nf ?? item?.vnf ?? 'Unknown'}
                     </span>
 
                     <span
@@ -266,6 +294,12 @@ export default function SatelliteDetail() {
                   </div>
 
                   <div className="text-[9px] text-gray-600 mt-1 flex gap-3">
+                    <span>
+                      类型{' '}
+                      <span className="text-gray-400 font-mono">
+                        {String(item?.nf_type ?? '-')}
+                      </span>
+                    </span>
                     <span>
                       CPU{' '}
                       <span className="text-gray-400 font-mono">
@@ -293,7 +327,7 @@ export default function SatelliteDetail() {
               className="text-[10px] text-gray-600 text-center py-2.5 rounded-lg"
               style={{ background: 'rgba(50,50,60,0.2)' }}
             >
-              暂无VNF部署
+              暂无核心网网元部署
             </div>
           )}
         </div>

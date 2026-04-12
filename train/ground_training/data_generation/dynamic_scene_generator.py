@@ -19,6 +19,22 @@ LIGHT_SPEED_KMPS = 299792.458
 EARTH_MU = 398600.4418
 TS = load.timescale()
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+NODE_FAULT_TYPES = [
+    "power_failure",
+    "cpu_overload",
+    "thermal_shutdown",
+    "control_plane_sync_loss",
+    "software_crash",
+    "clock_drift",
+]
+LINK_FAULT_TYPES = [
+    "optical_signal_loss",
+    "beam_misalignment",
+    "interference_jamming",
+    "routing_blackhole",
+    "transceiver_failure",
+    "line_degradation",
+]
 
 
 @dataclass
@@ -132,6 +148,7 @@ def _propagate_satellite(sat: Satrec, sat_meta: Dict, dt: datetime) -> Dict:
         "core_network_load": round((cpu_load + mem_load + disk_load) / 3.0, 4),
         "node_reliability": sat_meta["node_reliability"],
         "vnfs": [],
+        "core_nfs": [],
     }
 
 
@@ -181,6 +198,7 @@ def _build_links(nodes: List[Dict], config: DynamicSceneConfig) -> List[Dict]:
             "target": b["id"],
             "link_type": link_type,
             "status": "active",
+            "fault_tag": "",
             "latency_ms": round((d / LIGHT_SPEED_KMPS) * 1000.0, 5),
             "reliability": round(reliability, 5),
             "bandwidth_gbps": round(bw_total, 4),
@@ -210,24 +228,31 @@ def _inject_sparse_faults(nodes: List[Dict], links: List[Dict], config: DynamicS
     events = []
     for n in nodes:
         if random.random() < config.node_fault_prob_per_tick:
+            fault_type = random.choice(NODE_FAULT_TYPES)
             n["status"] = "down"
-            n["fault_tag"] = "random_node_fault"
+            n["fault_tag"] = fault_type
             events.append({
                 "type": "fault_event",
                 "entity_type": "node",
                 "entity_id": n["id"],
-                "reason": "random_node_fault",
+                "reason": fault_type,
+                "fault_type": fault_type,
             })
     down_nodes = {n["id"] for n in nodes if n["status"] == "down"}
     for l in links:
-        if l["source"] in down_nodes or l["target"] in down_nodes or random.random() < config.link_fault_prob_per_tick:
+        endpoint_down = l["source"] in down_nodes or l["target"] in down_nodes
+        random_link_fault = random.random() < config.link_fault_prob_per_tick
+        if endpoint_down or random_link_fault:
+            fault_type = "endpoint_node_fault" if endpoint_down else random.choice(LINK_FAULT_TYPES)
             l["status"] = "down"
+            l["fault_tag"] = fault_type
             l["bandwidth_available_gbps"] = 0.0
             events.append({
                 "type": "fault_event",
                 "entity_type": "link",
                 "entity_id": f"{l['source']}->{l['target']}",
-                "reason": "random_link_fault_or_endpoint_down",
+                "reason": fault_type,
+                "fault_type": fault_type,
             })
     return nodes, links, events
 

@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, node_dim=192, vnf_dim=4, context_dim=48, hidden_dim=384):
+    def __init__(self, node_dim=192, vnf_dim=8, context_dim=48, hidden_dim=384):
         super().__init__()
         combined_dim = node_dim + vnf_dim + context_dim
         self.fc = nn.Sequential(
@@ -38,7 +38,7 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, input_dim=244, hidden_dim=384):
+    def __init__(self, input_dim=248, hidden_dim=384):
         super().__init__()
         self.fc = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -60,7 +60,7 @@ class DRLAgent:
     def __init__(
         self,
         node_dim=192,
-        vnf_dim=4,
+        vnf_dim=8,
         context_dim=48,
         actor_lr=1e-4,
         critic_lr=3e-4,

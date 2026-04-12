@@ -10,6 +10,7 @@
 #include <sstream>
 #include <limits>
 #include <cmath>
+#include <cctype>
 #include <nlohmann/json.hpp>
 
 namespace sfc {
@@ -17,6 +18,96 @@ namespace sfc {
 // 全局部署列表
 static std::vector<Deployment> g_deployments;
 static std::mutex g_deployments_mutex;
+
+struct CoreNFProfile {
+    std::string nf_role;
+    std::string resource_profile;
+    double cpu_multiplier;
+    double mem_multiplier;
+    double disk_multiplier;
+    double bw_multiplier;
+    double min_cpu;
+    double min_mem;
+    double min_disk;
+    double min_bw;
+};
+
+static std::string normalize_nf_type(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (char ch : raw) {
+        if (ch == '-' || ch == ' ') out.push_back('_');
+        else out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw) {
+    const std::string nf_type = normalize_nf_type(nf_type_raw);
+    if (nf_type == "amf") {
+        return {"control_plane", "session-heavy", 1.35, 1.30, 1.20, 1.15, 1.2, 2.2, 8.0, 0.2};
+    }
+    if (nf_type == "smf") {
+        return {"control_plane", "policy-heavy", 1.45, 1.35, 1.30, 1.20, 1.5, 2.6, 10.0, 0.25};
+    }
+    if (nf_type == "upf") {
+        return {"user_plane", "throughput-heavy", 1.80, 1.55, 1.60, 1.80, 2.0, 3.0, 16.0, 0.45};
+    }
+    if (nf_type == "nrf") {
+        return {"control_plane", "registry", 1.15, 1.25, 1.20, 1.05, 0.9, 1.8, 6.0, 0.12};
+    }
+    if (nf_type == "ausf") {
+        return {"control_plane", "auth", 1.20, 1.20, 1.15, 1.10, 0.8, 1.6, 5.0, 0.1};
+    }
+    if (nf_type == "udm" || nf_type == "udr") {
+        return {"control_plane", "data-plane-db", 1.25, 1.35, 1.65, 1.10, 1.0, 2.0, 20.0, 0.1};
+    }
+    if (nf_type == "pcf") {
+        return {"control_plane", "policy", 1.30, 1.30, 1.20, 1.10, 1.0, 2.0, 8.0, 0.1};
+    }
+    if (nf_type == "nssf") {
+        return {"control_plane", "slice-selection", 1.15, 1.15, 1.15, 1.05, 0.8, 1.5, 5.0, 0.08};
+    }
+    return {"control_plane", "standard", 1.25, 1.20, 1.20, 1.15, 0.8, 1.5, 6.0, 0.1};
+}
+
+static VNF parse_nf_spec_from_json(const Json::Value& nf_json, size_t index) {
+    VNF vnf;
+    vnf.name = nf_json.get("core_nf_id", nf_json.get("nf_id", nf_json.get("vnf_id", nf_json.get("name", "")))).asString();
+    if (vnf.name.empty()) {
+        vnf.name = "core-nf-" + std::to_string(index + 1);
+    }
+    vnf.nf_type = nf_json.get(
+        "core_nf_type",
+        nf_json.get("nf_type", nf_json.get("vnf_type", nf_json.get("type", vnf.name)))
+    ).asString();
+    if (vnf.nf_type.empty()) {
+        vnf.nf_type = vnf.name;
+    }
+
+    const CoreNFProfile profile = get_core_nf_profile(vnf.nf_type);
+    vnf.nf_role = nf_json.get("nf_role", profile.nf_role).asString();
+    vnf.resource_profile = nf_json.get("resource_profile", profile.resource_profile).asString();
+    vnf.processing_weight = nf_json.get("processing_weight", 1.0).asDouble();
+    vnf.stateful = nf_json.get("stateful", true).asBool();
+
+    const double cpu_raw = nf_json.get("cpu_required", nf_json.get("cpu", 1.0)).asDouble();
+    const double mem_raw = nf_json.get("mem_required", nf_json.get("mem", 1.0)).asDouble();
+    const double disk_default = std::max(2.0, mem_raw * 2.2);
+    const double disk_raw = nf_json.get("disk_required_gb", nf_json.get("disk", disk_default)).asDouble();
+    const double bw_raw = nf_json.get(
+        "bandwidth_required_gbps",
+        nf_json.get("bw_required", std::max(nf_json.get("bw_in", 0.1).asDouble(), nf_json.get("bw_out", 0.1).asDouble()))
+    ).asDouble();
+
+    vnf.cpu = std::max(profile.min_cpu, cpu_raw * profile.cpu_multiplier);
+    vnf.mem = std::max(profile.min_mem, mem_raw * profile.mem_multiplier);
+    vnf.disk = std::max(profile.min_disk, disk_raw * profile.disk_multiplier);
+    const double bw = std::max(profile.min_bw, bw_raw * profile.bw_multiplier);
+    vnf.bw_in = nf_json.isMember("bw_in") ? nf_json["bw_in"].asDouble() : bw;
+    vnf.bw_out = nf_json.isMember("bw_out") ? nf_json["bw_out"].asDouble() : bw;
+    return vnf;
+}
 
 static std::vector<std::string> build_constraint_violations(
     const DeploymentCandidate& cand,
@@ -93,10 +184,16 @@ static bool parse_candidate_from_json(const Json::Value& cand_json, DeploymentCa
             cand.deployed_nodes.push_back(node.asString());
         }
     }
-    if (cand_json.isMember("per_vnf")) {
-        for (const auto& pv_json : cand_json["per_vnf"]) {
+    const Json::Value& per_nf_json = cand_json.isMember("per_core_nf")
+        ? cand_json["per_core_nf"]
+        : cand_json["per_vnf"];
+    if (per_nf_json.isArray()) {
+        for (const auto& pv_json : per_nf_json) {
             DeploymentCandidate::PerVNF pv;
-            pv.vnf = pv_json.get("vnf", "").asString();
+            pv.vnf = pv_json.get("vnf", pv_json.get("core_nf", "")).asString();
+            pv.core_nf = pv_json.get("core_nf", pv.vnf).asString();
+            pv.nf_type = pv_json.get("nf_type", pv_json.get("core_nf_type", pv.vnf)).asString();
+            pv.nf_role = pv_json.get("nf_role", "control_plane").asString();
             pv.node = pv_json.get("node", "").asString();
             pv.cpu_used = pv_json.get("cpu_used", 0.0).asDouble();
             pv.mem_used = pv_json.get("mem_used", 0.0).asDouble();
@@ -127,6 +224,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     
     request.request_id = json.get("request_id", "").asString();
     request.service_type = json.get("service_type", "custom_service").asString();
+    request.network_domain = json.get("network_domain", json.get("domain", "open5gs")).asString();
     request.source_node = json.isMember("source_node")
         ? json["source_node"].asString()
         : json.get("ingress_node", "").asString();
@@ -176,28 +274,21 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         request.constraints.min_reliability = json.get("reliability_requirement", 0.95).asDouble();
     }
     
-    if (json.isMember("vnfs")) {
-        for (const auto& vnf_json : json["vnfs"]) {
-            VNF vnf;
-            vnf.name = vnf_json.get("name", "").asString();
-            vnf.cpu = vnf_json.get("cpu", 1.0).asDouble();
-            vnf.mem = vnf_json.get("mem", 1.0).asDouble();
-            vnf.disk = vnf_json.get("disk", vnf.mem * 2.0).asDouble();
-            vnf.bw_in = vnf_json.get("bw_in", 0.1).asDouble();
-            vnf.bw_out = vnf_json.get("bw_out", 0.1).asDouble();
-            request.vnfs.push_back(vnf);
-        }
+    const Json::Value* nf_array = nullptr;
+    if (json.isMember("core_nfs")) {
+        nf_array = &json["core_nfs"];
+    } else if (json.isMember("core_nf_sequence")) {
+        nf_array = &json["core_nf_sequence"];
+    } else if (json.isMember("vnfs")) {
+        nf_array = &json["vnfs"];
     } else if (json.isMember("vnf_sequence")) {
-        for (const auto& vnf_json : json["vnf_sequence"]) {
-            VNF vnf;
-            vnf.name = vnf_json.get("vnf_id", vnf_json.get("name", "")).asString();
-            vnf.cpu = vnf_json.get("cpu_required", vnf_json.get("cpu", 1.0)).asDouble();
-            vnf.mem = vnf_json.get("mem_required", vnf_json.get("mem", 1.0)).asDouble();
-            vnf.disk = vnf_json.get("disk_required_gb", vnf_json.get("disk", vnf.mem * 2.0)).asDouble();
-            const double bw_req = vnf_json.get("bandwidth_required_gbps", 0.1).asDouble();
-            vnf.bw_in = vnf_json.get("bw_in", bw_req).asDouble();
-            vnf.bw_out = vnf_json.get("bw_out", bw_req).asDouble();
-            request.vnfs.push_back(vnf);
+        nf_array = &json["vnf_sequence"];
+    }
+    if (nf_array && nf_array->isArray()) {
+        size_t idx = 0;
+        for (const auto& nf_json : *nf_array) {
+            request.vnfs.push_back(parse_nf_spec_from_json(nf_json, idx));
+            ++idx;
         }
     }
 
@@ -218,7 +309,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     }
     if (request.constraints.min_reliability > reliability_cap) {
         spdlog::warn(
-            "Request {} reliability {:.4f} too strict for {} VNFs, capped to {:.4f}",
+            "Request {} reliability {:.4f} too strict for {} core NFs, capped to {:.4f}",
             request.request_id,
             request.constraints.min_reliability,
             request.vnfs.size(),
@@ -255,7 +346,7 @@ void SFCController::plan(
             Json::Value error;
             error["code"] = 400;
             error["message"] = "Invalid SFC request";
-            error["details"] = "vnfs/vnf_sequence must not be empty";
+            error["details"] = "core_nfs/core_nf_sequence (or vnfs/vnf_sequence) must not be empty";
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -411,6 +502,9 @@ void SFCController::plan(
             for (const auto& pv : candidate.per_vnf) {
                 trace_per_vnf.push_back({
                     {"vnf", pv.vnf},
+                    {"core_nf", pv.core_nf.empty() ? pv.vnf : pv.core_nf},
+                    {"nf_type", pv.nf_type},
+                    {"nf_role", pv.nf_role},
                     {"node", pv.node},
                     {"cpu_used", pv.cpu_used},
                     {"mem_used", pv.mem_used},
@@ -439,6 +533,7 @@ void SFCController::plan(
                 {"bottleneck_bandwidth_gbps", candidate.bottleneck_bandwidth_gbps},
                 {"deployed_nodes", candidate.deployed_nodes},
                 {"per_vnf", trace_per_vnf},
+                {"per_core_nf", trace_per_vnf},
                 {"link_details", trace_link_details},
                 {"reason", candidate.reason}
             });
@@ -449,6 +544,12 @@ void SFCController::plan(
         for (const auto& vnf : sfc_request.vnfs) {
             trace_request_vnfs.push_back({
                 {"name", vnf.name},
+                {"core_nf", vnf.name},
+                {"nf_type", vnf.nf_type.empty() ? vnf.name : vnf.nf_type},
+                {"nf_role", vnf.nf_role},
+                {"resource_profile", vnf.resource_profile},
+                {"processing_weight", vnf.processing_weight},
+                {"stateful", vnf.stateful},
                 {"cpu", vnf.cpu},
                 {"mem", vnf.mem},
                 {"disk", vnf.disk},
@@ -456,6 +557,7 @@ void SFCController::plan(
                 {"bw_out", vnf.bw_out}
             });
         }
+        response["request_core_nfs"] = nlohmann_to_jsoncpp(trace_request_vnfs);
 
         WSHandler::broadcast_json({
             {"type", "decision_trace"},
@@ -471,6 +573,7 @@ void SFCController::plan(
             {"deployable_count", static_cast<int>(feasible_candidates.size())},
             {"fallback_only", feasible_candidates.empty()},
             {"request_vnfs", trace_request_vnfs},
+            {"request_core_nfs", trace_request_vnfs},
             {"candidates", trace_candidates},
             {"decision_process", decision_process}
         });
@@ -509,7 +612,7 @@ void SFCController::deploy(
         std::string request_id = (*json).get("request_id", "").asString();
         (void)(*json).get("candidate_index", 0).asInt();
         
-        // 解析候选方案和VNF信息
+        // 解析候选方案和核心网网元信息（兼容旧VNF字段）
         DeploymentCandidate candidate;
         std::vector<VNF> vnfs;
         
@@ -525,10 +628,16 @@ void SFCController::deploy(
                 }
             }
             
-            if (cand_json.isMember("per_vnf")) {
-                for (const auto& pv_json : cand_json["per_vnf"]) {
+            const Json::Value& per_nf_json = cand_json.isMember("per_core_nf")
+                ? cand_json["per_core_nf"]
+                : cand_json["per_vnf"];
+            if (per_nf_json.isArray()) {
+                for (const auto& pv_json : per_nf_json) {
                     DeploymentCandidate::PerVNF pv;
-                    pv.vnf = pv_json.get("vnf", "").asString();
+                    pv.vnf = pv_json.get("vnf", pv_json.get("core_nf", "")).asString();
+                    pv.core_nf = pv_json.get("core_nf", pv.vnf).asString();
+                    pv.nf_type = pv_json.get("nf_type", pv_json.get("core_nf_type", pv.vnf)).asString();
+                    pv.nf_role = pv_json.get("nf_role", "control_plane").asString();
                     pv.node = pv_json.get("node", "").asString();
                     pv.cpu_used = pv_json.get("cpu_used", 0.0).asDouble();
                     pv.mem_used = pv_json.get("mem_used", 0.0).asDouble();
@@ -536,7 +645,9 @@ void SFCController::deploy(
                     candidate.per_vnf.push_back(pv);
                     
                     VNF vnf;
-                    vnf.name = pv.vnf;
+                    vnf.name = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+                    vnf.nf_type = pv.nf_type.empty() ? vnf.name : pv.nf_type;
+                    vnf.nf_role = pv.nf_role.empty() ? "control_plane" : pv.nf_role;
                     vnf.cpu = pv.cpu_used;
                     vnf.mem = pv.mem_used;
                     vnf.disk = pv.disk_used;
@@ -586,7 +697,7 @@ void SFCController::deploy(
         auto updated_topology = g_res_mgr->export_current_topology();
         g_topo_mgr->save_current_topology(updated_topology);
         
-        spdlog::info("✓ Deployment {} completed: {} VNFs on {} nodes",
+        spdlog::info("✓ Deployment {} completed: {} core NFs on {} nodes",
                     deployment_id, candidate.per_vnf.size(), candidate.deployed_nodes.size());
 
         {
@@ -607,7 +718,11 @@ void SFCController::deploy(
             for (const auto& pv : candidate.per_vnf) {
                 VNFDeployment d;
                 d.vnf_id = pv.vnf;
-                d.vnf_type = pv.vnf;
+                d.vnf_type = pv.nf_type.empty() ? pv.vnf : pv.nf_type;
+                d.core_nf_id = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+                d.core_nf_type = pv.nf_type.empty() ? d.core_nf_id : pv.nf_type;
+                d.nf_role = pv.nf_role.empty() ? "control_plane" : pv.nf_role;
+                d.resource_profile = get_core_nf_profile(d.core_nf_type).resource_profile;
                 d.node = pv.node;
                 d.cpu_used = pv.cpu_used;
                 d.mem_used = pv.mem_used;
@@ -775,7 +890,7 @@ void SFCController::startSession(
             Json::Value error;
             error["code"] = 400;
             error["message"] = "Invalid session request";
-            error["details"] = "source_node/destination_node and vnfs are required";
+            error["details"] = "source_node/destination_node and core_nfs are required";
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

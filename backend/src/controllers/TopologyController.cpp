@@ -154,6 +154,7 @@ void TopologyController::generateTopology(
                     } else {
                         link.status = l.get("link_status", 1).asInt() == 0 ? "down" : "active";
                     }
+                    link.fault_tag = l.get("fault_tag", "").asString();
                     link.latency_ms = l.get("latency_ms", 1.0).asDouble();
                     if (l.isMember("reliability")) {
                         link.reliability = l["reliability"].asDouble();
@@ -279,6 +280,34 @@ void TopologyController::stepDynamicSimulation(
         Json::Value error;
         error["code"] = 500;
         error["message"] = "Failed to step dynamic simulation";
+        error["details"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void TopologyController::injectDynamicFaults(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto json = req->getJsonObject();
+        nlohmann::json payload = nlohmann::json::object();
+        if (json) {
+            payload = nlohmann::json::parse(json->toStyledString(), nullptr, false);
+            if (payload.is_discarded()) {
+                payload = nlohmann::json::object();
+            }
+        }
+        const auto result = g_dynamic_sim->inject_faults(payload);
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(result));
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to inject dynamic faults: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = "Failed to inject dynamic faults";
         error["details"] = e.what();
         auto resp = HttpResponse::newHttpJsonResponse(error);
         resp->setStatusCode(k500InternalServerError);

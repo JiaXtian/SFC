@@ -19,23 +19,14 @@ import type { LinkData, SatelliteData } from '@/utils/constellationGenerator'
 import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
 
 const vnfTemplates = {
-  firewall: { cpu: 0.8, mem: 1.5, bw_in: 0.5, bw_out: 0.5 },
-  load_balancer: { cpu: 1.2, mem: 2.0, bw_in: 2.0, bw_out: 2.0 },
-  nat: { cpu: 0.6, mem: 1.0, bw_in: 1.0, bw_out: 1.0 },
-  ids_ips: { cpu: 1.5, mem: 3.0, bw_in: 2.0, bw_out: 2.0 },
-  vpn_gateway: { cpu: 1.0, mem: 2.0, bw_in: 1.5, bw_out: 1.5 },
-  web_server: { cpu: 2.0, mem: 4.0, bw_in: 0.5, bw_out: 2.0 },
-  app_server: { cpu: 2.5, mem: 6.0, bw_in: 1.0, bw_out: 1.5 },
-  db_server: { cpu: 3.0, mem: 8.0, bw_in: 0.5, bw_out: 0.5 },
-  cache_server: { cpu: 1.5, mem: 4.0, bw_in: 1.0, bw_out: 1.0 },
-  transcoder: { cpu: 3.0, mem: 6.0, bw_in: 5.0, bw_out: 3.0 },
-  cdn_cache: { cpu: 1.5, mem: 8.0, bw_in: 3.0, bw_out: 10.0 },
-  stream_server: { cpu: 2.0, mem: 4.0, bw_in: 0.5, bw_out: 8.0 },
-  video_processor: { cpu: 3.5, mem: 7.0, bw_in: 4.0, bw_out: 4.0 },
-  data_collector: { cpu: 1.0, mem: 2.0, bw_in: 1.0, bw_out: 0.5 },
-  processor: { cpu: 2.5, mem: 5.0, bw_in: 0.5, bw_out: 0.5 },
-  storage: { cpu: 0.8, mem: 3.0, bw_in: 0.5, bw_out: 0.2 },
-  analytics: { cpu: 2.8, mem: 6.0, bw_in: 1.0, bw_out: 0.3 },
+  amf: { cpu: 1.6, mem: 3.0, bw_in: 0.25, bw_out: 0.25, disk: 10 },
+  smf: { cpu: 1.9, mem: 3.4, bw_in: 0.3, bw_out: 0.3, disk: 12 },
+  upf: { cpu: 2.8, mem: 4.6, bw_in: 1.0, bw_out: 1.0, disk: 18 },
+  ausf: { cpu: 1.2, mem: 2.4, bw_in: 0.2, bw_out: 0.2, disk: 8 },
+  udm: { cpu: 1.5, mem: 3.2, bw_in: 0.2, bw_out: 0.2, disk: 20 },
+  pcf: { cpu: 1.6, mem: 3.0, bw_in: 0.2, bw_out: 0.2, disk: 12 },
+  nrf: { cpu: 1.1, mem: 2.2, bw_in: 0.15, bw_out: 0.15, disk: 8 },
+  nssf: { cpu: 1.1, mem: 2.0, bw_in: 0.15, bw_out: 0.15, disk: 8 },
 }
 
 type VNFTemplateName = keyof typeof vnfTemplates
@@ -191,7 +182,10 @@ function buildFallbackCandidate(args: {
     }
     deployed_nodes.push(selectedNode)
     per_vnf.push({
-      vnf: v.name || `vnf-${i + 1}`,
+      vnf: v.name || `core-nf-${i + 1}`,
+      core_nf: v.name || `core-nf-${i + 1}`,
+      nf_type: v.name || `core-nf-${i + 1}`,
+      nf_role: (v as any).type === 'upf' ? 'user_plane' : 'control_plane',
       node: selectedNode,
       cpu_used: Number(v.cpu),
       mem_used: Number(v.mem),
@@ -269,9 +263,14 @@ function buildFallbackCandidate(args: {
 
 const sfcTemplates = [
   {
-    name: '示例',
-    vnfs: ['firewall', 'vpn_gateway', 'app_server', 'db_server'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 140, min_bandwidth_gbps: 1.5, min_reliability: 0.92 },
+    name: 'open5GS 基础链',
+    vnfs: ['amf', 'smf', 'upf'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 160, min_bandwidth_gbps: 1.0, min_reliability: 0.9 },
+  },
+  {
+    name: 'open5GS 扩展链',
+    vnfs: ['nrf', 'ausf', 'udm', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 240, min_bandwidth_gbps: 1.2, min_reliability: 0.86 },
   },
 ]
 
@@ -332,10 +331,11 @@ export default function SFCForm() {
   const [customSFC, setCustomSFC] = useState({
     name: '自定义SFC',
     vnfs: [
-      { type: 'firewall', name: 'vnf-1-firewall', ...vnfTemplates.firewall },
-      { type: 'web_server', name: 'vnf-2-web', ...vnfTemplates.web_server },
+      { type: 'amf', name: 'core-nf-1-amf', ...vnfTemplates.amf },
+      { type: 'smf', name: 'core-nf-2-smf', ...vnfTemplates.smf },
+      { type: 'upf', name: 'core-nf-3-upf', ...vnfTemplates.upf },
     ] as VNFConfig[],
-    constraints: { max_latency_ms: 120, min_bandwidth_gbps: 1.0, min_reliability: 0.92 },
+    constraints: { max_latency_ms: 180, min_bandwidth_gbps: 1.0, min_reliability: 0.88 },
     topk: 1,
     optimize: 'latency',
   })
@@ -379,7 +379,7 @@ export default function SFCForm() {
       const idx = prev.vnfs.length + 1
       return {
         ...prev,
-        vnfs: [...prev.vnfs, { type: 'firewall', name: `vnf-${idx}-firewall`, ...vnfTemplates.firewall }],
+        vnfs: [...prev.vnfs, { type: 'amf', name: `core-nf-${idx}-amf`, ...vnfTemplates.amf }],
       }
     })
   }
@@ -425,7 +425,7 @@ export default function SFCForm() {
             <div key={key} className={key === 'dispersion' ? 'col-span-2' : ''}>
               <div className="text-[10px] text-slate-500 mb-1 flex items-center gap-1">
                 {label}
-                {key === 'dispersion' && <InfoHint text="分散度=已部署卫星数/VNF数。权重越高越鼓励跨星分散部署。" />}
+                {key === 'dispersion' && <InfoHint text="分散度=已部署卫星数/核心网网元数。权重越高越鼓励跨星分散部署。" />}
               </div>
               <input
                 type="number"
@@ -487,7 +487,8 @@ export default function SFCForm() {
           ? {
               name: selectedTpl.name,
               vnfs: selectedTpl.vnfs.map((type, idx) => ({
-                name: `vnf-${idx + 1}-${type}`,
+                name: `core-nf-${idx + 1}-${type}`,
+                type,
                 ...vnfTemplates[type],
               })),
               constraints: selectedTpl.constraints,
@@ -498,21 +499,33 @@ export default function SFCForm() {
 
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
-      const payload = {
-        request_id: reqId,
-        topology_version: topologyVersion,
-        sim_time: simulation.sim_time,
-        source_node: trafficEndpoints.source_node,
-        destination_node: trafficEndpoints.destination_node,
-        priority: trafficEndpoints.priority,
-        vnfs: sfc.vnfs.map((v: any, idx: number) => ({
-          name: v.name?.trim() || `vnf-${idx + 1}`,
+      const coreNfs = sfc.vnfs.map((v: any, idx: number) => {
+        const nfType = String(v.type || v.nf_type || v.name || 'amf')
+        const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
+        return {
+          name: nfName,
+          core_nf_id: nfName,
+          core_nf_type: nfType,
+          nf_type: nfType,
+          nf_role: nfType === 'upf' ? 'user_plane' : 'control_plane',
           cpu: v.cpu,
           mem: v.mem,
           bw_in: v.bw_in,
           bw_out: v.bw_out,
           disk: Number.isFinite(v.disk) ? v.disk : v.mem * 2.0,
-        })),
+        }
+      })
+      const payload = {
+        request_id: reqId,
+        network_domain: 'open5gs',
+        topology_version: topologyVersion,
+        sim_time: simulation.sim_time,
+        source_node: trafficEndpoints.source_node,
+        destination_node: trafficEndpoints.destination_node,
+        priority: trafficEndpoints.priority,
+        core_nfs: coreNfs,
+        core_nf_sequence: coreNfs,
+        vnfs: coreNfs,
         constraints: sfc.constraints,
         optimize: optimizeMode,
         topk: sfc.topk || 1,
@@ -556,7 +569,7 @@ export default function SFCForm() {
           bottleneckBandwidthGbps: Number(c.bottleneck_bandwidth_gbps ?? 0),
           estimatedReliability: Number(c.estimated_reliability ?? 0),
           deployedNodeIds: c.deployed_nodes ?? [],
-          vnfCount: payload.vnfs.length,
+          vnfCount: payload.core_nfs.length,
           constraints: sfc.constraints,
           weights: activeWeights,
           satellites,
@@ -572,7 +585,7 @@ export default function SFCForm() {
           links: links as LinkData[],
           sourceNode: trafficEndpoints.source_node,
           destinationNode: trafficEndpoints.destination_node,
-          vnfs: payload.vnfs,
+          vnfs: payload.core_nfs,
           constraints: sfc.constraints,
         })
         if (fallback) {
@@ -581,7 +594,7 @@ export default function SFCForm() {
             bottleneckBandwidthGbps: Number(fallback.bottleneck_bandwidth_gbps ?? 0),
             estimatedReliability: Number(fallback.estimated_reliability ?? 0),
             deployedNodeIds: fallback.deployed_nodes ?? [],
-            vnfCount: payload.vnfs.length,
+            vnfCount: payload.core_nfs.length,
             constraints: sfc.constraints,
             weights: activeWeights,
             satellites,
@@ -633,7 +646,7 @@ export default function SFCForm() {
                 dispersion: scoreWeights.dispersion,
               }
             : null,
-          vnfCount: payload.vnfs.length,
+          vnfCount: payload.core_nfs.length,
         },
         requestPayload: payload,
         sessionConfig: {
@@ -716,7 +729,7 @@ export default function SFCForm() {
                         <FolderKanban className="w-3.5 h-3.5 text-cyan-300" />
                         {tpl.name}
                       </span>
-                      <span className="text-[9px] text-slate-500 font-mono">{tpl.vnfs.length}V</span>
+                      <span className="text-[9px] text-slate-500 font-mono">{tpl.vnfs.length}NF</span>
                     </div>
                   </button>
 
@@ -731,7 +744,7 @@ export default function SFCForm() {
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="text-[11px] font-semibold text-cyan-100">{tpl.name} 模板详情</div>
-                        <div className="text-[9px] text-slate-400 font-mono">{tpl.vnfs.length} VNFs</div>
+                        <div className="text-[9px] text-slate-400 font-mono">{tpl.vnfs.length} Core NFs</div>
                       </div>
 
                       <div className="grid grid-cols-3 gap-1.5 mb-2">
@@ -754,7 +767,7 @@ export default function SFCForm() {
                           className="grid grid-cols-[1.4fr_1fr_1fr_1fr] text-[8px] uppercase tracking-wider"
                           style={{ background: 'rgba(14,27,44,0.95)', color: '#94a3b8' }}
                         >
-                          <div className="px-2 py-1">VNF</div>
+                          <div className="px-2 py-1">核心网网元</div>
                           <div className="px-2 py-1 text-right">CPU</div>
                           <div className="px-2 py-1 text-right">MEM</div>
                           <div className="px-2 py-1 text-right">BW in/out</div>
@@ -853,7 +866,7 @@ export default function SFCForm() {
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">VNF列表 ({customSFC.vnfs.length})</div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">核心网网元列表 ({customSFC.vnfs.length})</div>
               <button onClick={addVNF} className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition hover:bg-white/5" style={{ color: '#67e8f9' }}>
                 <Plus className="w-3 h-3" /> 添加
               </button>
@@ -882,7 +895,7 @@ export default function SFCForm() {
                   </div>
 
                   <div className="mb-2">
-                    <div className="text-[10px] text-slate-500 mb-0.5">VNF 名称（自定义）</div>
+                    <div className="text-[10px] text-slate-500 mb-0.5">网元名称（自定义）</div>
                     <input
                       type="text"
                       value={vnf.name}

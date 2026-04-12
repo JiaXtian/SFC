@@ -9,6 +9,7 @@
 #include <numeric>
 #include <cstdint>
 #include <chrono>
+#include <cctype>
 
 namespace sfc {
 namespace {
@@ -22,13 +23,32 @@ double load_level_to_value(const std::string& load_level) {
     return 0.6;
 }
 
+std::string normalize_nf_type(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (char ch : raw) {
+        if (ch == '-' || ch == ' ') out.push_back('_');
+        else out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
 std::vector<float> build_vnf_features(const VNF& vnf) {
     const double bw_required = std::max(vnf.bw_in, vnf.bw_out);
+    const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+    const bool is_user_plane = (nf_type == "upf");
+    const bool is_control_plane = !is_user_plane;
+    const double stateful = vnf.stateful ? 1.0 : 0.0;
+    const double processing_weight = std::max(0.3, std::min(3.0, vnf.processing_weight));
     return {
         static_cast<float>(vnf.cpu),
         static_cast<float>(vnf.mem),
         static_cast<float>(bw_required),
         static_cast<float>(vnf.disk),
+        static_cast<float>(is_user_plane ? 1.0 : 0.0),
+        static_cast<float>(is_control_plane ? 1.0 : 0.0),
+        static_cast<float>(stateful),
+        static_cast<float>(processing_weight),
     };
 }
 
@@ -1030,10 +1050,18 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             {"source_node", request.source_node},
             {"destination_node", request.destination_node},
             {"vnf_count", static_cast<int>(request.vnfs.size())},
+            {"core_nf_count", static_cast<int>(request.vnfs.size())},
             {"per_vnf", nlohmann::json::array()},
+            {"per_core_nf", nlohmann::json::array()},
             {"final", nlohmann::json::object()}
         };
     }
+
+    auto append_step_trace = [&](const nlohmann::json& step) {
+        if (!candidate_trace) return;
+        (*candidate_trace)["per_vnf"].push_back(step);
+        (*candidate_trace)["per_core_nf"].push_back(step);
+    };
 
     if (node_embeddings.empty()) {
         candidate.satisfies_constraints = false;
@@ -1091,6 +1119,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         nlohmann::json step_trace = {
             {"vnf_index", static_cast<int>(i)},
             {"vnf_name", vnf.name},
+            {"core_nf", vnf.name},
+            {"nf_type", vnf.nf_type.empty() ? vnf.name : vnf.nf_type},
+            {"nf_role", vnf.nf_role},
             {"prev_node", prev_node},
             {"remaining_latency_before", remaining_latency},
             {"accumulated_latency_before", accumulated_latency},
@@ -1117,13 +1148,13 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         step_trace["pruned_candidate_count"] = static_cast<int>(candidates_set.size());
 
         if (candidates_set.empty()) {
-            spdlog::error("No feasible node for VNF {}: {}", i, vnf.name);
+            spdlog::error("No feasible node for core NF {}: {}", i, vnf.name);
             if (candidate_trace) {
                 step_trace["status"] = "failed";
                 step_trace["failure_reason"] = "no_candidate_after_pruning";
-                (*candidate_trace)["per_vnf"].push_back(step_trace);
+                append_step_trace(step_trace);
             }
-            return finalize_failure("No feasible node for VNF: " + vnf.name);
+            return finalize_failure("No feasible node for core NF: " + vnf.name);
         }
 
         auto ranked_nodes = rank_nodes_by_cost(candidates_set, vnf, prev_node, topology);
@@ -1150,7 +1181,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             if (candidate_trace) {
                 step_trace["status"] = "failed";
                 step_trace["failure_reason"] = "no_actor_candidate";
-                (*candidate_trace)["per_vnf"].push_back(step_trace);
+                append_step_trace(step_trace);
             }
             return finalize_failure("No candidate node index available");
         }
@@ -1194,7 +1225,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             if (candidate_trace) {
                 step_trace["status"] = "failed";
                 step_trace["failure_reason"] = "candidate_embedding_index_miss";
-                (*candidate_trace)["per_vnf"].push_back(step_trace);
+                append_step_trace(step_trace);
             }
             return finalize_failure("Candidate nodes are not indexed in embeddings");
         }
@@ -1515,17 +1546,17 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         }
 
         if (!found_feasible_node) {
-            spdlog::error("No SLA-feasible node for VNF {}: {}", i, vnf.name);
+            spdlog::error("No SLA-feasible node for core NF {}: {}", i, vnf.name);
             if (candidate_trace) {
                 step_trace["status"] = "failed";
                 step_trace["failure_reason"] = "no_sla_feasible_node";
                 step_trace["reject_counters"] = reject_counters;
-                (*candidate_trace)["per_vnf"].push_back(step_trace);
+                append_step_trace(step_trace);
             }
-            return finalize_failure("No SLA-feasible node for VNF: " + vnf.name);
+            return finalize_failure("No SLA-feasible node for core NF: " + vnf.name);
         }
 
-        spdlog::debug("VNF {} ({}) -> Node {}", i, vnf.name, selected_node);
+        spdlog::debug("Core NF {} ({}) -> Node {}", i, vnf.name, selected_node);
 
         for (const auto& link : selected_path_links) {
             candidate.link_details.push_back(link);
@@ -1537,7 +1568,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         accumulated_hops += static_cast<int>(selected_path_links.size());
         bottleneck_bandwidth = std::min(bottleneck_bandwidth, selected_path_bottleneck);
         if (accumulated_hops > kHardTotalHopLimit) {
-            return finalize_failure("Hop budget exceeded during VNF placement");
+            return finalize_failure("Hop budget exceeded during core NF placement");
         }
         
         // 检查时延约束
@@ -1550,6 +1581,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         // 添加部署信息
         DeploymentCandidate::PerVNF pv;
         pv.vnf = vnf.name;
+        pv.core_nf = vnf.name;
+        pv.nf_type = vnf.nf_type.empty() ? vnf.name : vnf.nf_type;
+        pv.nf_role = vnf.nf_role;
         pv.node = selected_node;
         pv.cpu_used = vnf.cpu;
         pv.mem_used = vnf.mem;
@@ -1564,7 +1598,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             step_trace["selected_path_reliability"] = selected_path_reliability;
             step_trace["selected_path_bottleneck_gbps"] = selected_path_bottleneck;
             step_trace["reject_counters"] = reject_counters;
-            (*candidate_trace)["per_vnf"].push_back(step_trace);
+            append_step_trace(step_trace);
         }
         
         prev_node = selected_node;
@@ -1745,7 +1779,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     
     if (!request.realtime_mode) {
         spdlog::info(
-            "Candidate {}: {} VNFs, {} links, {:.2f}ms, feasible: {}",
+            "Candidate {}: {} core NFs, {} links, {:.2f}ms, feasible: {}",
             seed + 1,
             candidate.per_vnf.size(),
             candidate.link_details.size(),
@@ -1898,7 +1932,7 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
         candidates = pass(false, 1.45, 0.52);
         if (!candidates.empty()) {
             spdlog::warn(
-                "Relaxed candidate filtering at VNF index {} (prev={}, remaining_latency={:.2f}ms), recovered {} candidates",
+                "Relaxed candidate filtering at core NF index {} (prev={}, remaining_latency={:.2f}ms), recovered {} candidates",
                 current_vnf_idx, prev_node, remaining_latency, candidates.size()
             );
         }
@@ -1995,7 +2029,7 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
 
         if (!recovered.empty()) {
             spdlog::warn(
-                "Global recovery restored {} candidates at VNF index {} (prev={}, remaining_latency={:.2f}ms)",
+                "Global recovery restored {} candidates at core NF index {} (prev={}, remaining_latency={:.2f}ms)",
                 recovered.size(), current_vnf_idx, prev_node, remaining_latency
             );
             candidates = std::move(recovered);
@@ -2197,7 +2231,7 @@ std::vector<float> InferenceEngine::run_actor_policy(
 
     std::vector<int64_t> emb_shape = {static_cast<int64_t>(num_nodes), 192};
     std::vector<int64_t> cand_shape = {static_cast<int64_t>(candidate_indices.size())};
-    std::vector<int64_t> vnf_shape = {4};
+    std::vector<int64_t> vnf_shape = {8};
     std::vector<int64_t> ctx_shape = {48};
 
     try {

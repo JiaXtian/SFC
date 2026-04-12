@@ -84,7 +84,7 @@ int DRLInference::select_action(
 
         std::vector<int64_t> emb_shape = {static_cast<int64_t>(num_nodes), 192};
         std::vector<int64_t> cand_shape = {static_cast<int64_t>(num_candidates)};
-        std::vector<int64_t> vnf_shape = {4};
+        std::vector<int64_t> vnf_shape = {8};
         std::vector<int64_t> ctx_shape = {48};
 
         auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);

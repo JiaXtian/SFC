@@ -1,6 +1,22 @@
 import { X, Network, Gauge, Timer, Activity } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 
+function faultTypeLabel(tag: string): string {
+  const map: Record<string, string> = {
+    optical_signal_loss: '光链路信号丢失',
+    beam_misalignment: '波束失准',
+    interference_jamming: '干扰/压制',
+    routing_blackhole: '路由黑洞',
+    transceiver_failure: '收发器故障',
+    line_degradation: '链路退化',
+    endpoint_node_fault: '端点节点故障',
+    line_of_sight_loss: '视距中断',
+    topology_inconsistent: '拓扑不一致',
+    resource_or_link_fault: '资源/链路故障',
+  }
+  return map[tag] ?? (tag || '无')
+}
+
 const Bar = ({ used = 0, total = 0 }: { used?: number; total?: number }) => {
   const safeUsed = Number(used ?? 0)
   const safeTotal = Number(total ?? 0)
@@ -29,6 +45,7 @@ export default function LinkDetailPanel() {
   const status = selectedLink.status ?? 'active'
   const rel = Number(selectedLink.reliability ?? 0.999)
   const utilPct = total > 0 ? (used / total) * 100 : 0
+  const faultTag = String((selectedLink as any).fault_tag ?? '')
   const bwHealthLabel = utilPct >= 85 ? '资源紧张' : utilPct >= 60 ? '资源较少' : '资源充足'
   const bwHealthColor = utilPct >= 85 ? '#f87171' : utilPct >= 60 ? '#fbbf24' : '#22c55e'
 
@@ -111,6 +128,12 @@ export default function LinkDetailPanel() {
             <div className="flex justify-between">
               <span className="text-gray-600">可靠性</span>
               <span className="text-gray-300 font-mono">{(rel * 100).toFixed(2)}%</span>
+            </div>
+            <div className="flex justify-between col-span-2">
+              <span className="text-gray-600">故障类型</span>
+              <span className="text-gray-300 font-mono">
+                {status === 'down' ? faultTypeLabel(faultTag) : '无'}
+              </span>
             </div>
           </div>
         </div>

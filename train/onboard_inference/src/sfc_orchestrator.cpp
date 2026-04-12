@@ -7,6 +7,7 @@
 #include <limits>
 #include <queue>
 #include <sstream>
+#include <cctype>
 #include <unordered_map>
 
 namespace sfc {
@@ -23,6 +24,36 @@ static std::string path_to_string(const std::vector<std::string>& path) {
         oss << path[i];
     }
     return oss.str();
+}
+
+static std::string normalize_nf_type(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (char ch : raw) {
+        if (ch == '-' || ch == ' ') out.push_back('_');
+        else out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+static std::vector<float> build_core_nf_features(const VNFRequirement& vnf) {
+    const std::string nf_type = normalize_nf_type(
+        !vnf.nf_type.empty() ? vnf.nf_type : (!vnf.core_nf_type.empty() ? vnf.core_nf_type : vnf.vnf_type)
+    );
+    const float is_user_plane = (nf_type == "upf") ? 1.0f : 0.0f;
+    const float is_control_plane = is_user_plane > 0.5f ? 0.0f : 1.0f;
+    const float stateful = vnf.stateful ? 1.0f : 0.0f;
+    const float processing_weight = std::max(0.3f, std::min(3.0f, vnf.processing_weight));
+    return {
+        vnf.cpu_required,
+        vnf.mem_required,
+        vnf.bandwidth_required_gbps,
+        vnf.disk_required_gb,
+        is_user_plane,
+        is_control_plane,
+        stateful,
+        processing_weight,
+    };
 }
 
 SFCOrchestrator::SFCOrchestrator(std::shared_ptr<HeuristicPruner> pruner, std::shared_ptr<DRLInference> drl)
@@ -167,7 +198,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         std::cout << "├---------------------------------------------------------------------┤" << std::endl;
         std::cout << "│ 源节点: " << std::setw(58) << std::left << request.source_node << " │" << std::endl;
         std::cout << "│ 目的节点: " << std::setw(56) << std::left << request.destination_node << " │" << std::endl;
-        std::cout << "│ VNF数量: " << std::setw(57) << std::left << request.vnf_sequence.size() << " │" << std::endl;
+        std::cout << "│ 核心网网元数量: " << std::setw(53) << std::left << request.vnf_sequence.size() << " │" << std::endl;
         std::cout << "│ SLA时延: " << std::setw(56) << std::left << (std::to_string(request.max_latency_ms) + " ms") << " │" << std::endl;
         std::cout << "│ SLA可靠性: " << std::setw(54) << std::left << request.reliability_requirement << " │" << std::endl;
         std::cout << "│ 优先级: " << std::setw(58) << std::left << request.priority << " │" << std::endl;
@@ -184,15 +215,15 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         float remaining_delay = request.max_latency_ms - accumulated_delay;
         VNFDeploymentTrace vnf_trace;
         vnf_trace.vnf_id = vnf.vnf_id;
-        vnf_trace.vnf_type = vnf.vnf_type;
+        vnf_trace.vnf_type = !vnf.nf_type.empty() ? vnf.nf_type : vnf.vnf_type;
         vnf_trace.remaining_delay_before_ms = remaining_delay;
         vnf_trace.accumulated_delay_before_ms = accumulated_delay;
         vnf_trace.accumulated_reliability_before = accumulated_reliability;
 
         if (verbose) {
-            std::cout << "\n┌- VNF " << (vnf_idx + 1) << "/" << request.vnf_sequence.size() << ": " << vnf.vnf_type
-                      << " " << std::string(56 - vnf.vnf_type.length(), '-') << "┐" << std::endl;
-            std::cout << "│ VNF ID: " << vnf.vnf_id << std::endl;
+            std::cout << "\n┌- Core NF " << (vnf_idx + 1) << "/" << request.vnf_sequence.size() << ": " << vnf.vnf_type
+                      << " " << std::string(52 - std::min<size_t>(52, vnf.vnf_type.length()), '-') << "┐" << std::endl;
+            std::cout << "│ Core NF ID: " << vnf.vnf_id << std::endl;
             std::cout << "│ 资源需求: CPU=" << vnf.cpu_required << " cores, MEM=" << vnf.mem_required
                       << " GB, DISK=" << vnf.disk_required_gb << " GB, BW=" << vnf.bandwidth_required_gbps << " Gbps" << std::endl;
             std::cout << "│ 剩余时延预算: " << remaining_delay << " ms, 当前累计可靠性: " << accumulated_reliability << std::endl;
@@ -205,7 +236,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         }
         if (candidates.empty()) {
             vnf_trace.failure_reason = "No candidate nodes after heuristic pruning";
-            result.failure_reason = "No candidate nodes for VNF " + vnf.vnf_id;
+            result.failure_reason = "No candidate nodes for core NF " + vnf.vnf_id;
             result.vnf_traces.push_back(vnf_trace);
             if (verbose) {
                 std::cout << "│ ✗ 失败: " << vnf_trace.failure_reason << std::endl;
@@ -223,7 +254,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         }
         if (candidate_indices.empty()) {
             vnf_trace.failure_reason = "All heuristic candidates were invalid in graph index lookup";
-            result.failure_reason = "Invalid candidates for VNF " + vnf.vnf_id;
+            result.failure_reason = "Invalid candidates for core NF " + vnf.vnf_id;
             result.vnf_traces.push_back(vnf_trace);
             if (verbose) {
                 std::cout << "│ ✗ 失败: " << vnf_trace.failure_reason << std::endl;
@@ -231,7 +262,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
             return result;
         }
 
-        std::vector<float> vnf_features = {vnf.cpu_required, vnf.mem_required, vnf.bandwidth_required_gbps, vnf.disk_required_gb};
+        std::vector<float> vnf_features = build_core_nf_features(vnf);
         std::vector<float> context_features(48, 0.0f);
         context_features[0] = remaining_delay / 300.0f;
         context_features[1] = static_cast<float>(vnf_idx) / std::max<size_t>(1, request.vnf_sequence.size());
@@ -364,9 +395,9 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         if (!deployed) {
             vnf_trace.failure_reason = "No feasible node/path in fallback probes";
             result.vnf_traces.push_back(vnf_trace);
-            result.failure_reason = "No feasible node/path in fallback probes for VNF " + vnf.vnf_id;
+            result.failure_reason = "No feasible node/path in fallback probes for core NF " + vnf.vnf_id;
             if (verbose) {
-                std::cout << "│ ✗ VNF部署失败: " << vnf_trace.failure_reason << std::endl;
+                std::cout << "│ ✗ 核心网网元部署失败: " << vnf_trace.failure_reason << std::endl;
             }
             return result;
         }
@@ -378,7 +409,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
     if (final_path.empty()) {
         result.failure_reason = "No path to destination";
         if (verbose) {
-            std::cout << "│ ✗ 收尾失败: 无法从最后一个VNF节点到达目的节点" << std::endl;
+            std::cout << "│ ✗ 收尾失败: 无法从最后一个核心网网元节点到达目的节点" << std::endl;
         }
         return result;
     }

@@ -43,10 +43,14 @@ struct Coordinates {
     }
 };
 
-// VNF部署信息
+// 核心网网元部署信息（兼容旧VNF字段）
 struct VNFDeployment {
     std::string vnf_id;
     std::string vnf_type;
+    std::string core_nf_id;
+    std::string core_nf_type;
+    std::string nf_role;
+    std::string resource_profile;
     std::string node;
     double cpu_used;
     double mem_used;
@@ -57,6 +61,11 @@ struct VNFDeployment {
         return {
             {"vnf_id", vnf_id},
             {"vnf_type", vnf_type},
+            {"core_nf_id", core_nf_id.empty() ? vnf_id : core_nf_id},
+            {"core_nf_type", core_nf_type.empty() ? vnf_type : core_nf_type},
+            {"nf_type", core_nf_type.empty() ? vnf_type : core_nf_type},
+            {"nf_role", nf_role},
+            {"resource_profile", resource_profile},
             {"node", node},
             {"cpu_used", cpu_used},
             {"mem_used", mem_used},
@@ -105,7 +114,8 @@ struct Satellite {
             {"node_reliability", node_reliability},
             {"status", status},
             {"fault_tag", fault_tag},
-            {"vnfs", vnfs_json}
+            {"vnfs", vnfs_json},
+            {"core_nfs", vnfs_json}
         };
     }
 };
@@ -116,6 +126,7 @@ struct Link {
     std::string target;
     std::string link_type;  // intra_orbit, inter_orbit, isl
     std::string status = "active"; // active, congested, down
+    std::string fault_tag = "";
     double latency_ms;
     double reliability = 0.999;
     double bandwidth_gbps;
@@ -128,6 +139,7 @@ struct Link {
             {"target", target},
             {"link_type", link_type},
             {"status", status},
+            {"fault_tag", fault_tag},
             {"link_status", link_status},
             {"latency_ms", latency_ms},
             {"reliability", reliability},
@@ -228,9 +240,14 @@ struct TopologySnapshot {
     }
 };
 
-// VNF定义
+// 核心网网元定义（兼容旧VNF命名）
 struct VNF {
     std::string name;
+    std::string nf_type;
+    std::string nf_role = "control_plane";
+    std::string resource_profile = "standard";
+    double processing_weight = 1.0;
+    bool stateful = true;
     double cpu;
     double mem;
     double disk;
@@ -242,6 +259,7 @@ struct VNF {
 struct SFCRequest {
     std::string request_id;
     std::string service_type = "custom_service";
+    std::string network_domain = "open5gs";
     std::string source_node;
     std::string destination_node;
     std::string priority = "medium";
@@ -276,14 +294,22 @@ struct DeploymentCandidate {
     std::vector<std::string> deployed_nodes;
     struct PerVNF {
         std::string vnf;
+        std::string core_nf;
+        std::string nf_type;
+        std::string nf_role;
         std::string node;
         double cpu_used;
         double mem_used;
         double disk_used;
         
         json to_json() const {
+            const std::string resolved_core_nf = core_nf.empty() ? vnf : core_nf;
+            const std::string resolved_nf_type = nf_type.empty() ? resolved_core_nf : nf_type;
             return {
                 {"vnf", vnf},
+                {"core_nf", resolved_core_nf},
+                {"nf_type", resolved_nf_type},
+                {"nf_role", nf_role},
                 {"node", node},
                 {"cpu_used", cpu_used},
                 {"mem_used", mem_used},
@@ -337,6 +363,7 @@ struct DeploymentCandidate {
             {"score", score},
             {"deployed_nodes", deployed_nodes},
             {"per_vnf", per_vnf_json},
+            {"per_core_nf", per_vnf_json},
             {"total_latency_ms", total_latency_ms},
             {"link_details", link_details_json},
             {"estimated_reliability", estimated_reliability},
@@ -372,6 +399,7 @@ struct Deployment {
             {"status", status},
             {"deployed_nodes", deployed_nodes},
             {"per_vnf", per_vnf_json},
+            {"per_core_nf", per_vnf_json},
             {"total_latency_ms", total_latency_ms},
             {"deployed_at", deployed_at},
             {"progress", progress}

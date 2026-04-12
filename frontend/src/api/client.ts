@@ -35,6 +35,21 @@ class APIClient {
   async stepDynamicSimulation() {
     return (await http.post('/topology/dynamic/step', {})).data
   }
+
+  async injectDynamicFaults(p: {
+    entity_type?: 'node' | 'link'
+    node_id?: string
+    node_ids?: string[]
+    links?: Array<{ source: string; target: string }>
+    link_ids?: string[]
+    fault_type?: string
+    ttl_ticks?: number
+    batch_count?: number
+    only_active?: boolean
+    overwrite_existing?: boolean
+  } = {}) {
+    return (await http.post('/topology/dynamic/faults/inject', p)).data
+  }
   
   async planSFC(p: any) { return (await http.post('/sfc/plan', p, { timeout: 180000 })).data }
 

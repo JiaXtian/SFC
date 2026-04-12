@@ -53,6 +53,9 @@ std::vector<DeploymentCandidate::PerVNF> ensure_per_vnf_filled(
         for (size_t i = 0; i < count; ++i) {
             DeploymentCandidate::PerVNF pv;
             pv.vnf = request.vnfs[i].name;
+            pv.core_nf = request.vnfs[i].name;
+            pv.nf_type = request.vnfs[i].nf_type.empty() ? request.vnfs[i].name : request.vnfs[i].nf_type;
+            pv.nf_role = request.vnfs[i].nf_role;
             pv.node = candidate.deployed_nodes[i];
             pv.cpu_used = request.vnfs[i].cpu;
             pv.mem_used = request.vnfs[i].mem;
@@ -66,6 +69,9 @@ std::vector<DeploymentCandidate::PerVNF> ensure_per_vnf_filled(
     for (size_t i = 0; i < limit; ++i) {
         auto& pv = out[i];
         if (pv.vnf.empty()) pv.vnf = request.vnfs[i].name;
+        if (pv.core_nf.empty()) pv.core_nf = request.vnfs[i].name;
+        if (pv.nf_type.empty()) pv.nf_type = request.vnfs[i].nf_type.empty() ? request.vnfs[i].name : request.vnfs[i].nf_type;
+        if (pv.nf_role.empty()) pv.nf_role = request.vnfs[i].nf_role;
         if (pv.node.empty() && i < candidate.deployed_nodes.size()) pv.node = candidate.deployed_nodes[i];
         if (pv.cpu_used <= 0.0) pv.cpu_used = request.vnfs[i].cpu;
         if (pv.mem_used <= 0.0) pv.mem_used = request.vnfs[i].mem;
@@ -103,6 +109,12 @@ nlohmann::json request_vnfs_json(const SFCRequest& request) {
     for (const auto& v : request.vnfs) {
         arr.push_back({
             {"name", v.name},
+            {"core_nf", v.name},
+            {"nf_type", v.nf_type.empty() ? v.name : v.nf_type},
+            {"nf_role", v.nf_role},
+            {"resource_profile", v.resource_profile},
+            {"processing_weight", v.processing_weight},
+            {"stateful", v.stateful},
             {"cpu", v.cpu},
             {"mem", v.mem},
             {"disk", v.disk},
@@ -420,6 +432,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         for (const auto& pv : filled_per_vnf) {
             per_vnf.push_back({
                 {"vnf", pv.vnf},
+                {"core_nf", pv.core_nf.empty() ? pv.vnf : pv.core_nf},
+                {"nf_type", pv.nf_type},
+                {"nf_role", pv.nf_role},
                 {"node", pv.node},
                 {"cpu_used", pv.cpu_used},
                 {"mem_used", pv.mem_used},
@@ -447,6 +462,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             {"bottleneck_bandwidth_gbps", c.bottleneck_bandwidth_gbps},
             {"deployed_nodes", c.deployed_nodes},
             {"per_vnf", per_vnf},
+            {"per_core_nf", per_vnf},
             {"link_details", link_details},
             {"violation_details", build_constraint_violations(c, session.request)},
             {"reason", c.reason}
@@ -469,6 +485,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"deployable_count", deployable_count},
         {"fallback_only", deployable_count == 0},
         {"request_vnfs", request_vnfs_json(session.request)},
+        {"request_core_nfs", request_vnfs_json(session.request)},
         {"candidates", trace_candidates},
         {"decision_process", decision_process}
     };
@@ -700,6 +717,9 @@ nlohmann::json DynamicInferenceService::start_session(
         for (const auto& pv : chosen.per_vnf) {
             per_vnf.push_back({
                 {"vnf", pv.vnf},
+                {"core_nf", pv.core_nf.empty() ? pv.vnf : pv.core_nf},
+                {"nf_type", pv.nf_type},
+                {"nf_role", pv.nf_role},
                 {"node", pv.node},
                 {"cpu_used", pv.cpu_used},
                 {"mem_used", pv.mem_used},
@@ -728,6 +748,7 @@ nlohmann::json DynamicInferenceService::start_session(
             {"bottleneck_bandwidth_gbps", chosen.bottleneck_bandwidth_gbps},
             {"deployed_nodes", chosen.deployed_nodes},
             {"per_vnf", per_vnf},
+            {"per_core_nf", per_vnf},
             {"link_details", link_details},
             {"violation_details", violations},
             {"reason", chosen.reason}
@@ -749,6 +770,7 @@ nlohmann::json DynamicInferenceService::start_session(
             {"deployable_count", chosen.satisfies_constraints ? 1 : 0},
             {"fallback_only", !chosen.satisfies_constraints},
             {"request_vnfs", request_vnfs_json(sessions_[session.session_id].request)},
+            {"request_core_nfs", request_vnfs_json(sessions_[session.session_id].request)},
             {"candidates", nlohmann::json::array({chosen_json})},
             {"decision_process", nlohmann::json::object()}
         };

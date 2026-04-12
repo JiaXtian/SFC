@@ -91,13 +91,13 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print(f"  ✓ GNN导出完成: {os.path.join(output_dir, 'gnn_encoder.onnx')}")
 
     print("\n[2/2] 导出Actor网络...")
-    agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=context_dim, device="cpu")
+    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=context_dim, device="cpu")
     agent.load(agent_path, load_optimizer=False)
     agent.actor.eval()
 
     dummy_emb = torch.randn(120, 192)
     dummy_cand = torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.long)
-    dummy_vnf = torch.randn(4)
+    dummy_vnf = torch.randn(8)
     dummy_ctx = torch.randn(context_dim)
 
     torch.onnx.export(
@@ -122,7 +122,7 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print("   ONNX导出完成")
     print("=" * 60)
     print("节点输入维度: 8")
-    print("VNF输入维度: 4")
+    print("核心网网元输入维度: 8")
     print(f"上下文输入维度: {context_dim}")
     if int(context_dim) != 48:
         print("⚠ 警告: 当前后端默认按 context=48 构造输入，导出维度不为48可能导致在线推理不匹配。")
@@ -131,7 +131,7 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
         f.write(
             "{\n"
             '  "node_feature_dim": 8,\n'
-            '  "vnf_feature_dim": 4,\n'
+            '  "vnf_feature_dim": 8,\n'
             f'  "context_feature_dim": {int(context_dim)},\n'
             '  "gnn_output_dim": 192\n'
             "}\n"

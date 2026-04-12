@@ -117,13 +117,17 @@ export interface SatelliteData {
   cpu_total: number; cpu_available: number
   mem_total: number; mem_available: number
   disk_total: number; disk_available: number
+  status?: 'active' | 'down'
+  fault_tag?: string
   vnfs: any[]
+  core_nfs?: any[]
 }
 
 export interface LinkData {
   source: string; target: string
   link_type: 'intra_orbit' | 'inter_orbit'
   status?: 'active' | 'congested' | 'down'
+  fault_tag?: string
   reliability?: number
   latency_ms: number; bandwidth_gbps: number; bandwidth_available_gbps: number
 }
@@ -219,7 +223,10 @@ export function generateConstellation(
         cpu_total: cpuT, cpu_available: cpuT * (1 - cpuLoad),
         mem_total: memT, mem_available: memT * (1 - memLoad),
         disk_total: diskT, disk_available: diskT * (1 - diskLoad),
+        status: 'active',
+        fault_tag: '',
         vnfs: [],
+        core_nfs: [],
       })
     }
   }
@@ -297,6 +304,7 @@ export function generateLinks(satellites: SatelliteData[], type: ConstellationTy
           latency_ms: (d / C) * 1000,
           reliability: 0.999,
           status: 'active',
+          fault_tag: '',
           bandwidth_gbps: tpl.linkBudget.intraGbps,
           bandwidth_available_gbps: tpl.linkBudget.intraGbps * 0.9,
         })
@@ -319,6 +327,7 @@ export function generateLinks(satellites: SatelliteData[], type: ConstellationTy
           latency_ms: (d / C) * 1000,
           reliability: 0.997,
           status: 'active',
+          fault_tag: '',
           bandwidth_gbps: tpl.linkBudget.interGbps,
           bandwidth_available_gbps: tpl.linkBudget.interGbps * 0.85,
         })
@@ -360,13 +369,17 @@ export function prepareTopologyForBackend(
       mem_available: s.mem_available,
       disk_total: s.disk_total,
       disk_available: s.disk_available,
-      vnfs: []
+      status: s.status ?? 'active',
+      fault_tag: s.fault_tag ?? '',
+      vnfs: [],
+      core_nfs: []
     })),
     links: links.map(l => ({
       source: l.source,
       target: l.target,
       link_type: l.link_type,
       status: l.status ?? 'active',
+      fault_tag: l.fault_tag ?? '',
       reliability: l.reliability ?? 0.999,
       latency_ms: l.latency_ms,
       bandwidth_gbps: l.bandwidth_gbps,
@@ -415,7 +428,10 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
       mem_available: memAvail,
       disk_total: diskTotal,
       disk_available: diskAvail,
-      vnfs: Array.isArray(n.vnfs) ? n.vnfs : [],
+      status: String(n.status ?? 'active') as 'active' | 'down',
+      fault_tag: String(n.fault_tag ?? ''),
+      vnfs: Array.isArray(n.core_nfs) ? n.core_nfs : (Array.isArray(n.vnfs) ? n.vnfs : []),
+      core_nfs: Array.isArray(n.core_nfs) ? n.core_nfs : (Array.isArray(n.vnfs) ? n.vnfs : []),
     }
   })
 
@@ -424,6 +440,7 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
     target: String(l.target ?? l.dst ?? ''),
     link_type: (l.link_type ?? l.type ?? 'inter_orbit') as 'intra_orbit' | 'inter_orbit',
     status: (l.status ?? 'active') as 'active' | 'congested' | 'down',
+    fault_tag: String(l.fault_tag ?? ''),
     reliability: Number(l.reliability ?? 0.999),
     latency_ms: Number(l.latency_ms ?? l.latency ?? 5),
     bandwidth_gbps: Number(l.bandwidth_gbps ?? l.bandwidth ?? 10),

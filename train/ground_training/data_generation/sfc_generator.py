@@ -7,97 +7,55 @@ import numpy as np
 
 
 SFC_TEMPLATES = {
-    "web_service": {"vnfs": ["firewall", "waf", "load_balancer", "cache"], "priority": "high", "lat_mult": 0.8},
-    "secure_comm": {"vnfs": ["firewall", "ids", "encryption", "nat"], "priority": "high", "lat_mult": 0.7},
-    "cdn_service": {"vnfs": ["firewall", "cache", "load_balancer", "compression"], "priority": "medium", "lat_mult": 1.0},
-    "vpn_service": {"vnfs": ["firewall", "vpn_gateway", "encryption", "nat"], "priority": "high", "lat_mult": 0.9},
-    "video_streaming": {"vnfs": ["firewall", "transcoding", "cache", "qos_manager"], "priority": "medium", "lat_mult": 1.2},
-    "iot_service": {"vnfs": ["firewall", "api_gateway", "compression", "cache"], "priority": "low", "lat_mult": 1.5},
-    "edge_computing": {"vnfs": ["firewall", "load_balancer", "cache", "qos_manager"], "priority": "high", "lat_mult": 0.6},
-    "5g_service": {"vnfs": ["firewall", "qos_manager", "load_balancer", "cache"], "priority": "high", "lat_mult": 0.5},
-    "blockchain": {"vnfs": ["firewall", "encryption", "load_balancer", "cache"], "priority": "medium", "lat_mult": 1.0},
-    "ai_inference": {"vnfs": ["firewall", "load_balancer", "cache", "api_gateway"], "priority": "medium", "lat_mult": 0.9},
-    "data_processing": {"vnfs": ["firewall", "compression", "load_balancer", "cache"], "priority": "low", "lat_mult": 1.3},
-    "secure_storage": {"vnfs": ["firewall", "encryption", "ddos_protection", "cache"], "priority": "high", "lat_mult": 1.0},
+    "open5gs_basic": {"vnfs": ["amf", "smf", "upf"], "priority": "high", "lat_mult": 0.85},
+    "open5gs_auth": {"vnfs": ["nrf", "ausf", "udm", "amf", "smf", "upf"], "priority": "high", "lat_mult": 0.95},
+    "open5gs_slice": {"vnfs": ["nrf", "nssf", "amf", "smf", "upf"], "priority": "medium", "lat_mult": 1.05},
+    "open5gs_policy": {"vnfs": ["nrf", "pcf", "amf", "smf", "upf"], "priority": "medium", "lat_mult": 1.0},
+    "open5gs_full": {"vnfs": ["nrf", "ausf", "udm", "amf", "smf", "upf", "pcf", "nssf"], "priority": "high", "lat_mult": 1.15},
 }
 
-PRIORITY_WEIGHT = {"low": 0.8, "medium": 1.0, "high": 1.3}
+PRIORITY_WEIGHT = {"low": 0.85, "medium": 1.0, "high": 1.25}
 
 VNF_CONFIGS = {
-    "firewall": {
-        "low": {"cpu": (0.3, 0.6), "mem": (0.5, 1.0), "bw": (0.03, 0.06), "disk": (2.0, 8.0)},
-        "medium": {"cpu": (0.5, 1.2), "mem": (1.0, 2.5), "bw": (0.05, 0.15), "disk": (6.0, 18.0)},
-        "high": {"cpu": (1.0, 2.0), "mem": (2.0, 4.0), "bw": (0.1, 0.3), "disk": (12.0, 28.0)},
+    "amf": {
+        "low": {"cpu": (0.9, 1.4), "mem": (1.8, 2.8), "bw": (0.12, 0.22), "disk": (6.0, 12.0)},
+        "medium": {"cpu": (1.2, 1.9), "mem": (2.4, 3.6), "bw": (0.18, 0.35), "disk": (8.0, 16.0)},
+        "high": {"cpu": (1.8, 2.6), "mem": (3.0, 4.8), "bw": (0.28, 0.48), "disk": (12.0, 24.0)},
     },
-    "nat": {
-        "low": {"cpu": (0.2, 0.5), "mem": (0.3, 0.8), "bw": (0.05, 0.1), "disk": (1.0, 4.0)},
-        "medium": {"cpu": (0.3, 0.8), "mem": (0.5, 1.5), "bw": (0.1, 0.2), "disk": (2.0, 8.0)},
-        "high": {"cpu": (0.5, 1.5), "mem": (1.0, 3.0), "bw": (0.15, 0.4), "disk": (4.0, 12.0)},
+    "smf": {
+        "low": {"cpu": (1.0, 1.6), "mem": (2.0, 3.0), "bw": (0.14, 0.25), "disk": (8.0, 14.0)},
+        "medium": {"cpu": (1.4, 2.2), "mem": (2.8, 4.0), "bw": (0.22, 0.40), "disk": (10.0, 20.0)},
+        "high": {"cpu": (2.0, 3.0), "mem": (3.5, 5.5), "bw": (0.32, 0.60), "disk": (14.0, 28.0)},
     },
-    "ids": {
-        "low": {"cpu": (0.8, 1.5), "mem": (1.5, 3.0), "bw": (0.1, 0.2), "disk": (6.0, 18.0)},
-        "medium": {"cpu": (1.0, 2.0), "mem": (2.0, 5.0), "bw": (0.2, 0.4), "disk": (10.0, 28.0)},
-        "high": {"cpu": (1.5, 3.5), "mem": (3.0, 8.0), "bw": (0.3, 0.8), "disk": (18.0, 42.0)},
+    "upf": {
+        "low": {"cpu": (1.8, 2.8), "mem": (2.8, 4.2), "bw": (0.45, 0.9), "disk": (12.0, 24.0)},
+        "medium": {"cpu": (2.6, 4.0), "mem": (4.0, 6.0), "bw": (0.8, 1.6), "disk": (18.0, 36.0)},
+        "high": {"cpu": (3.6, 5.8), "mem": (5.5, 8.0), "bw": (1.3, 2.8), "disk": (24.0, 48.0)},
     },
-    "load_balancer": {
-        "low": {"cpu": (0.3, 0.8), "mem": (0.5, 1.5), "bw": (0.08, 0.15), "disk": (2.0, 8.0)},
-        "medium": {"cpu": (0.5, 1.5), "mem": (1.0, 3.0), "bw": (0.15, 0.3), "disk": (4.0, 14.0)},
-        "high": {"cpu": (1.0, 2.5), "mem": (2.0, 5.0), "bw": (0.25, 0.5), "disk": (8.0, 20.0)},
+    "ausf": {
+        "low": {"cpu": (0.7, 1.1), "mem": (1.4, 2.2), "bw": (0.08, 0.16), "disk": (6.0, 12.0)},
+        "medium": {"cpu": (1.0, 1.5), "mem": (2.0, 3.0), "bw": (0.12, 0.22), "disk": (8.0, 16.0)},
+        "high": {"cpu": (1.4, 2.1), "mem": (2.6, 4.0), "bw": (0.18, 0.32), "disk": (12.0, 24.0)},
     },
-    "cache": {
-        "low": {"cpu": (0.2, 0.6), "mem": (1.5, 4.0), "bw": (0.1, 0.3), "disk": (16.0, 64.0)},
-        "medium": {"cpu": (0.3, 1.0), "mem": (2.0, 8.0), "bw": (0.2, 0.5), "disk": (48.0, 160.0)},
-        "high": {"cpu": (0.5, 1.5), "mem": (4.0, 16.0), "bw": (0.3, 1.0), "disk": (128.0, 320.0)},
+    "udm": {
+        "low": {"cpu": (0.8, 1.3), "mem": (1.8, 2.8), "bw": (0.08, 0.16), "disk": (14.0, 28.0)},
+        "medium": {"cpu": (1.2, 1.9), "mem": (2.4, 3.8), "bw": (0.12, 0.25), "disk": (18.0, 36.0)},
+        "high": {"cpu": (1.7, 2.6), "mem": (3.4, 5.0), "bw": (0.18, 0.34), "disk": (24.0, 44.0)},
     },
-    "encryption": {
-        "low": {"cpu": (1.0, 2.0), "mem": (0.8, 2.0), "bw": (0.05, 0.15), "disk": (2.0, 8.0)},
-        "medium": {"cpu": (1.5, 2.5), "mem": (1.0, 2.5), "bw": (0.1, 0.3), "disk": (4.0, 10.0)},
-        "high": {"cpu": (2.0, 4.0), "mem": (1.5, 4.0), "bw": (0.15, 0.5), "disk": (6.0, 16.0)},
+    "pcf": {
+        "low": {"cpu": (0.9, 1.4), "mem": (1.8, 2.8), "bw": (0.08, 0.15), "disk": (8.0, 16.0)},
+        "medium": {"cpu": (1.3, 2.0), "mem": (2.6, 3.8), "bw": (0.14, 0.26), "disk": (10.0, 20.0)},
+        "high": {"cpu": (1.8, 2.8), "mem": (3.4, 5.0), "bw": (0.22, 0.38), "disk": (14.0, 28.0)},
     },
-    "decryption": {
-        "low": {"cpu": (1.0, 2.0), "mem": (0.8, 2.0), "bw": (0.05, 0.15), "disk": (2.0, 8.0)},
-        "medium": {"cpu": (1.5, 2.5), "mem": (1.0, 2.5), "bw": (0.1, 0.3), "disk": (4.0, 10.0)},
-        "high": {"cpu": (2.0, 4.0), "mem": (1.5, 4.0), "bw": (0.15, 0.5), "disk": (6.0, 16.0)},
+    "nrf": {
+        "low": {"cpu": (0.6, 1.0), "mem": (1.2, 2.0), "bw": (0.06, 0.12), "disk": (6.0, 12.0)},
+        "medium": {"cpu": (0.9, 1.4), "mem": (1.8, 2.8), "bw": (0.10, 0.18), "disk": (8.0, 16.0)},
+        "high": {"cpu": (1.3, 2.0), "mem": (2.5, 3.8), "bw": (0.16, 0.28), "disk": (12.0, 24.0)},
     },
-    "transcoding": {
-        "low": {"cpu": (1.5, 2.5), "mem": (2.0, 4.0), "bw": (0.3, 0.6), "disk": (12.0, 36.0)},
-        "medium": {"cpu": (2.0, 3.5), "mem": (3.0, 6.0), "bw": (0.5, 1.0), "disk": (24.0, 64.0)},
-        "high": {"cpu": (3.0, 5.0), "mem": (4.0, 10.0), "bw": (0.8, 2.0), "disk": (56.0, 160.0)},
-    },
-    "compression": {
-        "low": {"cpu": (0.8, 1.5), "mem": (1.0, 2.5), "bw": (0.15, 0.3), "disk": (3.0, 10.0)},
-        "medium": {"cpu": (1.0, 2.0), "mem": (1.5, 3.5), "bw": (0.3, 0.6), "disk": (6.0, 18.0)},
-        "high": {"cpu": (1.5, 3.0), "mem": (2.0, 5.0), "bw": (0.4, 1.0), "disk": (12.0, 32.0)},
-    },
-    "decompression": {
-        "low": {"cpu": (0.6, 1.2), "mem": (0.8, 2.0), "bw": (0.1, 0.25), "disk": (3.0, 10.0)},
-        "medium": {"cpu": (0.8, 1.8), "mem": (1.0, 2.8), "bw": (0.2, 0.4), "disk": (6.0, 18.0)},
-        "high": {"cpu": (1.2, 2.5), "mem": (1.5, 4.0), "bw": (0.3, 0.7), "disk": (12.0, 32.0)},
-    },
-    "waf": {
-        "low": {"cpu": (1.0, 2.0), "mem": (1.5, 3.0), "bw": (0.1, 0.25), "disk": (8.0, 24.0)},
-        "medium": {"cpu": (1.5, 2.5), "mem": (2.0, 4.0), "bw": (0.2, 0.4), "disk": (16.0, 40.0)},
-        "high": {"cpu": (2.0, 4.0), "mem": (3.0, 6.0), "bw": (0.3, 0.8), "disk": (24.0, 64.0)},
-    },
-    "ddos_protection": {
-        "low": {"cpu": (1.5, 2.5), "mem": (2.5, 5.0), "bw": (0.3, 0.6), "disk": (12.0, 30.0)},
-        "medium": {"cpu": (2.0, 3.5), "mem": (3.0, 6.5), "bw": (0.5, 1.0), "disk": (20.0, 48.0)},
-        "high": {"cpu": (3.0, 5.0), "mem": (4.0, 10.0), "bw": (0.7, 1.8), "disk": (36.0, 96.0)},
-    },
-    "qos_manager": {
-        "low": {"cpu": (0.3, 0.8), "mem": (0.8, 2.0), "bw": (0.05, 0.12), "disk": (2.0, 6.0)},
-        "medium": {"cpu": (0.5, 1.2), "mem": (1.0, 2.5), "bw": (0.1, 0.2), "disk": (4.0, 10.0)},
-        "high": {"cpu": (0.8, 2.0), "mem": (1.5, 4.0), "bw": (0.15, 0.4), "disk": (8.0, 16.0)},
-    },
-    "vpn_gateway": {
-        "low": {"cpu": (0.8, 1.5), "mem": (1.5, 3.0), "bw": (0.15, 0.3), "disk": (6.0, 18.0)},
-        "medium": {"cpu": (1.0, 2.0), "mem": (2.0, 4.0), "bw": (0.3, 0.6), "disk": (10.0, 26.0)},
-        "high": {"cpu": (1.5, 3.0), "mem": (3.0, 6.0), "bw": (0.4, 1.0), "disk": (20.0, 42.0)},
-    },
-    "api_gateway": {
-        "low": {"cpu": (0.6, 1.2), "mem": (1.2, 2.5), "bw": (0.1, 0.2), "disk": (4.0, 12.0)},
-        "medium": {"cpu": (0.8, 1.8), "mem": (1.5, 3.5), "bw": (0.2, 0.4), "disk": (8.0, 22.0)},
-        "high": {"cpu": (1.2, 2.5), "mem": (2.0, 5.0), "bw": (0.3, 0.6), "disk": (14.0, 36.0)},
+    "nssf": {
+        "low": {"cpu": (0.6, 1.0), "mem": (1.2, 2.0), "bw": (0.05, 0.10), "disk": (5.0, 10.0)},
+        "medium": {"cpu": (0.9, 1.4), "mem": (1.6, 2.6), "bw": (0.08, 0.15), "disk": (7.0, 14.0)},
+        "high": {"cpu": (1.2, 1.9), "mem": (2.2, 3.4), "bw": (0.12, 0.22), "disk": (10.0, 20.0)},
     },
 }
 
@@ -416,12 +374,19 @@ def build_sfc_requests_payload(
         vnf_sequence = []
         total_vnf_bw = 0.0
         for j, vnf_type in enumerate(vnf_types):
-            config = VNF_CONFIGS.get(vnf_type, VNF_CONFIGS["firewall"])[load_level]
+            config = VNF_CONFIGS.get(vnf_type, VNF_CONFIGS["amf"])[load_level]
             bw_req = float(np.random.uniform(*config["bw"]))
+            nf_role = "user_plane" if vnf_type == "upf" else "control_plane"
 
             vnf = {
-                "vnf_id": f"vnf_{i}_{j}",
+                "vnf_id": f"core_nf_{i}_{j}",
                 "vnf_type": vnf_type,
+                "core_nf_id": f"core_nf_{i}_{j}",
+                "core_nf_type": vnf_type,
+                "nf_type": vnf_type,
+                "nf_role": nf_role,
+                "processing_weight": 1.3 if vnf_type == "upf" else 1.0,
+                "stateful": True,
                 "cpu_required": round(float(np.random.uniform(*config["cpu"])), 2),
                 "mem_required": round(float(np.random.uniform(*config["mem"])), 2),
                 "disk_required_gb": round(float(np.random.uniform(*config["disk"])), 2),
@@ -461,7 +426,39 @@ def build_sfc_requests_payload(
         request = {
             "request_id": f"{request_id_prefix}_{i}",
             "service_type": service_type,
+            "network_domain": "open5gs",
             "vnf_sequence": vnf_sequence,
+            "core_nf_sequence": vnf_sequence,
+            "core_nfs": [
+                {
+                    "name": nf["core_nf_id"],
+                    "core_nf_id": nf["core_nf_id"],
+                    "core_nf_type": nf["core_nf_type"],
+                    "nf_type": nf["nf_type"],
+                    "nf_role": nf["nf_role"],
+                    "processing_weight": nf["processing_weight"],
+                    "stateful": nf["stateful"],
+                    "cpu": nf["cpu_required"],
+                    "mem": nf["mem_required"],
+                    "disk": nf["disk_required_gb"],
+                    "bw_in": nf["bandwidth_required_gbps"],
+                    "bw_out": nf["bandwidth_required_gbps"],
+                }
+                for nf in vnf_sequence
+            ],
+            "vnfs": [
+                {
+                    "name": nf["core_nf_id"],
+                    "cpu": nf["cpu_required"],
+                    "mem": nf["mem_required"],
+                    "disk": nf["disk_required_gb"],
+                    "bw_in": nf["bandwidth_required_gbps"],
+                    "bw_out": nf["bandwidth_required_gbps"],
+                    "nf_type": nf["nf_type"],
+                    "nf_role": nf["nf_role"],
+                }
+                for nf in vnf_sequence
+            ],
             "source_node": src,
             "destination_node": dst,
             "max_latency_ms": round(latency_budget, 2),
@@ -492,6 +489,7 @@ def build_sfc_requests_payload(
             "generation_seed": seed,
             "schema": {
                 "vnf_extra_fields": ["disk_required_gb"],
+                "core_nf_extra_fields": ["nf_role", "processing_weight", "stateful", "core_nf_type"],
                 "request_extra_fields": [
                     "core_network_load",
                     "bandwidth_demand_gbps",

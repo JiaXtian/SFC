@@ -1,4 +1,5 @@
 #include "network_graph.h"
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -213,6 +214,7 @@ std::vector<SFCRequest> load_sfc_requests(const std::string& filepath) {
             SFCRequest req;
             req.request_id = req_json["request_id"].get<std::string>();
             req.service_type = req_json["service_type"].get<std::string>();
+            req.network_domain = req_json.value("network_domain", "open5gs");
             req.source_node = req_json["source_node"].get<std::string>();
             req.destination_node = req_json["destination_node"].get<std::string>();
             req.max_latency_ms = req_json.value("max_latency_ms", 100.0f);
@@ -229,14 +231,54 @@ std::vector<SFCRequest> load_sfc_requests(const std::string& filepath) {
                 req.reliability_requirement = sla.value("reliability_requirement", req.reliability_requirement);
             }
 
-            for (auto& vnf_json : req_json["vnf_sequence"]) {
+            auto seq_json = req_json.contains("core_nf_sequence")
+                ? req_json["core_nf_sequence"]
+                : (req_json.contains("vnf_sequence") ? req_json["vnf_sequence"] : nlohmann::json::array());
+            if (seq_json.empty() && req_json.contains("core_nfs")) {
+                seq_json = nlohmann::json::array();
+                for (const auto& nf_json : req_json["core_nfs"]) {
+                    seq_json.push_back({
+                        {"vnf_id", nf_json.value("core_nf_id", nf_json.value("name", std::string("")))},
+                        {"core_nf_id", nf_json.value("core_nf_id", nf_json.value("name", std::string("")))},
+                        {"vnf_type", nf_json.value("nf_type", nf_json.value("core_nf_type", std::string("")))},
+                        {"core_nf_type", nf_json.value("core_nf_type", nf_json.value("nf_type", std::string("")))},
+                        {"nf_type", nf_json.value("nf_type", nf_json.value("core_nf_type", std::string("")))},
+                        {"nf_role", nf_json.value("nf_role", std::string("control_plane"))},
+                        {"processing_weight", nf_json.value("processing_weight", 1.0f)},
+                        {"stateful", nf_json.value("stateful", true)},
+                        {"cpu_required", nf_json.value("cpu", 0.0f)},
+                        {"mem_required", nf_json.value("mem", 0.0f)},
+                        {"disk_required_gb", nf_json.value("disk", 0.0f)},
+                        {"bandwidth_required_gbps", std::max(nf_json.value("bw_in", 0.0f), nf_json.value("bw_out", 0.0f))},
+                    });
+                }
+            }
+            for (auto& vnf_json : seq_json) {
                 VNFRequirement vnf;
-                vnf.vnf_id = vnf_json["vnf_id"].get<std::string>();
-                vnf.vnf_type = vnf_json["vnf_type"].get<std::string>();
+                vnf.vnf_id = vnf_json.value("vnf_id", vnf_json.value("core_nf_id", std::string("")));
+                vnf.core_nf_id = vnf_json.value("core_nf_id", vnf.vnf_id);
+                vnf.vnf_type = vnf_json.value("vnf_type", vnf_json.value("core_nf_type", std::string("")));
+                vnf.core_nf_type = vnf_json.value("core_nf_type", vnf.vnf_type);
+                vnf.nf_type = vnf_json.value("nf_type", vnf.core_nf_type.empty() ? vnf.vnf_type : vnf.core_nf_type);
+                vnf.nf_role = vnf_json.value("nf_role", std::string("control_plane"));
+                vnf.processing_weight = vnf_json.value("processing_weight", 1.0f);
+                vnf.stateful = vnf_json.value("stateful", true);
                 vnf.cpu_required = vnf_json.value("cpu_required", 0.0f);
                 vnf.mem_required = vnf_json.value("mem_required", 0.0f);
                 vnf.bandwidth_required_gbps = vnf_json.value("bandwidth_required_gbps", 0.0f);
                 vnf.disk_required_gb = vnf_json.value("disk_required_gb", 0.0f);
+                if (vnf.vnf_id.empty()) {
+                    vnf.vnf_id = "core_nf_" + std::to_string(req.vnf_sequence.size());
+                }
+                if (vnf.vnf_type.empty()) {
+                    vnf.vnf_type = vnf.nf_type.empty() ? vnf.vnf_id : vnf.nf_type;
+                }
+                if (vnf.core_nf_id.empty()) {
+                    vnf.core_nf_id = vnf.vnf_id;
+                }
+                if (vnf.core_nf_type.empty()) {
+                    vnf.core_nf_type = vnf.vnf_type;
+                }
                 req.vnf_sequence.push_back(vnf);
             }
             requests.push_back(req);

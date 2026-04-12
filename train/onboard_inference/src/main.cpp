@@ -152,6 +152,8 @@ nlohmann::json vnf_traces_to_json(const std::vector<VNFDeploymentTrace>& traces)
         arr.push_back({
             {"vnf_id", trace.vnf_id},
             {"vnf_type", trace.vnf_type},
+            {"core_nf_id", trace.vnf_id},
+            {"core_nf_type", trace.vnf_type},
             {"remaining_delay_before_ms", trace.remaining_delay_before_ms},
             {"accumulated_delay_before_ms", trace.accumulated_delay_before_ms},
             {"accumulated_reliability_before", trace.accumulated_reliability_before},
@@ -312,11 +314,13 @@ int main(int argc, char* argv[]) {
             sfc_json["source_node"] = request.source_node;
             sfc_json["destination_node"] = request.destination_node;
             sfc_json["vnf_count"] = request.vnf_sequence.size();
+            sfc_json["core_nf_count"] = request.vnf_sequence.size();
             nlohmann::json vnf_types = nlohmann::json::array();
             for (const auto& vnf : request.vnf_sequence) {
-                vnf_types.push_back(vnf.vnf_type);
+                vnf_types.push_back(vnf.nf_type.empty() ? vnf.vnf_type : vnf.nf_type);
             }
             sfc_json["vnf_types"] = vnf_types;
+            sfc_json["core_nf_types"] = vnf_types;
             sfc_json["success"] = result.success;
             sfc_json["total_delay_ms"] = result.total_delay_ms;
             sfc_json["final_reliability"] = result.final_reliability;

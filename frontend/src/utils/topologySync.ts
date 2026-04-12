@@ -55,7 +55,8 @@ export function buildRuntimeTopologyPayload(
       mem_available: asFinite(s?.mem_available, 0),
       disk_total: asFinite(s?.disk_total, 0),
       disk_available: asFinite(s?.disk_available, 0),
-      vnfs: Array.isArray(s?.vnfs) ? s.vnfs : [],
+      vnfs: Array.isArray(s?.core_nfs) ? s.core_nfs : (Array.isArray(s?.vnfs) ? s.vnfs : []),
+      core_nfs: Array.isArray(s?.core_nfs) ? s.core_nfs : (Array.isArray(s?.vnfs) ? s.vnfs : []),
       status: String(s?.status ?? 'active'),
       node_reliability: asFinite(s?.node_reliability, 0.99),
       fault_tag: String(s?.fault_tag ?? ''),
@@ -65,6 +66,7 @@ export function buildRuntimeTopologyPayload(
       target: String(l?.target ?? ''),
       link_type: String(l?.link_type ?? 'inter_orbit'),
       status: String(l?.status ?? 'active'),
+      fault_tag: String(l?.fault_tag ?? ''),
       reliability: asFinite(l?.reliability ?? l?.link_reliability, 0.999),
       latency_ms: asFinite(l?.latency_ms, 0),
       bandwidth_gbps: asFinite(l?.bandwidth_gbps, 0),
@@ -72,4 +74,3 @@ export function buildRuntimeTopologyPayload(
     })),
   }
 }
-

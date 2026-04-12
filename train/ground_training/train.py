@@ -534,7 +534,7 @@ def main():
 
     start_time = time.time()
     gnn = GNNEncoder(input_dim=8, hidden_dim=192, num_layers=4)
-    agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=48, device=args.device)
+    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=48, device=args.device)
     if args.init_model_checkpoint and os.path.exists(args.init_model_checkpoint):
         print(f"加载初始化策略模型: {args.init_model_checkpoint}")
         # 继续训练时仅加载网络权重，不恢复旧优化器状态（参数组可能已变化）。

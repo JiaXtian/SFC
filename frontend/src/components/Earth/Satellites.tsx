@@ -73,12 +73,20 @@ export default function Satellites() {
   const { targetPositions, colours } = useMemo(() => {
     const targetPositions: THREE.Vector3[] = []
     const colours: THREE.Color[] = []
-    const baseGreen = new THREE.Color('#6afb8e')
-    const selectedGreen = new THREE.Color('#8dff3a')
+    const baseGreen = new THREE.Color('#45f27d')
+    const selectedGreen = new THREE.Color('#84ff92')
+    const faultRed = new THREE.Color('#ff3b30')
+    const selectedFaultRed = new THREE.Color('#ff6b63')
 
     satellites.forEach(sat => {
+      const status = String((sat as any)?.status ?? 'active')
+      const isFault = status === 'down'
       targetPositions.push(satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z))
-      if (selectedSatellite?.id === sat.id) {
+      if (isFault && selectedSatellite?.id === sat.id) {
+        colours.push(selectedFaultRed)
+      } else if (isFault) {
+        colours.push(faultRed)
+      } else if (selectedSatellite?.id === sat.id) {
         colours.push(selectedGreen)
       } else if (vnfHighlightSet.has(sat.id)) {
         colours.push(new THREE.Color('#e4fff1'))
@@ -281,6 +289,12 @@ export default function Satellites() {
                 磁盘 <span style={{ color: '#f0f9ff', fontWeight: 600 }}>{(hov as any).disk_available?.toFixed?.(0) ?? '0'}</span>/{(hov as any).disk_total ?? 0}GB
               </div>
               <div style={{ color: '#64748b', marginTop: 3, fontSize: 9 }}>
+                状态: {String((hov as any)?.status ?? 'active') === 'down' ? '故障' : '正常'}
+                {String((hov as any)?.fault_tag ?? '').trim()
+                  ? ` · ${String((hov as any).fault_tag)}`
+                  : ''}
+              </div>
+              <div style={{ color: '#64748b', marginTop: 2, fontSize: 9 }}>
                 {Math.abs(hov.coordinates.lat).toFixed(1)}°{hov.coordinates.lat >= 0 ? 'N' : 'S'} &nbsp;
                 {Math.abs(hov.coordinates.lon).toFixed(1)}°{hov.coordinates.lon >= 0 ? 'E' : 'W'} &nbsp;
                 {hov.orbital_params.altitude_km.toFixed(0)}km

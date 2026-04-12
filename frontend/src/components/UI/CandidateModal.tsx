@@ -27,9 +27,10 @@ function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackD
     : []
   if (fromCandidatePath.length >= 2) return fromCandidatePath
 
-  const fromPerVnf = Array.isArray(cand?.per_vnf)
-    ? cand.per_vnf.map((p: any) => String(p?.node ?? '')).filter(Boolean)
-    : []
+  const perCore = Array.isArray(cand?.per_core_nf)
+    ? cand.per_core_nf
+    : (Array.isArray(cand?.per_vnf) ? cand.per_vnf : [])
+  const fromPerVnf = perCore.map((p: any) => String(p?.node ?? '')).filter(Boolean)
   const core = fromPerVnf.length > 0
     ? fromPerVnf
     : (Array.isArray(cand?.deployed_nodes) ? cand.deployed_nodes.map((n: any) => String(n)).filter(Boolean) : [])
@@ -40,7 +41,7 @@ function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackD
   return fallbackSrc ? [fallbackSrc] : []
 }
 
-  function buildViolationDetails(
+function buildViolationDetails(
   cand: any,
   constraints: { max_latency_ms: number; min_bandwidth_gbps: number; min_reliability: number }
 ): string[] {
@@ -116,7 +117,7 @@ export default function CandidateModal() {
   }, [scoringConfig])
 
   const scoreBreakdown = useMemo(() => {
-    const vnfCount = scoringConfig?.vnfCount || cand.per_vnf?.length || 1
+    const vnfCount = scoringConfig?.vnfCount || cand.per_core_nf?.length || cand.per_vnf?.length || 1
     return computeScoreBreakdown({
       totalLatencyMs: Number(cand.total_latency_ms ?? 0),
       bottleneckBandwidthGbps: Number(cand.bottleneck_bandwidth_gbps ?? 0),
@@ -160,8 +161,12 @@ export default function CandidateModal() {
             topology_version: candidateResult.topologyVersion,
             source_node: sourceNode,
             destination_node: destinationNode,
-            vnfs: cand.per_vnf?.map((v: any) => ({
-              name: String(v.vnf ?? ''),
+            core_nfs: (cand.per_core_nf ?? cand.per_vnf ?? []).map((v: any, idx: number) => ({
+              name: String(v.core_nf ?? v.vnf ?? `core-nf-${idx + 1}`),
+              core_nf_id: String(v.core_nf ?? v.vnf ?? `core-nf-${idx + 1}`),
+              core_nf_type: String(v.nf_type ?? v.core_nf ?? v.vnf ?? `nf-${idx + 1}`),
+              nf_type: String(v.nf_type ?? v.core_nf ?? v.vnf ?? `nf-${idx + 1}`),
+              nf_role: String(v.nf_role ?? 'control_plane'),
               cpu: Number(v.cpu_used ?? 0),
               mem: Number(v.mem_used ?? 0),
               disk: Number(v.disk_used ?? 0),
@@ -177,6 +182,12 @@ export default function CandidateModal() {
           max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 20),
           planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
           initial_candidate: cand,
+        }
+        if (!(sessionReq as any).vnfs && Array.isArray((sessionReq as any).core_nfs)) {
+          ;(sessionReq as any).vnfs = (sessionReq as any).core_nfs
+        }
+        if (!(sessionReq as any).core_nf_sequence && Array.isArray((sessionReq as any).core_nfs)) {
+          ;(sessionReq as any).core_nf_sequence = (sessionReq as any).core_nfs
         }
         const sessionStartPayload: any = {
           auto_redeploy: Boolean(sessionConfig?.auto_redeploy ?? true),
@@ -224,7 +235,7 @@ export default function CandidateModal() {
         },
         score_constraints: constraints,
         deployed_nodes: cand.deployed_nodes ?? [],
-        per_vnf: cand.per_vnf ?? [],
+        per_vnf: cand.per_core_nf ?? cand.per_vnf ?? [],
         link_details: sanitizedLinks,
         total_latency_ms: cand.total_latency_ms ?? 0,
         inference_latency_ms: inferenceTime,
@@ -360,7 +371,7 @@ export default function CandidateModal() {
                 { label: '资源得分', value: scoreBreakdown.resourceScore, color: '#34d399', detail: `基于部署节点剩余 CPU/MEM/DISK 均值` },
                 { label: '可靠性得分', value: scoreBreakdown.reliabilityScore, color: '#a78bfa', detail: `r=${((Number(cand.estimated_reliability ?? 0)) / Math.max(1e-9, constraints.min_reliability)).toFixed(3)}（低于阈值立方惩罚）` },
                 { label: '带宽得分', value: scoreBreakdown.bandwidthScore, color: '#fbbf24', detail: `r=${((Number(cand.bottleneck_bandwidth_gbps ?? 0)) / Math.max(1e-9, constraints.min_bandwidth_gbps)).toFixed(3)}（按连续增益/惩罚曲线）` },
-                { label: '分散度得分', value: scoreBreakdown.dispersionScore, color: '#fb7185', detail: `${cand.deployed_nodes?.length ?? 0} 节点 / ${scoringConfig?.vnfCount || cand.per_vnf?.length || 1} VNF` },
+                { label: '分散度得分', value: scoreBreakdown.dispersionScore, color: '#fb7185', detail: `${cand.deployed_nodes?.length ?? 0} 节点 / ${scoringConfig?.vnfCount || cand.per_core_nf?.length || cand.per_vnf?.length || 1} 核心网网元` },
               ].map(s => (
                 <div key={s.label}>
                   <div className="flex justify-between text-[11px] mb-1">
@@ -396,16 +407,19 @@ export default function CandidateModal() {
 
           <div>
             <div className="text-[11px] text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-2 font-semibold">
-              <Zap className="w-3.5 h-3.5 text-cyan-300" />VNF 部署方案
+              <Zap className="w-3.5 h-3.5 text-cyan-300" />核心网网元部署方案
             </div>
             <div className="space-y-2">
-              {(cand.per_vnf ?? []).map((v: any, i: number) => (
+              {(cand.per_core_nf ?? cand.per_vnf ?? []).map((v: any, i: number) => (
                 <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition hover:bg-white/5" style={{ background: 'linear-gradient(135deg, rgba(30,87,122,0.2), rgba(16,42,63,0.2))', border: '1px solid rgba(91,141,177,0.28)' }}>
                   <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold flex-shrink-0" style={{ background: 'linear-gradient(135deg, #1c486e, #123252)', color: '#bae6fd', border: '1px solid rgba(102,169,210,0.3)' }}>
                     {i + 1}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-white">{v.vnf}</div>
+                    <div className="text-sm font-semibold text-white">{v.core_nf ?? v.vnf}</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {v.nf_type ?? '-'} · {v.nf_role ?? '-'}
+                    </div>
                     <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5">
                       <Server className="w-3 h-3" />
                       <span className="text-cyan-200 font-mono">{v.node}</span>

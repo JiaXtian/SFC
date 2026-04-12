@@ -268,12 +268,26 @@ class SFCTrainer:
 
     @staticmethod
     def _build_vnf_features(vnf):
+        nf_type = str(
+            vnf.get(
+                "core_nf_type",
+                vnf.get("nf_type", vnf.get("vnf_type", vnf.get("name", ""))),
+            )
+        ).lower().replace("-", "_").replace(" ", "_")
+        is_user_plane = 1.0 if nf_type == "upf" else 0.0
+        is_control_plane = 0.0 if is_user_plane > 0.5 else 1.0
+        stateful = 1.0 if bool(vnf.get("stateful", True)) else 0.0
+        processing_weight = float(vnf.get("processing_weight", 1.0))
         return torch.tensor(
             [
                 float(vnf.get("cpu_required", 0.0)),
                 float(vnf.get("mem_required", 0.0)),
                 float(vnf.get("bandwidth_required_gbps", 0.0)),
                 float(vnf.get("disk_required_gb", 0.0)),
+                is_user_plane,
+                is_control_plane,
+                stateful,
+                processing_weight,
             ],
             dtype=torch.float32,
         )
@@ -426,7 +440,7 @@ class SFCTrainer:
                 "updated": did_update,
             }
 
-        max_steps = max(12, len(request.get("vnf_sequence", [])) + 2)
+        max_steps = max(12, len(request.get("vnf_sequence", request.get("core_nf_sequence", []))) + 2)
 
         for step in range(max_steps):
             vnf = state.get("vnf")
@@ -854,7 +868,7 @@ class SFCTrainer:
                 "updated": did_update,
             }
 
-        max_steps = max(12, len(request.get("vnf_sequence", [])) + 2)
+        max_steps = max(12, len(request.get("vnf_sequence", request.get("core_nf_sequence", []))) + 2)
         for decision_step in range(max_steps):
             if state is None or state.get("vnf") is None:
                 break

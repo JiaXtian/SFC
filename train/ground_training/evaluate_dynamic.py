@@ -34,7 +34,7 @@ def _infer_context_dim(model_checkpoint: str, fallback: int) -> int:
     fc0_w = actor_state.get("fc.0.weight")
     if fc0_w is None or fc0_w.ndim != 2:
         return fallback
-    inferred = int(fc0_w.shape[1]) - 192 - 4
+    inferred = int(fc0_w.shape[1]) - 192 - 8
     return inferred if inferred > 0 else fallback
 
 
@@ -117,7 +117,7 @@ def main():
     gnn.load_state_dict(torch.load(args.gnn_checkpoint, map_location=args.device))
     gnn.eval()
 
-    agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=args.context_dim, device=args.device)
+    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=args.context_dim, device=args.device)
     agent.load(args.model_checkpoint, load_optimizer=False)
     agent.actor.eval()
     agent.critic.eval()

@@ -1,7 +1,16 @@
 import { create } from 'zustand'
 import type { SatelliteData, LinkData } from '@/utils/constellationGenerator'
 
-export interface VNFDeploy { vnf: string; node: string; cpu_used: number; mem_used: number; disk_used?: number }
+export interface VNFDeploy {
+  vnf: string
+  core_nf?: string
+  nf_type?: string
+  nf_role?: string
+  node: string
+  cpu_used: number
+  mem_used: number
+  disk_used?: number
+}
 export interface LinkDetail {
   src: string
   dst: string
@@ -10,6 +19,7 @@ export interface LinkDetail {
   bandwidth_available_gbps?: number
   bandwidth_required_gbps?: number
   status?: string
+  fault_tag?: string
   reliability?: number
 }
 export interface Deployment {
@@ -100,6 +110,12 @@ export interface CandidateResult {
 
 export interface RequestVNF {
   name: string
+  core_nf?: string
+  nf_type?: string
+  nf_role?: string
+  resource_profile?: string
+  processing_weight?: number
+  stateful?: boolean
   cpu: number
   mem: number
   disk: number
@@ -156,6 +172,7 @@ export interface DecisionTrace {
   fallback_only: boolean
   decision_process?: any
   request_vnfs?: RequestVNF[]
+  request_core_nfs?: RequestVNF[]
   candidates: Array<{
     score: number
     satisfies_constraints: boolean
@@ -165,6 +182,19 @@ export interface DecisionTrace {
     deployed_nodes?: string[]
     per_vnf?: Array<{
       vnf: string
+      core_nf?: string
+      nf_type?: string
+      nf_role?: string
+      node: string
+      cpu_used: number
+      mem_used: number
+      disk_used?: number
+    }>
+    per_core_nf?: Array<{
+      vnf: string
+      core_nf?: string
+      nf_type?: string
+      nf_role?: string
       node: string
       cpu_used: number
       mem_used: number
@@ -295,6 +325,18 @@ function remapSelectedLink(selectedLink: LinkData | null, links: LinkData[]): Li
     const b = String(l?.target ?? '')
     if ((a === src && b === dst) || (a === dst && b === src)) {
       return l as LinkData
+    }
+  }
+  return null
+}
+
+function remapSelectedSatellite(selectedSatellite: SatelliteData | null, satellites: SatelliteData[]): SatelliteData | null {
+  if (!selectedSatellite) return null
+  const selectedId = String((selectedSatellite as any)?.id ?? '')
+  if (!selectedId || !Array.isArray(satellites)) return null
+  for (const sat of satellites as any[]) {
+    if (String(sat?.id ?? '') === selectedId) {
+      return sat as SatelliteData
     }
   }
   return null
@@ -440,6 +482,7 @@ function refreshLinkMetrics(linkDetails: LinkDetail[], linkMap: Map<string, Link
       bandwidth_available_gbps: Number((cur as any)?.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0),
       bandwidth_required_gbps: Number(l.bandwidth_required_gbps ?? 0),
       status: String((cur as any)?.status ?? l.status ?? 'active'),
+      fault_tag: String((cur as any)?.fault_tag ?? l.fault_tag ?? ''),
       reliability: Number((cur as any)?.reliability ?? (cur as any)?.link_reliability ?? l.reliability ?? 0),
     }
     if (
@@ -512,6 +555,7 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
         bandwidth_available_gbps: Number((lk as any)?.bandwidth_available_gbps ?? 0),
         bandwidth_required_gbps: req,
         status: (lk as any)?.status ?? 'down',
+        fault_tag: String((lk as any)?.fault_tag ?? ''),
         reliability: Number((lk as any)?.reliability ?? (lk as any)?.link_reliability ?? 0),
       })
     }
@@ -551,16 +595,25 @@ function decisionTraceSignature(trace: DecisionTrace): string {
 }
 
 function pickTracePerVnf(trace: DecisionTrace): VNFDeploy[] {
-  const requestVnfs = Array.isArray(trace?.request_vnfs) ? trace.request_vnfs : []
+  const requestVnfs = Array.isArray(trace?.request_core_nfs)
+    ? trace.request_core_nfs
+    : (Array.isArray(trace?.request_vnfs) ? trace.request_vnfs : [])
   const bestCandidate = Array.isArray(trace?.candidates) ? trace.candidates[0] : null
-  if (bestCandidate && Array.isArray((bestCandidate as any).per_vnf) && (bestCandidate as any).per_vnf.length > 0) {
-    const fromCandidate = (bestCandidate as any).per_vnf.map((p: any, i: number) => {
+  const candidatePer = bestCandidate && Array.isArray((bestCandidate as any).per_core_nf)
+    ? (bestCandidate as any).per_core_nf
+    : ((bestCandidate && Array.isArray((bestCandidate as any).per_vnf)) ? (bestCandidate as any).per_vnf : [])
+  if (bestCandidate && candidatePer.length > 0) {
+    const fromCandidate = candidatePer.map((p: any, i: number) => {
       const spec = requestVnfs[i] ?? {}
       const cpu = Number(p?.cpu_used ?? (spec as any).cpu ?? 0)
       const mem = Number(p?.mem_used ?? (spec as any).mem ?? 0)
       const disk = Number(p?.disk_used ?? (spec as any).disk ?? Math.max(0, mem * 2.0))
+      const coreNf = String(p?.core_nf ?? p?.vnf ?? p?.name ?? (spec as any).core_nf ?? (spec as any).name ?? `core-nf-${i + 1}`)
       return {
-        vnf: String(p?.vnf ?? p?.name ?? `vnf-${i + 1}`),
+        vnf: coreNf,
+        core_nf: coreNf,
+        nf_type: String(p?.nf_type ?? (spec as any).nf_type ?? coreNf),
+        nf_role: String(p?.nf_role ?? (spec as any).nf_role ?? ''),
         node: String(p?.node ?? ''),
         cpu_used: cpu,
         mem_used: mem,
@@ -575,8 +628,12 @@ function pickTracePerVnf(trace: DecisionTrace): VNFDeploy[] {
     const filled = deployedNodes.map((node: string, i: number) => {
       const prev = fromCandidate[i]
       const spec = requestVnfs[i] ?? {}
+      const coreNf = String(prev?.core_nf ?? prev?.vnf ?? (spec as any).core_nf ?? (spec as any).name ?? `core-nf-${i + 1}`)
       return {
-        vnf: String(prev?.vnf ?? (spec as any).name ?? `vnf-${i + 1}`),
+        vnf: coreNf,
+        core_nf: coreNf,
+        nf_type: String(prev?.nf_type ?? (spec as any).nf_type ?? coreNf),
+        nf_role: String(prev?.nf_role ?? (spec as any).nf_role ?? ''),
         node: node || String(prev?.node ?? ''),
         cpu_used: Number(prev?.cpu_used ?? (spec as any).cpu ?? 0),
         mem_used: Number(prev?.mem_used ?? (spec as any).mem ?? 0),
@@ -587,14 +644,20 @@ function pickTracePerVnf(trace: DecisionTrace): VNFDeploy[] {
   }
   const attempts = Array.isArray(trace?.decision_process?.steps) ? trace.decision_process.steps : []
   const selectedAttempt = attempts.find((s: any) => !!s?.satisfies_constraints) ?? attempts[0]
-  const per = Array.isArray(selectedAttempt?.decision_process?.per_vnf)
-    ? selectedAttempt.decision_process.per_vnf
-    : []
+  const per = Array.isArray(selectedAttempt?.decision_process?.per_core_nf)
+    ? selectedAttempt.decision_process.per_core_nf
+    : (Array.isArray(selectedAttempt?.decision_process?.per_vnf)
+      ? selectedAttempt.decision_process.per_vnf
+      : [])
   const selected = per.filter((p: any) => p?.status === 'selected' && p?.selected_node)
   return selected.map((p: any, i: number) => {
     const spec = requestVnfs[i] ?? {}
+    const coreNf = String(p?.core_nf ?? p?.vnf_name ?? (spec as any).core_nf ?? (spec as any).name ?? `core-nf-${i + 1}`)
     return {
-      vnf: String(p?.vnf_name ?? (spec as any).name ?? `vnf-${i + 1}`),
+      vnf: coreNf,
+      core_nf: coreNf,
+      nf_type: String(p?.nf_type ?? (spec as any).nf_type ?? coreNf),
+      nf_role: String(p?.nf_role ?? (spec as any).nf_role ?? ''),
       node: String(p.selected_node),
       cpu_used: Number(p?.cpu_used ?? (spec as any).cpu ?? 0),
       mem_used: Number(p?.mem_used ?? (spec as any).mem ?? 0),
@@ -630,6 +693,7 @@ function pickTraceLinkDetails(chosen: any): LinkDetail[] {
       bandwidth_available_gbps: Number(l?.bandwidth_available_gbps ?? 0),
       bandwidth_required_gbps: Number(l?.bandwidth_required_gbps ?? 0),
       status: String(l?.status ?? 'active'),
+      fault_tag: String(l?.fault_tag ?? ''),
       reliability: Number(l?.reliability ?? 0),
     })
   })
@@ -656,7 +720,7 @@ function mergeNodesForContinuousMotion(current: SatelliteData[], incoming: any[]
       node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
       status: String(src.status ?? sat.status ?? 'active'),
       fault_tag: String(src.fault_tag ?? sat.fault_tag ?? ''),
-      vnfs: Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs,
+      vnfs: Array.isArray(src.core_nfs) ? src.core_nfs : (Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs),
     }
   })
 }
@@ -681,6 +745,7 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
       bandwidth_gbps: Number(src.bandwidth_gbps ?? lk.bandwidth_gbps ?? 0),
       bandwidth_available_gbps: Number(src.bandwidth_available_gbps ?? lk.bandwidth_available_gbps ?? lk.bandwidth_gbps ?? 0),
       reliability: Number(src.reliability ?? src.link_reliability ?? lk.reliability ?? 0.999),
+      fault_tag: String(src.fault_tag ?? lk.fault_tag ?? ''),
       __resource_status: resourceStatus,
       __resource_status_seed: resourceStatus,
       // Keep current visual/link-topology status stable in realtime mode to avoid
@@ -740,7 +805,10 @@ export const useStore = create<Store>((set, get) => ({
     last_resource_sync_at: '',
   },
 
-  setSatellites: (s) => set({ satellites: s }),
+  setSatellites: (s) => set((st) => ({
+    satellites: s,
+    selectedSatellite: remapSelectedSatellite(st.selectedSatellite, s),
+  })),
   setLinks: (l) => {
     set({ links: l, selectedLink: null })
     get().refreshDeploymentPaths()
@@ -823,10 +891,12 @@ export const useStore = create<Store>((set, get) => ({
         if (idx >= 0) {
           const frame = next.history[idx]
           const nextLinks = frame.links as LinkData[]
+          const nextSats = frame.nodes as SatelliteData[]
           return {
             simulation: { ...next, history_cursor: idx },
-            satellites: frame.nodes,
+            satellites: nextSats,
             links: nextLinks,
+            selectedSatellite: remapSelectedSatellite(s.selectedSatellite, nextSats),
             selectedLink: remapSelectedLink(s.selectedLink, nextLinks),
             topologyVersion: frame.topology_version || s.topologyVersion,
           }
@@ -843,6 +913,7 @@ export const useStore = create<Store>((set, get) => ({
       const idx = Math.max(0, Math.min(history.length - 1, cursor))
       const frame = history[idx]
       const nextLinks = frame.links as LinkData[]
+      const nextSats = frame.nodes as SatelliteData[]
       return {
         simulation: {
           ...s.simulation,
@@ -852,8 +923,9 @@ export const useStore = create<Store>((set, get) => ({
           topology_version: frame.topology_version || s.simulation.topology_version,
           metrics: frame.metrics ?? s.simulation.metrics,
         },
-        satellites: frame.nodes,
+        satellites: nextSats,
         links: nextLinks,
+        selectedSatellite: remapSelectedSatellite(s.selectedSatellite, nextSats),
         selectedLink: remapSelectedLink(s.selectedLink, nextLinks),
         topologyVersion: frame.topology_version || s.topologyVersion,
       }
@@ -900,6 +972,10 @@ export const useStore = create<Store>((set, get) => ({
       return {
         satellites: activeFrame ? activeFrame.nodes : s.satellites,
         links: activeLinks,
+        selectedSatellite: remapSelectedSatellite(
+          s.selectedSatellite,
+          (activeFrame ? activeFrame.nodes : s.satellites) as SatelliteData[]
+        ),
         selectedLink: remapSelectedLink(s.selectedLink, activeLinks),
         topologyVersion: activeFrame
           ? activeFrame.topology_version

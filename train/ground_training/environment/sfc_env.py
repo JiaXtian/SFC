@@ -73,6 +73,30 @@ class SFCEnvironment:
         if should_reset:
             self.topology = copy.deepcopy(self.original_topology)
 
+        if "vnf_sequence" not in sfc_request and "core_nf_sequence" in sfc_request:
+            sfc_request["vnf_sequence"] = list(sfc_request.get("core_nf_sequence", []))
+        if "vnf_sequence" not in sfc_request and "core_nfs" in sfc_request:
+            derived = []
+            for idx, nf in enumerate(sfc_request.get("core_nfs", [])):
+                bw_req = max(float(nf.get("bw_in", 0.0)), float(nf.get("bw_out", 0.0)))
+                derived.append(
+                    {
+                        "vnf_id": nf.get("core_nf_id", nf.get("name", f"core_nf_{idx}")),
+                        "vnf_type": nf.get("nf_type", nf.get("core_nf_type", "amf")),
+                        "core_nf_id": nf.get("core_nf_id", nf.get("name", f"core_nf_{idx}")),
+                        "core_nf_type": nf.get("core_nf_type", nf.get("nf_type", "amf")),
+                        "nf_type": nf.get("nf_type", nf.get("core_nf_type", "amf")),
+                        "nf_role": nf.get("nf_role", "control_plane"),
+                        "processing_weight": nf.get("processing_weight", 1.0),
+                        "stateful": nf.get("stateful", True),
+                        "cpu_required": nf.get("cpu", 0.0),
+                        "mem_required": nf.get("mem", 0.0),
+                        "disk_required_gb": nf.get("disk", 0.0),
+                        "bandwidth_required_gbps": nf.get("bandwidth_required_gbps", bw_req),
+                    }
+                )
+            sfc_request["vnf_sequence"] = derived
+
         self.sfc_request = sfc_request
         self.current_vnf_idx = 0
         self.prev_node = sfc_request["source_node"]

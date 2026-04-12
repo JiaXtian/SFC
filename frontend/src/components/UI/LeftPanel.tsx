@@ -58,7 +58,8 @@ const IMPORT_EXAMPLE_JSON = `{
         "mem_available": 64,
         "disk_total": 320,
         "disk_available": 320,
-        "vnfs": []
+        "vnfs": [],
+        "core_nfs": []
       }
     ],
     "links": [

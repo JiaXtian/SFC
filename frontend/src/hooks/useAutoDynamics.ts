@@ -174,6 +174,14 @@ function remapSelectedLink(selectedLink: any, links: any[]) {
   return found ?? null
 }
 
+function remapSelectedSatellite(selectedSatellite: any, satellites: any[]) {
+  if (!selectedSatellite) return null
+  const selectedId = String(selectedSatellite?.id ?? '')
+  if (!selectedId) return null
+  const found = satellites.find((s: any) => String(s?.id ?? '') === selectedId)
+  return found ?? null
+}
+
 export function useAutoDynamics() {
   const rafRef = useRef<number | null>(null)
   const lastTsRef = useRef<number>(performance.now())
@@ -211,7 +219,7 @@ export function useAutoDynamics() {
               node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
               status: String(src.status ?? sat.status ?? 'active'),
               fault_tag: String(src.fault_tag ?? sat.fault_tag ?? ''),
-              vnfs: Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs,
+              vnfs: Array.isArray(src.core_nfs) ? src.core_nfs : (Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs),
             }
           })
 
@@ -232,6 +240,7 @@ export function useAutoDynamics() {
               bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
               bandwidth_available_gbps: Number(src.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? 0),
               reliability: Number(src.reliability ?? src.link_reliability ?? l.reliability ?? 0.999),
+              fault_tag: String(src.fault_tag ?? l.fault_tag ?? ''),
               __resource_status: resourceStatus,
               __resource_status_seed: resourceStatus,
               // Preserve the current visual status; only resource status is refreshed
@@ -240,9 +249,11 @@ export function useAutoDynamics() {
             }
           })
           const selectedLink = remapSelectedLink(s.selectedLink, mergedLinks)
+          const selectedSatellite = remapSelectedSatellite(s.selectedSatellite, mergedNodes)
           return {
             satellites: mergedNodes,
             links: mergedLinks,
+            selectedSatellite,
             selectedLink,
             autoDynamics: {
               ...s.autoDynamics,
@@ -347,16 +358,17 @@ export function useAutoDynamics() {
             const prev = prevByPair.get(pairKey(src, dst))
             if (!a || !b) {
               const fallbackBw = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
-              return {
-                source: src,
-                target: dst,
-                link_type: linkType,
-                bandwidth_gbps: fallbackBw,
-                bandwidth_available_gbps: 0,
-                reliability: Number(prev?.reliability ?? 0.8),
-                __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
-                __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
-                __dynamic_up: false,
+            return {
+              source: src,
+              target: dst,
+              link_type: linkType,
+              bandwidth_gbps: fallbackBw,
+              bandwidth_available_gbps: 0,
+              reliability: Number(prev?.reliability ?? 0.8),
+              fault_tag: String(prev?.fault_tag ?? 'topology_inconsistent'),
+              __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
+              __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
+              __dynamic_up: false,
                 status: 'down' as LinkStatus,
                 latency_ms: Number(prev?.latency_ms ?? 0),
               }
@@ -391,6 +403,9 @@ export function useAutoDynamics() {
               bandwidth_gbps: bwTotal,
               bandwidth_available_gbps: bwAvail,
               reliability,
+              fault_tag: nextStatus === 'down'
+                ? String(prev?.fault_tag ?? (resourceStatus === 'down' ? 'resource_or_link_fault' : 'line_of_sight_loss'))
+                : '',
               __resource_status_seed: seededResourceStatus,
               __resource_status: resourceStatus,
               __dynamic_up: up,
@@ -403,6 +418,7 @@ export function useAutoDynamics() {
           useStore.setState((prev) => ({
             satellites: newSats,
             links: newLinks,
+            selectedSatellite: remapSelectedSatellite(prev.selectedSatellite, newSats),
             selectedLink: remapSelectedLink(prev.selectedLink, newLinks),
             simulation: {
               ...prev.simulation,

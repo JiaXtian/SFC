@@ -171,9 +171,11 @@ export default function DynamicPanel() {
     return found ?? decisionTraces[0]
   }, [decisionTraces, selectedTraceKey])
   const selectedAttempt = useMemo(() => pickSelectedAttempt(selectedTrace ?? undefined), [selectedTrace])
-  const perVnfSteps = Array.isArray(selectedAttempt?.decision_process?.per_vnf)
-    ? selectedAttempt.decision_process.per_vnf
-    : []
+  const perVnfSteps = Array.isArray(selectedAttempt?.decision_process?.per_core_nf)
+    ? selectedAttempt.decision_process.per_core_nf
+    : (Array.isArray(selectedAttempt?.decision_process?.per_vnf)
+      ? selectedAttempt.decision_process.per_vnf
+      : [])
 
   return (
     <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs text-slate-200">
@@ -431,7 +433,7 @@ export default function DynamicPanel() {
                   )}
                   {perVnfSteps.slice(0, 8).map((p: any, i: number) => (
                     <div key={i} className="rounded px-2 py-1 border border-slate-800 bg-slate-950/40">
-                      VNF{i + 1} {p.vnf_name ?? '-'}: {p.prev_node ?? '-'} → {p.selected_node ?? '-'}
+                      核心网网元{i + 1} {p.core_nf ?? p.vnf_name ?? '-'}: {p.prev_node ?? '-'} → {p.selected_node ?? '-'}
                     </div>
                   ))}
                 </div>

@@ -189,7 +189,7 @@ export default function DeploymentPanel() {
                     </div>
                   )}
                   <div className="mt-2">
-                    <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">VNF 详情</div>
+                    <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
                     <div className="space-y-1">
                       {dep.per_vnf?.map((v, i) => (
                         <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[12px]"
@@ -197,7 +197,8 @@ export default function DeploymentPanel() {
                           <div className="flex items-center gap-2">
                             <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[9px] font-bold"
                               style={{ background: 'rgba(0,255,136,0.2)', color: '#00ff88' }}>{i+1}</span>
-                            <span className="font-medium text-gray-300">{v.vnf}</span>
+                            <span className="font-medium text-gray-300">{(v as any).core_nf ?? v.vnf}</span>
+                            <span className="text-[10px] text-cyan-300">{(v as any).nf_type ?? '-'}</span>
                             <span className="text-gray-700">→</span>
                             <span className="font-mono text-green-400">{v.node}</span>
                           </div>

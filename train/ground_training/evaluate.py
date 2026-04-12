@@ -307,7 +307,7 @@ def _episode_infer(env, trainer, gnn, agent, heuristic, request):
     state = env.reset(request, reset_resources=True)
     info = {}
 
-    max_steps = max(12, len(request.get("vnf_sequence", [])) + 2)
+    max_steps = max(12, len(request.get("vnf_sequence", request.get("core_nf_sequence", []))) + 2)
     for _ in range(max_steps):
         vnf = state.get("vnf")
         prev_node = state.get("prev_node")
@@ -419,7 +419,7 @@ def main():
     gnn.load_state_dict(torch.load(str(gnn_checkpoint), map_location=args.device))
     gnn.eval()
 
-    agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=48, device=args.device)
+    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=48, device=args.device)
     agent.load(str(model_checkpoint), load_optimizer=False)
     agent.actor.eval()
     agent.critic.eval()

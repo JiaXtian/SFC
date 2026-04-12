@@ -9,6 +9,26 @@ function defaultWsUrl() {
   return `${protocol}://${window.location.host}/ws/updates`
 }
 
+function faultTypeLabel(tag: string): string {
+  const map: Record<string, string> = {
+    power_failure: '供电故障',
+    cpu_overload: '计算过载',
+    thermal_shutdown: '过热停机',
+    control_plane_sync_loss: '控制面失步',
+    software_crash: '软件崩溃',
+    clock_drift: '时钟漂移',
+    optical_signal_loss: '光链路信号丢失',
+    beam_misalignment: '波束失准',
+    interference_jamming: '链路干扰',
+    routing_blackhole: '路由黑洞',
+    transceiver_failure: '收发器故障',
+    line_degradation: '链路退化',
+    endpoint_node_fault: '端点节点故障',
+    line_of_sight_loss: '视距中断',
+  }
+  return map[tag] ?? tag
+}
+
 export function useWebSocket() {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
@@ -114,13 +134,15 @@ export function useWebSocket() {
             if (type === 'fault_event' || type === 'recovery_event') {
               const label = type === 'fault_event' ? '故障事件' : '恢复事件'
               const entity = `${data.entity_type ?? 'entity'}:${data.entity_id ?? ''}`
+              const faultType = String(data.fault_type ?? data.reason ?? '')
+              const faultText = faultType ? ` (${faultTypeLabel(faultType)})` : ''
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `${label} ${entity}`,
+                message: `${label} ${entity}${faultText}`,
                 raw: data,
               })
-              addToast(`${label} ${entity}`, type === 'fault_event' ? 'warning' : 'success')
+              addToast(`${label} ${entity}${faultText}`, type === 'fault_event' ? 'warning' : 'success')
               return
             }
           } catch {

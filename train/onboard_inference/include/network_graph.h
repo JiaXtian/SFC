@@ -42,6 +42,12 @@ struct Link {
 struct VNFRequirement {
     std::string vnf_id;
     std::string vnf_type;
+    std::string core_nf_id;
+    std::string core_nf_type;
+    std::string nf_type;
+    std::string nf_role = "control_plane";
+    float processing_weight = 1.0f;
+    bool stateful = true;
     float cpu_required = 0.0f;
     float mem_required = 0.0f;
     float bandwidth_required_gbps = 0.0f;
@@ -51,6 +57,7 @@ struct VNFRequirement {
 struct SFCRequest {
     std::string request_id;
     std::string service_type;
+    std::string network_domain = "open5gs";
     std::vector<VNFRequirement> vnf_sequence;
     std::string source_node;
     std::string destination_node;

@@ -435,7 +435,7 @@ def main():
     print(f"动态样本序列: total={len(sequences)} train={len(train_sequences)} val={len(val_sequences)}")
 
     gnn = GNNEncoder(input_dim=8, hidden_dim=192, num_layers=4)
-    agent = DRLAgent(node_dim=192, vnf_dim=4, context_dim=args.context_dim, device=args.device)
+    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=args.context_dim, device=args.device)
     agent.actor_optimizer.add_param_group({"params": gnn.parameters(), "lr": 3e-5, "weight_decay": 1e-5})
 
     trainer = SFCTrainer(
@@ -524,6 +524,7 @@ def main():
                 json.dump(
                     {
                         "context_dim": args.context_dim,
+                        "vnf_feature_dim": 8,
                         "history_window": args.history_window,
                         "backend_align_context": args.backend_align_context,
                         "best_actor_checkpoint": "models/checkpoints/model_dynamic_best.pth",
@@ -549,6 +550,7 @@ def main():
         json.dump(
             {
                 "context_dim": args.context_dim,
+                "vnf_feature_dim": 8,
                 "history_window": args.history_window,
                 "backend_align_context": args.backend_align_context,
                 "best_actor_checkpoint": "models/checkpoints/model_dynamic_best.pth",
