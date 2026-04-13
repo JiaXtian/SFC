@@ -500,8 +500,13 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     trim_latency_window_locked();
     total_decisions_ += 1;
 
-    if (!response_candidates.empty()) {
-        auto chosen = response_candidates.front();
+    const auto chosen_it = std::find_if(
+        response_candidates.begin(),
+        response_candidates.end(),
+        [](const DeploymentCandidate& c) { return c.satisfies_constraints; }
+    );
+    if (chosen_it != response_candidates.end()) {
+        auto chosen = *chosen_it;
         chosen.per_vnf = ensure_per_vnf_filled(chosen, session.request);
         normalize_candidate_bandwidth_requirements(&chosen, session.request);
         const std::string sig = candidate_signature(chosen);
@@ -610,24 +615,28 @@ nlohmann::json DynamicInferenceService::evaluate_session(
 
     session.failures_total += 1;
     total_failures_ += 1;
+    const std::string pending_reason = response_candidates.empty()
+        ? "no_candidate"
+        : "no_deployable_candidate";
     WSHandler::broadcast_json(trace_payload);
     WSHandler::broadcast_json({
         {"type", "session_update"},
         {"session_id", session.session_id},
         {"request_id", session.request.request_id},
-        {"status", "decision_failed"},
+        {"status", "replanning"},
         {"trigger", trigger},
         {"topology_version", session.last_topology_version},
         {"sim_time", session.last_sim_time},
         {"path_changed", false},
-        {"reason", "no_candidate"}
+        {"reason", pending_reason}
     });
     return {
         {"session_id", session.session_id},
-        {"status", "decision_failed"},
+        {"status", "replanning"},
         {"topology_version", session.last_topology_version},
         {"sim_time", session.last_sim_time},
-        {"inference_time_ms", inference_ms}
+        {"inference_time_ms", inference_ms},
+        {"reason", pending_reason}
     };
 }
 
@@ -952,12 +961,15 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
         }
         if (trigger.empty()) {
             session.last_required_recompute_signature.clear();
+            session.last_required_recompute_topology_version = -1;
             continue;
         }
 
         const bool fault_driven = trigger != "topology_tick_bootstrap";
         const std::string reason_signature = trigger + "|" + disconnected_from + "->" + disconnected_to;
-        if (fault_driven && reason_signature == session.last_required_recompute_signature) {
+        const bool repeated_same_reason = fault_driven && reason_signature == session.last_required_recompute_signature;
+        if (repeated_same_reason &&
+            session.last_required_recompute_topology_version == snapshot.topology_version) {
             continue;
         }
         const bool had_prev = session.has_last_candidate;
@@ -965,6 +977,7 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
         auto result = evaluate_session(session, snapshot, trigger);
         if (fault_driven) {
             session.last_required_recompute_signature = reason_signature;
+            session.last_required_recompute_topology_version = snapshot.topology_version;
             recovery_attempts_this_tick += 1;
             total_recovery_attempts_ += 1;
             const std::string status = result.value("status", "");
@@ -1012,6 +1025,7 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
             });
         } else {
             session.last_required_recompute_signature.clear();
+            session.last_required_recompute_topology_version = -1;
         }
         decisions_this_tick += 1;
     }

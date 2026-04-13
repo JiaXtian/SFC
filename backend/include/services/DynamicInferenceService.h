@@ -53,6 +53,7 @@ private:
         bool has_last_candidate = false;
         std::string last_candidate_signature;
         std::string last_required_recompute_signature;
+        int last_required_recompute_topology_version = -1;
         nlohmann::json last_decision_trace;
         std::string active_resource_deployment_id;
     };

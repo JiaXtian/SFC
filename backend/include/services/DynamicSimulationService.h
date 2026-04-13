@@ -33,9 +33,9 @@ public:
     bool start(
         double sampling_interval_sec = 5.0,
         double simulation_speed = 1.0,
-        bool enable_faults = true,
-        double node_fault_prob_per_tick = 0.0002,
-        double link_fault_prob_per_tick = 0.0005
+        bool enable_faults = false,
+        double node_fault_prob_per_tick = 0.0,
+        double link_fault_prob_per_tick = 0.0
     );
 
     void stop();
@@ -53,7 +53,7 @@ private:
     TopologySnapshot advance_one_tick_locked(
         double sim_dt_sec,
         bool emit_events,
-        bool allow_random_fault_generation = true,
+        bool allow_random_fault_generation = false,
         bool advance_fault_timers = true
     );
     void run_loop();

@@ -36,7 +36,6 @@ export default function TimeAxis() {
     apiClient.startDynamicSimulation({
       sampling_interval_sec: samplingSec,
       simulation_speed: speed,
-      enable_faults: true,
     }).catch(() => {})
   }
 

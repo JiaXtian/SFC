@@ -28,6 +28,7 @@ export default function DeploymentPanel() {
     toggleHighlightedDeployment,
     applyTopologySnapshot,
     suppressSessionDeployment,
+    pushRuntimeEvent,
   } = useStore()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [expandedLinks, setExpandedLinks] = useState<Record<string, boolean>>({})
@@ -53,6 +54,15 @@ export default function DeploymentPanel() {
     setRolling(dep.deployment_id)
     setDeleteConfirm(null)
     try {
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `开始回滚 ${dep.sfc_name || dep.deployment_id}`,
+        raw: {
+          title: '部署回滚开始',
+          detail: `${dep.sfc_name || dep.deployment_id}`,
+          level: 'info',
+        },
+      })
       const rollbackTarget = dep.backend_deployment_id || dep.deployment_id
       await apiClient.rollbackDeployment(rollbackTarget)
       if ((dep as any).session_id) {
@@ -62,6 +72,15 @@ export default function DeploymentPanel() {
         suppressSessionDeployment((dep as any).session_id)
       }
       removeDeployment(dep.deployment_id)
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `回滚完成 ${dep.sfc_name || dep.deployment_id}`,
+        raw: {
+          title: '部署回滚完成',
+          detail: `${dep.sfc_name || dep.deployment_id} 资源已释放`,
+          level: 'ok',
+        },
+      })
       
       // 回滚后合并后端快照，保留当前动态位置连续性，仅刷新资源态
       try {
@@ -72,6 +91,15 @@ export default function DeploymentPanel() {
         console.warn('[资源释放] 刷新失败:', e)
       }
     } catch (e: any) { 
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `回滚失败 ${dep.sfc_name || dep.deployment_id}`,
+        raw: {
+          title: '部署回滚失败',
+          detail: `${dep.sfc_name || dep.deployment_id} · ${e?.message ?? e}`,
+          level: 'warn',
+        },
+      })
       alert(`回滚失败: ${e.message ?? e}`) 
     }
     setRolling(null)
@@ -148,7 +176,7 @@ export default function DeploymentPanel() {
                 <div className="flex flex-wrap gap-1 mt-1.5">
                   {dep.satisfies_constraints === false && (
                     <span className="px-2 py-0.5 rounded text-[10px] font-semibold" style={{ background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(248,113,113,0.35)', color: '#fda4af' }}>
-                      强制部署(不满足约束)
+                      约束未满足（等待重算）
                     </span>
                   )}
                   {dep.source_node && (
@@ -177,11 +205,11 @@ export default function DeploymentPanel() {
                 <div className="px-3 pb-3 space-y-2" style={{ borderTop: '1px solid rgba(100,100,120,0.08)' }}>
                   {dep.satisfies_constraints === false && (
                     <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
-                      <div className="text-[13px] text-rose-300 font-semibold mb-1">强制部署原因</div>
+                      <div className="text-[13px] text-rose-300 font-semibold mb-1">等待可部署方案</div>
                       <div className="space-y-0.5">
                         {(toChineseFailureList(dep.violation_details).length > 0
                           ? toChineseFailureList(dep.violation_details)
-                          : ['当前候选不满足SLA硬约束，已按人工强制部署处理']
+                          : ['当前候选不满足SLA硬约束，系统正在持续路径重算/重调度']
                         ).map((reason, idx) => (
                           <div key={idx} className="text-[12px] text-rose-100">- {reason}</div>
                         ))}

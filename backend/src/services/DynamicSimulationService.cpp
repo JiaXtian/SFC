@@ -26,12 +26,7 @@ const std::vector<std::string> kNodeFaultTypes = {
 };
 
 const std::vector<std::string> kLinkFaultTypes = {
-    "optical_signal_loss",
-    "beam_misalignment",
-    "interference_jamming",
-    "routing_blackhole",
-    "transceiver_failure",
-    "line_degradation"
+    // Link fault injection is disabled. Keep placeholder for backward compatibility.
 };
 
 std::unordered_set<std::string> make_catalog_set(const std::vector<std::string>& values) {
@@ -39,14 +34,6 @@ std::unordered_set<std::string> make_catalog_set(const std::vector<std::string>&
 }
 
 const std::unordered_set<std::string> kNodeFaultTypeSet = make_catalog_set(kNodeFaultTypes);
-const std::unordered_set<std::string> kLinkFaultTypeSet = make_catalog_set(kLinkFaultTypes);
-
-std::string make_link_key(const std::string& source, const std::string& target) {
-    if (source <= target) {
-        return source + "->" + target;
-    }
-    return target + "->" + source;
-}
 
 std::vector<std::string> parse_target_ids(const nlohmann::json& req, const char* array_key, const char* scalar_key) {
     std::vector<std::string> out;
@@ -65,18 +52,6 @@ std::vector<std::string> parse_target_ids(const nlohmann::json& req, const char*
     return out;
 }
 
-bool split_link_id(const std::string& raw, std::string& source, std::string& target) {
-    const std::string seps[] = {"->", "|", ",", " "};
-    for (const auto& sep : seps) {
-        const auto pos = raw.find(sep);
-        if (pos == std::string::npos) continue;
-        source = raw.substr(0, pos);
-        target = raw.substr(pos + sep.size());
-        if (!source.empty() && !target.empty()) return true;
-    }
-    return false;
-}
-
 } // namespace
 
 DynamicSimulationService::DynamicSimulationService(
@@ -87,9 +62,9 @@ DynamicSimulationService::DynamicSimulationService(
     running_(false),
     sampling_interval_sec_(5.0),
     simulation_speed_(1.0),
-    enable_faults_(true),
-    node_fault_prob_per_tick_(0.0002),
-    link_fault_prob_per_tick_(0.0005),
+    enable_faults_(false),
+    node_fault_prob_per_tick_(0.0),
+    link_fault_prob_per_tick_(0.0),
     topology_version_(0),
     sim_elapsed_sec_(0.0),
     sim_epoch_(std::chrono::system_clock::now()),
@@ -144,9 +119,12 @@ bool DynamicSimulationService::start(
     std::lock_guard<std::mutex> lock(mutex_);
     sampling_interval_sec_ = clamp(sampling_interval_sec, 1.0, 30.0);
     simulation_speed_ = clamp(simulation_speed, 0.1, 20.0);
-    enable_faults_ = enable_faults;
-    node_fault_prob_per_tick_ = clamp(node_fault_prob_per_tick, 0.0, 0.1);
-    link_fault_prob_per_tick_ = clamp(link_fault_prob_per_tick, 0.0, 0.2);
+    (void)enable_faults;
+    (void)node_fault_prob_per_tick;
+    enable_faults_ = false;
+    node_fault_prob_per_tick_ = 0.0;
+    (void)link_fault_prob_per_tick;
+    link_fault_prob_per_tick_ = 0.0;
 
     if (running_) {
         spdlog::info(
@@ -166,10 +144,9 @@ bool DynamicSimulationService::start(
     last_wall_tick_ = std::chrono::steady_clock::now();
     loop_thread_ = std::thread(&DynamicSimulationService::run_loop, this);
     spdlog::info(
-        "Dynamic simulation started: interval={}s, speed={}x, faults={}",
+        "Dynamic simulation started: interval={}s, speed={}x, faults=manual_only",
         sampling_interval_sec_,
-        simulation_speed_,
-        enable_faults_ ? "on" : "off"
+        simulation_speed_
     );
     return true;
 }
@@ -214,22 +191,37 @@ TopologySnapshot DynamicSimulationService::get_latest_snapshot() const {
 
 nlohmann::json DynamicSimulationService::status_json() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    nlohmann::json node_fault_details = nlohmann::json::array();
+    for (const auto& kv : node_fault_states_) {
+        node_fault_details.push_back({
+            {"node_id", kv.first},
+            {"fault_type", kv.second.fault_type},
+            {"injection_mode", kv.second.injection_mode},
+            {"ttl_ticks", kv.second.ttl_ticks},
+            {"remaining_sec", kv.second.ttl_ticks * sampling_interval_sec_}
+        });
+    }
     return {
         {"running", running_.load()},
         {"sampling_interval_sec", sampling_interval_sec_},
         {"simulation_speed", simulation_speed_},
-        {"enable_faults", enable_faults_},
-        {"node_fault_prob_per_tick", node_fault_prob_per_tick_},
-        {"link_fault_prob_per_tick", link_fault_prob_per_tick_},
+        {"enable_faults", false},
+        {"node_fault_prob_per_tick", 0.0},
+        {"link_fault_prob_per_tick", 0.0},
+        {"auto_fault_injection_enabled", false},
         {"topology_version", topology_version_},
         {"sim_time", latest_snapshot_.sim_time},
         {"active_faults", {
             {"node", node_fault_states_.size()},
-            {"link", link_fault_states_.size()}
+            {"link", 0}
+        }},
+        {"active_fault_details", {
+            {"node", node_fault_details},
+            {"link", nlohmann::json::array()}
         }},
         {"fault_catalog", {
             {"node", node_fault_catalog()},
-            {"link", link_fault_catalog()}
+            {"link", nlohmann::json::array()}
         }},
         {"metrics", latest_snapshot_.to_json().value("metrics", nlohmann::json::object())}
     };
@@ -238,9 +230,11 @@ nlohmann::json DynamicSimulationService::status_json() const {
 nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& request) {
     TopologySnapshot snapshot;
     std::unordered_map<std::string, SnapshotListener> listeners;
-    std::vector<nlohmann::json> injected_events;
+    std::vector<nlohmann::json> events;
     std::vector<std::string> invalid_targets;
     int injected_count = 0;
+    int removed_count = 0;
+    int extended_count = 0;
     int skipped_existing = 0;
 
     {
@@ -255,6 +249,7 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
         }
 
         const std::string entity_type = request.value("entity_type", std::string("node"));
+        const std::string action = request.value("action", std::string("inject"));
         const bool overwrite_existing = request.value("overwrite_existing", true);
         const int requested_ttl = static_cast<int>(request.value("ttl_ticks", 4));
         const int ttl_ticks = static_cast<int>(clamp(static_cast<double>(requested_ttl), 1.0, 120.0));
@@ -286,112 +281,119 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                     invalid_targets.push_back(node_id);
                     continue;
                 }
-                if (!overwrite_existing && node_fault_states_.find(node_id) != node_fault_states_.end()) {
-                    skipped_existing += 1;
+
+                if (action == "inject") {
+                    if (!overwrite_existing && node_fault_states_.find(node_id) != node_fault_states_.end()) {
+                        skipped_existing += 1;
+                        continue;
+                    }
+
+                    const std::string requested_type = request.value("fault_type", std::string(""));
+                    const std::string fault_type =
+                        (requested_type.empty() || requested_type == "auto" || kNodeFaultTypeSet.find(requested_type) == kNodeFaultTypeSet.end())
+                            ? pick_node_fault_type()
+                            : requested_type;
+
+                    node_fault_states_[node_id] = FaultState{ttl_ticks, fault_type, "manual"};
+                    injected_count += 1;
+                    events.push_back({
+                        {"type", "fault_event"},
+                        {"entity_type", "node"},
+                        {"entity_id", node_id},
+                        {"fault_type", fault_type},
+                        {"reason", fault_type},
+                        {"injection_mode", "manual"},
+                        {"ttl_ticks", ttl_ticks},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
                     continue;
                 }
 
-                const std::string requested_type = request.value("fault_type", std::string(""));
-                const std::string fault_type =
-                    (requested_type.empty() || requested_type == "auto" || kNodeFaultTypeSet.find(requested_type) == kNodeFaultTypeSet.end())
-                        ? pick_node_fault_type()
-                        : requested_type;
+                auto it = node_fault_states_.find(node_id);
+                if (action == "remove") {
+                    if (it == node_fault_states_.end()) {
+                        invalid_targets.push_back(node_id);
+                        continue;
+                    }
+                    const std::string fault_type = it->second.fault_type;
+                    node_fault_states_.erase(it);
+                    removed_count += 1;
+                    events.push_back({
+                        {"type", "recovery_event"},
+                        {"entity_type", "node"},
+                        {"entity_id", node_id},
+                        {"fault_type", fault_type},
+                        {"reason", fault_type},
+                        {"injection_mode", "manual_remove"},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
+                    continue;
+                }
 
-                node_fault_states_[node_id] = FaultState{ttl_ticks, fault_type, "manual"};
-                injected_count += 1;
-                injected_events.push_back({
-                    {"type", "fault_event"},
-                    {"entity_type", "node"},
-                    {"entity_id", node_id},
-                    {"fault_type", fault_type},
-                    {"reason", fault_type},
-                    {"injection_mode", "manual"},
-                    {"ttl_ticks", ttl_ticks},
-                    {"sim_time", sim_time},
-                    {"topology_version", topology_version_ + 1}
-                });
+                if (action == "extend") {
+                    if (it == node_fault_states_.end()) {
+                        invalid_targets.push_back(node_id);
+                        continue;
+                    }
+                    int delta_ttl_ticks = static_cast<int>(request.value("delta_ttl_ticks", 0));
+                    if (delta_ttl_ticks <= 0 && request.contains("delta_seconds")) {
+                        const double delta_seconds = std::max(0.0, request.value("delta_seconds", 0.0));
+                        delta_ttl_ticks = static_cast<int>(std::ceil(delta_seconds / std::max(1.0, sampling_interval_sec_)));
+                    }
+                    delta_ttl_ticks = static_cast<int>(clamp(static_cast<double>(delta_ttl_ticks), 1.0, 3600.0));
+                    it->second.ttl_ticks = static_cast<int>(clamp(
+                        static_cast<double>(it->second.ttl_ticks + delta_ttl_ticks),
+                        1.0,
+                        7200.0
+                    ));
+                    extended_count += 1;
+                    events.push_back({
+                        {"type", "fault_update_event"},
+                        {"entity_type", "node"},
+                        {"entity_id", node_id},
+                        {"fault_type", it->second.fault_type},
+                        {"reason", "ttl_extended"},
+                        {"injection_mode", "manual_extend"},
+                        {"delta_ttl_ticks", delta_ttl_ticks},
+                        {"ttl_ticks", it->second.ttl_ticks},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
+                    continue;
+                }
             }
         } else if (entity_type == "link") {
-            std::unordered_map<std::string, std::pair<std::string, std::string>> existing_links;
-            for (const auto& link : topology.links) {
-                existing_links[make_link_key(link.source, link.target)] = {link.source, link.target};
-            }
-
-            std::vector<std::pair<std::string, std::string>> targets;
-            if (request.contains("links") && request["links"].is_array()) {
-                for (const auto& item : request["links"]) {
-                    if (!item.is_object()) continue;
-                    const std::string source = item.value("source", std::string(""));
-                    const std::string target = item.value("target", std::string(""));
-                    if (!source.empty() && !target.empty()) targets.emplace_back(source, target);
-                }
-            }
-            if (request.contains("link_ids") && request["link_ids"].is_array()) {
-                for (const auto& item : request["link_ids"]) {
-                    if (!item.is_string()) continue;
-                    std::string source;
-                    std::string target;
-                    if (split_link_id(item.get<std::string>(), source, target)) {
-                        targets.emplace_back(source, target);
-                    }
-                }
-            }
-            if (targets.empty()) {
-                const int batch_count_req = static_cast<int>(request.value("batch_count", 0));
-                if (batch_count_req > 0) {
-                    std::vector<std::pair<std::string, std::string>> candidates;
-                    candidates.reserve(topology.links.size());
-                    for (const auto& link : topology.links) {
-                        candidates.emplace_back(link.source, link.target);
-                    }
-                    std::shuffle(candidates.begin(), candidates.end(), rng_);
-                    const int batch_count = std::max(0, std::min(batch_count_req, static_cast<int>(candidates.size())));
-                    targets.assign(candidates.begin(), candidates.begin() + batch_count);
-                }
-            }
-
-            for (const auto& target : targets) {
-                const std::string key = make_link_key(target.first, target.second);
-                const auto found = existing_links.find(key);
-                if (found == existing_links.end()) {
-                    invalid_targets.push_back(target.first + "->" + target.second);
-                    continue;
-                }
-                if (!overwrite_existing && link_fault_states_.find(key) != link_fault_states_.end()) {
-                    skipped_existing += 1;
-                    continue;
-                }
-
-                const std::string requested_type = request.value("fault_type", std::string(""));
-                const std::string fault_type =
-                    (requested_type.empty() || requested_type == "auto" || kLinkFaultTypeSet.find(requested_type) == kLinkFaultTypeSet.end())
-                        ? pick_link_fault_type()
-                        : requested_type;
-
-                link_fault_states_[key] = FaultState{ttl_ticks, fault_type, "manual"};
-                injected_count += 1;
-                injected_events.push_back({
-                    {"type", "fault_event"},
-                    {"entity_type", "link"},
-                    {"entity_id", key},
-                    {"fault_type", fault_type},
-                    {"reason", fault_type},
-                    {"injection_mode", "manual"},
-                    {"ttl_ticks", ttl_ticks},
-                    {"sim_time", sim_time},
-                    {"topology_version", topology_version_ + 1}
-                });
-            }
+            return {
+                {"ok", false},
+                {"message", "Link fault injection is disabled; node faults only"},
+                {"action", action},
+                {"entity_type", entity_type},
+                {"injected", 0}
+            };
         } else {
             return {
                 {"ok", false},
                 {"message", "Unsupported entity_type"},
+                {"action", action},
                 {"entity_type", entity_type},
                 {"injected", 0}
             };
         }
 
-        if (injected_count > 0) {
+        if (action != "inject" && action != "remove" && action != "extend") {
+            return {
+                {"ok", false},
+                {"message", "Unsupported action"},
+                {"action", action},
+                {"entity_type", entity_type},
+                {"injected", 0}
+            };
+        }
+
+        const int changed_count = injected_count + removed_count + extended_count;
+        if (changed_count > 0) {
             snapshot = advance_one_tick_locked(0.0, false, false, false);
             listeners = snapshot_listeners_;
         } else {
@@ -399,7 +401,8 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
         }
     }
 
-    if (injected_count > 0 && !snapshot.topology.nodes.empty()) {
+    const int changed_count = injected_count + removed_count + extended_count;
+    if (changed_count > 0 && !snapshot.topology.nodes.empty()) {
         WSHandler::broadcast_json({
             {"type", "topology_tick"},
             {"snapshot", snapshot.to_json()}
@@ -411,7 +414,7 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
             {"metrics", snapshot.to_json()["metrics"]}
         });
     }
-    for (const auto& evt : injected_events) {
+    for (const auto& evt : events) {
         WSHandler::broadcast_json(evt);
     }
 
@@ -425,11 +428,14 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
 
     return {
         {"ok", true},
+        {"action", request.value("action", std::string("inject"))},
         {"entity_type", request.value("entity_type", std::string("node"))},
         {"injected", injected_count},
+        {"removed", removed_count},
+        {"extended", extended_count},
         {"skipped_existing", skipped_existing},
         {"invalid_targets", invalid_targets},
-        {"events", injected_events},
+        {"events", events},
         {"status", status_json()}
     };
 }
@@ -471,8 +477,6 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         if (sat.fault_tag.empty() && sat.status != "down") sat.status = "active";
     }
 
-    std::uniform_real_distribution<double> prob(0.0, 1.0);
-    std::uniform_int_distribution<int> ttl_ticks(2, 8);
     std::vector<nlohmann::json> change_events;
 
     for (auto it = node_fault_states_.begin(); it != node_fault_states_.end();) {
@@ -504,30 +508,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         }
     }
 
-    if (allow_random_fault_generation && enable_faults_) {
-        for (auto& sat : topology.nodes) {
-            if (node_fault_states_.find(sat.id) != node_fault_states_.end()) continue;
-            if (sat.status == "down") continue;
-            if (prob(rng_) < node_fault_prob_per_tick_) {
-                const std::string fault_type = pick_node_fault_type();
-                const int ttl = ttl_ticks(rng_);
-                node_fault_states_[sat.id] = FaultState{ttl, fault_type, "random"};
-                sat.status = "down";
-                sat.fault_tag = fault_type;
-                change_events.push_back({
-                    {"type", "fault_event"},
-                    {"entity_type", "node"},
-                    {"entity_id", sat.id},
-                    {"fault_type", fault_type},
-                    {"reason", fault_type},
-                    {"injection_mode", "random"},
-                    {"ttl_ticks", ttl},
-                    {"sim_time", sim_time},
-                    {"topology_version", topology_version_}
-                });
-            }
-        }
-    }
+    (void)allow_random_fault_generation;
 
     for (auto& sat : topology.nodes) {
         const auto fault_it = node_fault_states_.find(sat.id);
@@ -537,25 +518,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         }
     }
 
-    for (auto it = link_fault_states_.begin(); it != link_fault_states_.end();) {
-        if (advance_fault_timers) {
-            it->second.ttl_ticks -= 1;
-        }
-        if (advance_fault_timers && it->second.ttl_ticks <= 0) {
-            change_events.push_back({
-                {"type", "recovery_event"},
-                {"entity_type", "link"},
-                {"entity_id", it->first},
-                {"fault_type", it->second.fault_type},
-                {"reason", it->second.fault_type},
-                {"sim_time", sim_time},
-                {"topology_version", topology_version_}
-            });
-            it = link_fault_states_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    link_fault_states_.clear();
 
     std::unordered_map<std::string, const Satellite*> node_map;
     node_map.reserve(topology.nodes.size() * 2);
@@ -568,7 +531,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const auto dst_it = node_map.find(link.target);
         if (src_it == node_map.end() || dst_it == node_map.end()) {
             link.status = "down";
-            link.fault_tag = "topology_inconsistent";
+            link.fault_tag.clear();
             link.bandwidth_available_gbps = 0.0;
             continue;
         }
@@ -581,33 +544,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const double alt_km = std::max(src->orbital_params.altitude_km, dst->orbital_params.altitude_km);
         const bool los_ok = d_km <= max_isl_range_km(alt_km);
         const bool endpoint_down = src->status == "down" || dst->status == "down";
-        const std::string lk = make_link_key(link.source, link.target);
-
-        if (allow_random_fault_generation && enable_faults_ && !endpoint_down && los_ok &&
-            link_fault_states_.find(lk) == link_fault_states_.end() && prob(rng_) < link_fault_prob_per_tick_) {
-            const std::string fault_type = pick_link_fault_type();
-            const int ttl = ttl_ticks(rng_);
-            link_fault_states_[lk] = FaultState{ttl, fault_type, "random"};
-            change_events.push_back({
-                {"type", "fault_event"},
-                {"entity_type", "link"},
-                {"entity_id", lk},
-                {"fault_type", fault_type},
-                {"reason", fault_type},
-                {"injection_mode", "random"},
-                {"ttl_ticks", ttl},
-                {"sim_time", sim_time},
-                {"topology_version", topology_version_}
-            });
-        }
-
-        const auto link_fault_it = link_fault_states_.find(lk);
-        if (link_fault_it != link_fault_states_.end()) {
-            link.status = "down";
-            link.fault_tag = link_fault_it->second.fault_type;
-            link.bandwidth_available_gbps = 0.0;
-            continue;
-        }
+        (void)allow_random_fault_generation;
         if (endpoint_down) {
             link.status = "down";
             link.fault_tag = "endpoint_node_fault";
@@ -616,7 +553,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         }
         if (!los_ok) {
             link.status = "down";
-            link.fault_tag = "line_of_sight_loss";
+            link.fault_tag.clear();
             link.bandwidth_available_gbps = 0.0;
             continue;
         }

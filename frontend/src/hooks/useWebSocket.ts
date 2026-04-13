@@ -67,6 +67,12 @@ export function useWebSocket() {
                 status: data.status ?? 'completed',
                 progress: Number(data.progress ?? 100),
               })
+              pushRuntimeEvent({
+                type: 'deployment_update',
+                sim_time: data.sim_time,
+                message: `部署进度 ${String(data.deployment_id ?? '')}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
+                raw: data,
+              })
               return
             }
             if (type === 'topology_tick') {
@@ -131,8 +137,10 @@ export function useWebSocket() {
               })
               return
             }
-            if (type === 'fault_event' || type === 'recovery_event') {
-              const label = type === 'fault_event' ? '故障事件' : '恢复事件'
+            if (type === 'fault_event' || type === 'recovery_event' || type === 'fault_update_event') {
+              const label = type === 'fault_event'
+                ? '故障事件'
+                : (type === 'recovery_event' ? '恢复事件' : '故障更新')
               const entity = `${data.entity_type ?? 'entity'}:${data.entity_id ?? ''}`
               const faultType = String(data.fault_type ?? data.reason ?? '')
               const faultText = faultType ? ` (${faultTypeLabel(faultType)})` : ''
@@ -142,7 +150,10 @@ export function useWebSocket() {
                 message: `${label} ${entity}${faultText}`,
                 raw: data,
               })
-              addToast(`${label} ${entity}${faultText}`, type === 'fault_event' ? 'warning' : 'success')
+              addToast(
+                `${label} ${entity}${faultText}`,
+                type === 'fault_event' ? 'warning' : (type === 'recovery_event' ? 'success' : 'info'),
+              )
               return
             }
           } catch {

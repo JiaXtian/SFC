@@ -21,9 +21,6 @@ class APIClient {
   async startDynamicSimulation(p: {
     sampling_interval_sec?: number
     simulation_speed?: number
-    enable_faults?: boolean
-    node_fault_prob_per_tick?: number
-    link_fault_prob_per_tick?: number
   } = {}) {
     return (await http.post('/topology/dynamic/start', p)).data
   }
@@ -37,13 +34,14 @@ class APIClient {
   }
 
   async injectDynamicFaults(p: {
-    entity_type?: 'node' | 'link'
+    entity_type?: 'node'
+    action?: 'inject' | 'remove' | 'extend'
     node_id?: string
     node_ids?: string[]
-    links?: Array<{ source: string; target: string }>
-    link_ids?: string[]
     fault_type?: string
     ttl_ticks?: number
+    delta_ttl_ticks?: number
+    delta_seconds?: number
     batch_count?: number
     only_active?: boolean
     overwrite_existing?: boolean

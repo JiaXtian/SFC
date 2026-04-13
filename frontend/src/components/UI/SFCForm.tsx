@@ -15,7 +15,6 @@ import {
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
-import type { LinkData, SatelliteData } from '@/utils/constellationGenerator'
 import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
 
 const vnfTemplates = {
@@ -41,224 +40,6 @@ interface VNFConfig {
   bw_in: number
   bw_out: number
   disk?: number
-}
-
-type GraphEdge = {
-  to: string
-  latencyMs: number
-  bandwidthGbps: number
-  bandwidthAvailableGbps: number
-  reliability: number
-}
-
-function makeLinkKey(a: string, b: string) {
-  return `${a}|${b}`
-}
-
-function buildGraph(links: LinkData[]) {
-  const graph = new Map<string, GraphEdge[]>()
-  const edgeByKey = new Map<string, GraphEdge>()
-  links.forEach((l: any) => {
-    const a = String(l?.source ?? '')
-    const b = String(l?.target ?? '')
-    if (!a || !b || a === b) return
-    const status = String(l?.status ?? 'active')
-    const bwAvail = Number(l?.bandwidth_available_gbps ?? l?.bandwidth_gbps ?? 0)
-    const bwTotal = Number(l?.bandwidth_gbps ?? 0)
-    if (status === 'down' || bwAvail <= 0 || bwTotal <= 0) return
-    const latencyMs = Math.max(0.01, Number(l?.latency_ms ?? 1))
-    const reliability = Math.max(0, Math.min(1, Number(l?.reliability ?? l?.link_reliability ?? 0.999)))
-    const ab: GraphEdge = { to: b, latencyMs, bandwidthGbps: bwTotal, bandwidthAvailableGbps: bwAvail, reliability }
-    const ba: GraphEdge = { to: a, latencyMs, bandwidthGbps: bwTotal, bandwidthAvailableGbps: bwAvail, reliability }
-    if (!graph.has(a)) graph.set(a, [])
-    if (!graph.has(b)) graph.set(b, [])
-    graph.get(a)!.push(ab)
-    graph.get(b)!.push(ba)
-    edgeByKey.set(makeLinkKey(a, b), ab)
-    edgeByKey.set(makeLinkKey(b, a), ba)
-  })
-  return { graph, edgeByKey }
-}
-
-function shortestPath(graph: Map<string, GraphEdge[]>, source: string, target: string): string[] {
-  if (!source || !target) return []
-  if (source === target) return [source]
-  const dist = new Map<string, number>()
-  const prev = new Map<string, string>()
-  const visited = new Set<string>()
-  const nodes = new Set<string>()
-  graph.forEach((_, key) => nodes.add(key))
-  nodes.add(source)
-  nodes.add(target)
-  nodes.forEach((n) => dist.set(n, Number.POSITIVE_INFINITY))
-  dist.set(source, 0)
-
-  while (visited.size < nodes.size) {
-    let bestNode = ''
-    let bestDist = Number.POSITIVE_INFINITY
-    nodes.forEach((n) => {
-      if (visited.has(n)) return
-      const d = dist.get(n) ?? Number.POSITIVE_INFINITY
-      if (d < bestDist) {
-        bestDist = d
-        bestNode = n
-      }
-    })
-    if (!bestNode || !Number.isFinite(bestDist)) break
-    if (bestNode === target) break
-    visited.add(bestNode)
-    const edges = graph.get(bestNode) ?? []
-    edges.forEach((e) => {
-      if (visited.has(e.to)) return
-      const nd = bestDist + e.latencyMs
-      if (nd < (dist.get(e.to) ?? Number.POSITIVE_INFINITY)) {
-        dist.set(e.to, nd)
-        prev.set(e.to, bestNode)
-      }
-    })
-  }
-
-  if (!prev.has(target)) return []
-  const path = [target]
-  let cur = target
-  for (let i = 0; i < nodes.size + 2; i++) {
-    const p = prev.get(cur)
-    if (!p) break
-    path.push(p)
-    if (p === source) break
-    cur = p
-  }
-  if (path[path.length - 1] !== source) return []
-  return path.reverse()
-}
-
-function buildFallbackCandidate(args: {
-  satellites: SatelliteData[]
-  links: LinkData[]
-  sourceNode: string
-  destinationNode: string
-  vnfs: Array<{ name: string; cpu: number; mem: number; disk: number }>
-  constraints: { max_latency_ms: number; min_bandwidth_gbps: number; min_reliability: number }
-}) {
-  const { satellites, links, sourceNode, destinationNode, vnfs, constraints } = args
-  const satMap = new Map<string, any>()
-  satellites.forEach((s: any) => satMap.set(String(s.id), s))
-  const { graph, edgeByKey } = buildGraph(links)
-  const basePath = shortestPath(graph, sourceNode, destinationNode)
-  if (basePath.length < 2) return null
-
-  const availableByNode = new Map<string, { cpu: number; mem: number; disk: number }>()
-  basePath.forEach((nodeId) => {
-    const n: any = satMap.get(nodeId)
-    if (!n) return
-    availableByNode.set(nodeId, {
-      cpu: Number(n.cpu_available ?? 0),
-      mem: Number(n.mem_available ?? 0),
-      disk: Number(n.disk_available ?? 0),
-    })
-  })
-
-  const per_vnf: any[] = []
-  const deployed_nodes: string[] = []
-  let scanStartIdx = 0
-  for (let i = 0; i < vnfs.length; i++) {
-    const v = vnfs[i]
-    let selectedNode = ''
-    for (let k = scanStartIdx; k < basePath.length; k++) {
-      const nodeId = basePath[k]
-      const avail = availableByNode.get(nodeId)
-      if (!avail) continue
-      if (avail.cpu >= v.cpu && avail.mem >= v.mem && avail.disk >= v.disk) {
-        avail.cpu -= v.cpu
-        avail.mem -= v.mem
-        avail.disk -= v.disk
-        selectedNode = nodeId
-        scanStartIdx = k
-        break
-      }
-    }
-    if (!selectedNode) {
-      return null
-    }
-    deployed_nodes.push(selectedNode)
-    per_vnf.push({
-      vnf: v.name || `core-nf-${i + 1}`,
-      core_nf: v.name || `core-nf-${i + 1}`,
-      nf_type: v.name || `core-nf-${i + 1}`,
-      nf_role: (v as any).type === 'upf' ? 'user_plane' : 'control_plane',
-      node: selectedNode,
-      cpu_used: Number(v.cpu),
-      mem_used: Number(v.mem),
-      disk_used: Number(v.disk),
-    })
-  }
-
-  const anchors = [sourceNode, ...deployed_nodes, destinationNode]
-    .filter(Boolean)
-    .filter((n, idx, arr) => idx === 0 || n !== arr[idx - 1])
-  const link_details: any[] = []
-  let fullPathNodes: string[] = [anchors[0]]
-
-  for (let i = 0; i + 1 < anchors.length; i++) {
-    const seg = shortestPath(graph, anchors[i], anchors[i + 1])
-    if (seg.length < 2) return null
-    for (let j = 0; j + 1 < seg.length; j++) {
-      const src = seg[j]
-      const dst = seg[j + 1]
-      const edge = edgeByKey.get(makeLinkKey(src, dst))
-      if (!edge) return null
-      link_details.push({
-        src,
-        dst,
-        latency_ms: edge.latencyMs,
-        bandwidth_gbps: edge.bandwidthGbps,
-        bandwidth_available_gbps: edge.bandwidthAvailableGbps,
-        bandwidth_required_gbps: 0,
-        status: 'active',
-        reliability: edge.reliability,
-      })
-      if (fullPathNodes[fullPathNodes.length - 1] !== src) fullPathNodes.push(src)
-      fullPathNodes.push(dst)
-    }
-  }
-
-  const totalLatency = link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
-  const bottleneckBw = link_details.length > 0
-    ? Math.min(...link_details.map((l) => Number(l.bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0)))
-    : 0
-  const linkReliability = link_details.reduce((acc, l) => acc * Math.max(1e-9, Number(l.reliability ?? 0.999)), 1)
-  const nodeReliability = deployed_nodes.reduce((acc, nodeId) => {
-    const rel = Number((satMap.get(nodeId) as any)?.node_reliability ?? 0.998)
-    return acc * Math.max(1e-9, Math.min(1, rel))
-  }, 1)
-  const estimatedReliability = linkReliability * nodeReliability
-
-  const violation_details: string[] = []
-  if (Number.isFinite(constraints.max_latency_ms) && constraints.max_latency_ms > 0 && totalLatency > constraints.max_latency_ms) {
-    violation_details.push(`端到端时延超限：${totalLatency.toFixed(2)}ms > ${constraints.max_latency_ms}ms`)
-  }
-  if (Number.isFinite(constraints.min_bandwidth_gbps) && constraints.min_bandwidth_gbps > 0 && bottleneckBw < constraints.min_bandwidth_gbps) {
-    violation_details.push(`瓶颈带宽不足：${bottleneckBw.toFixed(3)}Gbps < ${constraints.min_bandwidth_gbps}Gbps`)
-  }
-  if (Number.isFinite(constraints.min_reliability) && constraints.min_reliability > 0 && estimatedReliability < constraints.min_reliability) {
-    violation_details.push(`可靠性不足：${estimatedReliability.toFixed(4)} < ${constraints.min_reliability.toFixed(4)}`)
-  }
-  const satisfies_constraints = violation_details.length === 0
-
-  return {
-    score: 0,
-    reason: satisfies_constraints ? '' : violation_details[0] ?? '仅找到保底路径候选（不满足SLA）',
-    satisfies_constraints,
-    deployed_nodes,
-    per_vnf,
-    path_nodes: fullPathNodes,
-    link_details,
-    total_latency_ms: totalLatency,
-    bottleneck_bandwidth_gbps: bottleneckBw,
-    estimated_reliability: estimatedReliability,
-    violation_details,
-    __fallback: true,
-  }
 }
 
 const sfcTemplates = [
@@ -322,7 +103,7 @@ function FoldHeader({
 }
 
 export default function SFCForm() {
-  const { setCandidateResult, addToast, topologyVersion, backendTopologySynced, satellites, links, simulation } = useStore()
+  const { setCandidateResult, addToast, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
 
   const [mode, setMode] = useState<'template' | 'custom'>('template')
   const [selectedTemplate, setSelectedTemplate] = useState(0)
@@ -353,7 +134,6 @@ export default function SFCForm() {
   const [trafficEndpoints, setTrafficEndpoints] = useState({
     source_node: DEFAULT_SOURCE_NODE,
     destination_node: DEFAULT_DESTINATION_NODE,
-    priority: 'medium',
   })
 
   const [showRuntimeContext, setShowRuntimeContext] = useState(false)
@@ -522,7 +302,6 @@ export default function SFCForm() {
         sim_time: simulation.sim_time,
         source_node: trafficEndpoints.source_node,
         destination_node: trafficEndpoints.destination_node,
-        priority: trafficEndpoints.priority,
         core_nfs: coreNfs,
         core_nf_sequence: coreNfs,
         vnfs: coreNfs,
@@ -578,31 +357,7 @@ export default function SFCForm() {
       })
       const sortedCandidates = scoredCandidates.sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
 
-      let finalCandidates = sortedCandidates
-      if (finalCandidates.length === 0) {
-        const fallback = buildFallbackCandidate({
-          satellites: satellites as SatelliteData[],
-          links: links as LinkData[],
-          sourceNode: trafficEndpoints.source_node,
-          destinationNode: trafficEndpoints.destination_node,
-          vnfs: payload.core_nfs,
-          constraints: sfc.constraints,
-        })
-        if (fallback) {
-          const fallbackScore = computeScoreBreakdown({
-            totalLatencyMs: Number(fallback.total_latency_ms ?? 0),
-            bottleneckBandwidthGbps: Number(fallback.bottleneck_bandwidth_gbps ?? 0),
-            estimatedReliability: Number(fallback.estimated_reliability ?? 0),
-            deployedNodeIds: fallback.deployed_nodes ?? [],
-            vnfCount: payload.core_nfs.length,
-            constraints: sfc.constraints,
-            weights: activeWeights,
-            satellites,
-          })
-          finalCandidates = [{ ...fallback, score: fallbackScore.total }]
-          addToast('后端未返回候选，已生成本地保底候选策略', 'warning')
-        }
-      }
+      const finalCandidates = sortedCandidates
 
       if (finalCandidates.length === 0) {
         const errorMsg = toChineseFailureText(result.error || 'No feasible deployment found')
@@ -619,7 +374,24 @@ export default function SFCForm() {
 
       const feasible = finalCandidates.filter((c: any) => c.satisfies_constraints)
       if (feasible.length === 0) {
-        addToast('未找到完全满足约束的方案，已展示候选供人工决策', 'warning')
+        const reasonPool: string[] = []
+        finalCandidates.forEach((cand: any, idx: number) => {
+          const detailList = toChineseFailureList(
+            Array.isArray(cand?.violation_details) && cand.violation_details.length > 0
+              ? cand.violation_details
+              : cand?.reason
+          )
+          if (detailList.length === 0) {
+            reasonPool.push(`候选方案 #${idx + 1}: 未返回详细失败原因（可能由资源、链路或SLA约束导致）`)
+            return
+          }
+          detailList.forEach((d) => reasonPool.push(`候选方案 #${idx + 1}: ${d}`))
+        })
+        const uniqReasons = Array.from(new Set(reasonPool)).slice(0, 12)
+        addToast('未找到满足约束的可部署方案', 'error')
+        alert(`未找到满足约束的可部署方案\n\n详细原因:\n${uniqReasons.join('\n')}`)
+        setBusy(false)
+        return
       }
 
       setCandidateResult({
@@ -632,7 +404,7 @@ export default function SFCForm() {
         topologyVersion: Number(result.topology_version ?? topologyVersion),
         requestedTopk: sfc.topk || 1,
         warning: result.warning || '',
-        fallbackOnly: !!result.fallback_only || feasible.length === 0,
+        fallbackOnly: false,
         deployableCount: typeof result.deployable_count === 'number' ? result.deployable_count : feasible.length,
         scoringConfig: {
           optimize: optimizeMode,
@@ -656,11 +428,7 @@ export default function SFCForm() {
         },
       })
 
-      if (feasible.length === 0) {
-        addToast(`生成 ${finalCandidates.length} 个候选方案（均不满足SLA，可人工选择）`, 'warning')
-      } else {
-        addToast(`生成 ${finalCandidates.length} 个候选方案`, 'success')
-      }
+      addToast(`生成 ${finalCandidates.length} 个候选方案`, 'success')
       if (result.warning || finalCandidates.length < (sfc.topk || 1)) {
         alert(toChineseFailureText(result.warning || `仅生成 ${finalCandidates.length} 个可行方案，少于请求的 Top-${sfc.topk || 1}。`))
       }
@@ -1056,22 +824,6 @@ export default function SFCForm() {
               placeholder="SAT_000_001"
               style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
             />
-          </div>
-          <div>
-            <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-              priority
-              <InfoHint text="请求优先级标签，和 priority_weight 一起影响编排偏好。" />
-            </div>
-            <select
-              value={trafficEndpoints.priority}
-              onChange={e => setTrafficEndpoints(prev => ({ ...prev, priority: e.target.value }))}
-              className="w-full px-2 py-1 rounded"
-              style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-            >
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-            </select>
           </div>
           <div />
         </div>

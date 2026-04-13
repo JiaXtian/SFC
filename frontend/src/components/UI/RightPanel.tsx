@@ -5,12 +5,13 @@ import DeploymentPanel from './DeploymentPanel'
 import { useStore } from '@/store/useStore'
 import { shallow } from 'zustand/shallow'
 
-export default function RightPanel() {
+export default function RightPanel({ mode = 'full' }: { mode?: 'full' | 'deployOnly' }) {
   const [collapsed, setCollapsed] = useState(false)
-  const [tab, setTab] = useState<'sfc' | 'deploy'>('sfc')
+  const [tab, setTab] = useState<'sfc' | 'deploy'>(mode === 'deployOnly' ? 'deploy' : 'sfc')
   const { deploymentCount } = useStore((s) => ({
     deploymentCount: s.deployments.length,
   }), shallow)
+  const showSfcTab = mode !== 'deployOnly'
 
   return (
     <div
@@ -30,7 +31,7 @@ export default function RightPanel() {
       {!collapsed && (
         <div className="w-full min-w-0 flex flex-col overflow-hidden" style={{ background: 'linear-gradient(180deg, rgba(4,8,14,0.95) 0%, rgba(6,12,21,0.92) 55%, rgba(9,20,33,0.9) 100%)', borderLeft: '1px solid rgba(87, 126, 160, 0.24)', backdropFilter: 'blur(16px)', boxShadow: 'inset 1px 0 0 rgba(103,164,209,0.12), inset 30px 0 60px rgba(34,99,152,0.08)' }}>
           <div className="flex items-stretch" style={{ borderBottom: '1px solid rgba(95, 128, 156, 0.2)' }}>
-            {(['sfc', 'deploy'] as const).map(t => (
+            {(showSfcTab ? (['sfc', 'deploy'] as const) : (['deploy'] as const)).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold transition relative"
                 style={{ color: tab === t ? '#7dd3fc' : '#64748b' }}>
@@ -51,7 +52,7 @@ export default function RightPanel() {
             ))}
           </div>
 
-          {tab === 'sfc' && (
+          {showSfcTab && tab === 'sfc' && (
             <div className="flex-1 overflow-y-auto flex flex-col min-h-0">
               <SFCForm />
             </div>

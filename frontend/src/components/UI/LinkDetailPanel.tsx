@@ -49,7 +49,7 @@ export default function LinkDetailPanel() {
   const bwHealthLabel = utilPct >= 85 ? '资源紧张' : utilPct >= 60 ? '资源较少' : '资源充足'
   const bwHealthColor = utilPct >= 85 ? '#f87171' : utilPct >= 60 ? '#fbbf24' : '#22c55e'
 
-  const statusLabel = status === 'down' ? '故障' : status === 'congested' ? '拥塞' : '正常'
+  const statusLabel = status === 'down' ? '断开' : status === 'congested' ? '拥塞' : '正常'
   const statusColor = status === 'down' ? '#ef4444' : status === 'congested' ? '#f59e0b' : '#22c55e'
 
   return (
@@ -130,9 +130,11 @@ export default function LinkDetailPanel() {
               <span className="text-gray-300 font-mono">{(rel * 100).toFixed(2)}%</span>
             </div>
             <div className="flex justify-between col-span-2">
-              <span className="text-gray-600">故障类型</span>
+              <span className="text-gray-600">断开原因</span>
               <span className="text-gray-300 font-mono">
-                {status === 'down' ? faultTypeLabel(faultTag) : '无'}
+                {status === 'down'
+                  ? (faultTag ? faultTypeLabel(faultTag) : '距离不满足或链路暂不可用')
+                  : '无'}
               </span>
             </div>
           </div>

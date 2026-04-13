@@ -234,7 +234,6 @@ export function useAutoDynamics() {
             const src = linkMap.get(linkKey(String(l.source), String(l.target)))
             if (!src) return l
             const resourceStatus = String(src.status ?? l.status ?? 'active')
-            const visibleStatus = String(l.status ?? resourceStatus ?? 'active')
             return {
               ...l,
               bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
@@ -243,9 +242,8 @@ export function useAutoDynamics() {
               fault_tag: String(src.fault_tag ?? l.fault_tag ?? ''),
               __resource_status: resourceStatus,
               __resource_status_seed: resourceStatus,
-              // Preserve the current visual status; only resource status is refreshed
-              // from backend to avoid periodic cross-orbit flash.
-              status: visibleStatus,
+              // Keep visual state consistent with backend so link recovery is immediate.
+              status: resourceStatus,
             }
           })
           const selectedLink = remapSelectedLink(s.selectedLink, mergedLinks)
@@ -282,7 +280,8 @@ export function useAutoDynamics() {
       }
 
       if (ad.enabled && ad.playing && s.satellites.length > 0) {
-        const posInterval = 0.1
+        const satCount = s.satellites.length
+        const posInterval = satCount >= 5000 ? 0.18 : (satCount >= 3000 ? 0.13 : 0.1)
         posAccRef.current += dtReal
         resAccRef.current += dtReal
 
@@ -326,6 +325,10 @@ export function useAutoDynamics() {
             if (!src || !dst) return
             const pk = pairKey(src, dst)
             prevByPair.set(pk, l)
+          })
+          const satStatusById = new Map<string, string>()
+          newSats.forEach((sat: any) => {
+            satStatusById.set(String(sat?.id ?? ''), String(sat?.status ?? 'active'))
           })
           const dynamicPlan = buildDynamicLinkPlan(newSats, s.links)
           const avgBw = { intra: 18, inter: 12 }
@@ -388,6 +391,9 @@ export function useAutoDynamics() {
             const nextStatus: LinkStatus = resourceStatus === 'down'
               ? 'down'
               : (up ? (resourceStatus === 'congested' ? 'congested' : 'active') : 'down')
+            const endpointDown =
+              satStatusById.get(src) === 'down' ||
+              satStatusById.get(dst) === 'down'
 
             const bwTotal = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
             const bwAvailPrev = Number(prev?.bandwidth_available_gbps ?? bwTotal)
@@ -404,7 +410,7 @@ export function useAutoDynamics() {
               bandwidth_available_gbps: bwAvail,
               reliability,
               fault_tag: nextStatus === 'down'
-                ? String(prev?.fault_tag ?? (resourceStatus === 'down' ? 'resource_or_link_fault' : 'line_of_sight_loss'))
+                ? String(prev?.fault_tag ?? (endpointDown ? 'endpoint_node_fault' : 'line_of_sight_loss'))
                 : '',
               __resource_status_seed: seededResourceStatus,
               __resource_status: resourceStatus,
@@ -431,8 +437,7 @@ export function useAutoDynamics() {
           }))
           if (s.deployments.length > 0) {
             pathRefreshAccRef.current += stepReal
-            const satCount = s.satellites.length
-            const refreshInterval = satCount >= 4200 ? 0.9 : (satCount >= 2200 ? 0.5 : 0.16)
+            const refreshInterval = satCount >= 5000 ? 1.5 : (satCount >= 4200 ? 0.9 : (satCount >= 2200 ? 0.5 : 0.16))
             if (pathRefreshAccRef.current >= refreshInterval) {
               pathRefreshAccRef.current = 0
               useStore.getState().refreshDeploymentPaths()

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Activity, Settings, Satellite, Info, ChevronDown } from 'lucide-react'
+import { Activity, Settings, Satellite, Info, ChevronDown, SlidersHorizontal } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { shallow } from 'zustand/shallow'
 import SettingsModal from './SettingsModal'
@@ -31,6 +31,9 @@ export default function TopBar() {
     if (window.location.pathname === '/monitor') return
     window.history.pushState({}, '', '/monitor')
     window.dispatchEvent(new PopStateEvent('popstate'))
+  }
+  const gotoControlPage = () => {
+    window.open('/control', '_blank', 'noopener,noreferrer')
   }
   const iconBtnStyle = {
     color: 'rgba(186,230,253,0.92)',
@@ -98,6 +101,14 @@ export default function TopBar() {
         </div>
 
         <div className="flex items-center gap-1.5 relative">
+          <button
+            onClick={gotoControlPage}
+            title="系统控制页面（新窗口）"
+            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+            style={iconBtnStyle}
+          >
+            <SlidersHorizontal className="w-4 h-4" />
+          </button>
           <button
             onClick={gotoMonitorPage}
             title="系统监控中心"

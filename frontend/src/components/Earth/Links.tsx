@@ -6,9 +6,6 @@ import { shallow } from 'zustand/shallow'
 
 const EARTH_R = 5
 const KM_TO_U = EARTH_R / 6371
-const MAX_RENDER_HIGH = 18000
-const MAX_RENDER_BALANCED = 12000
-const MAX_RENDER_PERF = 6000
 
 type RenderLink = {
   source: string
@@ -96,46 +93,22 @@ export default function Links() {
   const groups = useMemo(() => {
     const normalIntra: RenderLink[] = []
     const normalInter: RenderLink[] = []
-    const fault: RenderLink[] = []
     const selected: RenderLink[] = []
 
     for (const link of links as any[]) {
       const key = `${link.source}|${link.target}`
       const isSelected = selectedKey.has(key)
       const status = String(link?.status ?? 'active')
-      const faultTag = String(link?.fault_tag ?? '')
-      const isFault = status === 'down' && faultTag !== 'line_of_sight_loss' && faultTag !== 'topology_inconsistent'
-
-      if (!display.showLinks && !isSelected && !isFault) continue
+      if (status === 'down') continue
+      if (!display.showLinks && !isSelected) continue
 
       if (isSelected) selected.push(link)
-      else if (isFault) fault.push(link)
       else if (link.link_type === 'intra_orbit') normalIntra.push(link)
       else normalInter.push(link)
     }
 
-    const normalCount = normalIntra.length + normalInter.length
-    let maxRenderNormal = display.renderQuality === 'performance'
-      ? MAX_RENDER_PERF
-      : (display.renderQuality === 'balanced' ? MAX_RENDER_BALANCED : MAX_RENDER_HIGH)
-    if (satellites.length > 3200) {
-      maxRenderNormal = Math.floor(maxRenderNormal * 0.72)
-    } else if (satellites.length > 1800) {
-      maxRenderNormal = Math.floor(maxRenderNormal * 0.58)
-    } else if (satellites.length > 900) {
-      maxRenderNormal = Math.floor(maxRenderNormal * 0.48)
-    }
-    if (normalCount > maxRenderNormal) {
-      const stride = Math.ceil(normalCount / Math.max(1, maxRenderNormal))
-      const sampledIntra: RenderLink[] = []
-      const sampledInter: RenderLink[] = []
-      normalIntra.forEach((l, i) => { if (i % stride === 0) sampledIntra.push(l) })
-      normalInter.forEach((l, i) => { if (i % stride === 0) sampledInter.push(l) })
-      return { normalIntra: sampledIntra, normalInter: sampledInter, fault, selected }
-    }
-
-    return { normalIntra, normalInter, fault, selected }
-  }, [links, display.showLinks, selectedKey, display.renderQuality, satellites.length])
+    return { normalIntra, normalInter, selected }
+  }, [links, display.showLinks, selectedKey])
 
   const meshes = useMemo(() => {
     const make = (items: RenderLink[]) => {
@@ -155,7 +128,6 @@ export default function Links() {
     return {
       intra: make(groups.normalIntra),
       inter: make(groups.normalInter),
-      fault: make(groups.fault),
       selected: make(groups.selected),
     }
   }, [groups, satMap])
@@ -167,8 +139,7 @@ export default function Links() {
       const dst = String(l?.target ?? '')
       if (!src || !dst) return
       const status = String(l?.status ?? 'active')
-      const avail = Number(l?.bandwidth_available_gbps ?? l?.bandwidth_gbps ?? 0)
-      if (status === 'down' || avail <= 0) return
+      if (status === 'down') return
       set.add(`${src}|${dst}`)
       set.add(`${dst}|${src}`)
     })
@@ -236,7 +207,6 @@ export default function Links() {
     return () => {
       meshes.intra?.geometry.dispose()
       meshes.inter?.geometry.dispose()
-      meshes.fault?.geometry.dispose()
       meshes.selected?.geometry.dispose()
     }
   }, [meshes])
@@ -246,11 +216,11 @@ export default function Links() {
       function raycastLineSegments(this: THREE.LineSegments, raycaster: THREE.Raycaster, intersects: THREE.Intersection[]) {
         const prev = raycaster.params.Line.threshold
         // Shrink line picking radius to avoid stealing most satellite clicks.
-        raycaster.params.Line.threshold = 0.015
+        raycaster.params.Line.threshold = satellites.length >= 5000 ? 0.014 : 0.018
         THREE.LineSegments.prototype.raycast.call(this, raycaster, intersects)
         raycaster.params.Line.threshold = prev
       },
-    []
+    [satellites.length]
   )
 
   const handleLinkPick = (item: { links: RenderLink[] } | null, e: any) => {
@@ -279,42 +249,36 @@ export default function Links() {
       }
     }
     // Keep threshold tight to prioritize satellite picking when near nodes.
-    if (!Number.isFinite(bestD) || Math.sqrt(bestD) > 0.018) return
+    const clickThreshold = satellites.length >= 5000 ? 0.028 : 0.024
+    if (!Number.isFinite(bestD) || Math.sqrt(bestD) > clickThreshold) return
     if (!best) return
     e.stopPropagation()
     setSelectedLink(best as any)
     setSelectedSatellite(null)
   }
 
-  if (!meshes.intra && !meshes.inter && !meshes.fault && !meshes.selected && highlightedLines.length === 0) return null
+  if (!meshes.intra && !meshes.inter && !meshes.selected && highlightedLines.length === 0) return null
 
   return (
     <group>
       {meshes.intra && (
         <lineSegments
           geometry={meshes.intra.geometry}
+          frustumCulled={false}
           raycast={raycastNormalLink}
           onClick={(e) => handleLinkPick(meshes.intra, e)}
         >
-          <lineBasicMaterial color="#4dfa7d" transparent opacity={display.linkOpacity * 0.9} depthWrite={false} />
+          <lineBasicMaterial color="#45f08b" transparent opacity={display.linkOpacity * 0.9} depthWrite={false} />
         </lineSegments>
       )}
       {meshes.inter && (
         <lineSegments
           geometry={meshes.inter.geometry}
+          frustumCulled={false}
           raycast={raycastNormalLink}
           onClick={(e) => handleLinkPick(meshes.inter, e)}
         >
-          <lineBasicMaterial color="#2ed96f" transparent opacity={display.linkOpacity * 0.78} depthWrite={false} />
-        </lineSegments>
-      )}
-      {meshes.fault && (
-        <lineSegments
-          geometry={meshes.fault.geometry}
-          raycast={raycastNormalLink}
-          onClick={(e) => handleLinkPick(meshes.fault, e)}
-        >
-          <lineBasicMaterial color="#ff3b30" transparent opacity={Math.max(0.65, display.linkOpacity * 0.95)} depthWrite={false} />
+          <lineBasicMaterial color="#a78bfa" transparent opacity={display.linkOpacity * 0.82} depthWrite={false} />
         </lineSegments>
       )}
 
@@ -343,13 +307,14 @@ export default function Links() {
       ))}
 
       {selectedLines.map(item => {
-        const status = String((item.link as any)?.status ?? 'active')
-        const isFault = status === 'down'
+        const linkType = String((item.link as any)?.link_type ?? 'inter_orbit')
+        const selectedCore = linkType === 'intra_orbit' ? '#6ee7b7' : '#c4b5fd'
+        const selectedGlow = linkType === 'intra_orbit' ? '#10b981' : '#8b5cf6'
         return (
         <group key={item.key}>
           <Line
             points={item.points}
-            color={isFault ? '#ff6b63' : '#7df9ff'}
+            color={selectedCore}
             lineWidth={4.5}
             transparent
             opacity={1}
@@ -357,7 +322,7 @@ export default function Links() {
           />
           <Line
             points={item.points}
-            color={isFault ? '#ff3b30' : '#22d3ee'}
+            color={selectedGlow}
             lineWidth={10.5}
             transparent
             opacity={0.3}

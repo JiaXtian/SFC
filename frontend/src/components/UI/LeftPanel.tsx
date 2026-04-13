@@ -188,7 +188,6 @@ export default function LeftPanel() {
           await apiClient.startDynamicSimulation({
             sampling_interval_sec: ad.resource_update_sec,
             simulation_speed: ad.time_scale,
-            enable_faults: true,
           })
           setSimulationStatus({
             running: true,
@@ -263,7 +262,6 @@ export default function LeftPanel() {
           await apiClient.startDynamicSimulation({
             sampling_interval_sec: ad.resource_update_sec,
             simulation_speed: ad.time_scale,
-            enable_faults: true,
           })
           setSimulationStatus({
             running: true,

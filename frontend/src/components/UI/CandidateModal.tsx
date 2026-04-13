@@ -74,6 +74,7 @@ export default function CandidateModal() {
     applyTopologySnapshot,
     backendTopologySynced,
     satellites,
+    pushRuntimeEvent,
   } = useStore()
   const [sel, setSel] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -140,14 +141,22 @@ export default function CandidateModal() {
     }
 
     if (!cand.satisfies_constraints) {
-      const details = `\n\n不满足约束:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`
-      const ok = window.confirm(`该方案不满足SLA约束，是否继续强制部署？${details}`)
-      if (!ok) return
+      alert(`该方案不满足SLA约束，无法部署。\n\n详细原因:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`)
+      return
     }
 
     deployingRef.current = true
     setBusy(true)
     try {
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `开始部署 ${sfcName || requestId}`,
+        raw: {
+          title: '策略部署开始',
+          detail: `${sfcName || requestId} · 候选#${sel + 1}`,
+          level: 'info',
+        },
+      })
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
       const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
       const deployResp = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
@@ -244,6 +253,15 @@ export default function CandidateModal() {
         strategy_mode: sessionId ? 'session_continuous' : 'single_request',
         session_id: sessionId || undefined,
       })
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `部署完成 ${sfcName || requestId}`,
+        raw: {
+          title: '策略部署完成',
+          detail: `${sfcName || requestId} · 节点${(cand.deployed_nodes ?? []).length} · 链路${sanitizedLinks.length}`,
+          level: 'ok',
+        },
+      })
 
       try {
         const topo = await apiClient.getTopology()
@@ -254,6 +272,15 @@ export default function CandidateModal() {
 
       setCandidateResult(null)
     } catch (e: any) {
+      pushRuntimeEvent({
+        type: 'deployment_action',
+        message: `部署失败 ${sfcName || requestId}`,
+        raw: {
+          title: '策略部署失败',
+          detail: `${sfcName || requestId} · ${toChineseFailureText(e?.message ?? e)}`,
+          level: 'warn',
+        },
+      })
       alert(`部署失败: ${toChineseFailureText(e.message ?? e)}`)
     }
     setBusy(false)
@@ -289,7 +316,7 @@ export default function CandidateModal() {
 
         {fallbackOnly && (
           <div className="mx-5 mt-3 rounded-lg px-3 py-2 text-[11px]" style={{ background: 'rgba(120,53,15,0.35)', border: '1px solid rgba(251,191,36,0.45)', color: '#fde68a' }}>
-            当前没有完全满足约束的方案（deployable={deployableCount ?? 0}），以下为候选 Top-{candidates.length}。你可查看违规原因后决定是否强制部署。
+            当前候选方案均不满足约束（deployable={deployableCount ?? 0}）。该窗口仅用于查看失败原因，不支持强制部署。
           </div>
         )}
 
@@ -305,7 +332,7 @@ export default function CandidateModal() {
                   : { background: 'rgba(26,42,62,0.5)', color: '#94a3b8', border: '1px solid rgba(94,126,153,0.2)' }
               }
             >
-              方案 {i + 1}{candidates[i]?.satisfies_constraints ? '' : ' (不可部署)'}
+              方案 {i + 1}
             </button>
           ))}
           <div className="ml-auto flex items-center gap-2 text-xs">
@@ -475,12 +502,12 @@ export default function CandidateModal() {
           </button>
           <button
             onClick={deploy}
-            disabled={busy}
+            disabled={busy || !cand.satisfies_constraints}
             className="px-6 py-2.5 rounded-xl text-sm font-bold text-white flex items-center gap-2.5 transition shadow-lg"
-            style={{ background: busy ? 'rgba(50,50,60,0.8)' : (cand.satisfies_constraints ? 'linear-gradient(135deg, #1e4e75, #143552)' : 'linear-gradient(135deg, #b45309, #92400e)') }}
+            style={{ background: busy || !cand.satisfies_constraints ? 'rgba(50,50,60,0.8)' : 'linear-gradient(135deg, #1e4e75, #143552)' }}
           >
             <CheckCircle className={`w-4 h-4 ${busy ? 'animate-pulse' : ''}`} />
-            {busy ? '部署中...' : (cand.satisfies_constraints ? '确认部署' : '强制部署')}
+            {busy ? '部署中...' : '确认部署'}
           </button>
         </div>
       </div>

@@ -27,16 +27,6 @@ NODE_FAULT_TYPES = [
     "software_crash",
     "clock_drift",
 ]
-LINK_FAULT_TYPES = [
-    "optical_signal_loss",
-    "beam_misalignment",
-    "interference_jamming",
-    "routing_blackhole",
-    "transceiver_failure",
-    "line_degradation",
-]
-
-
 @dataclass
 class DynamicSceneConfig:
     total_sats: int = 4800
@@ -47,7 +37,7 @@ class DynamicSceneConfig:
     duration_sec: int = 300
     isl_max_distance_km: float = 5500.0
     node_fault_prob_per_tick: float = 0.0002
-    link_fault_prob_per_tick: float = 0.0005
+    link_fault_prob_per_tick: float = 0.0
     seed: int = 42
 
 
@@ -238,22 +228,7 @@ def _inject_sparse_faults(nodes: List[Dict], links: List[Dict], config: DynamicS
                 "reason": fault_type,
                 "fault_type": fault_type,
             })
-    down_nodes = {n["id"] for n in nodes if n["status"] == "down"}
-    for l in links:
-        endpoint_down = l["source"] in down_nodes or l["target"] in down_nodes
-        random_link_fault = random.random() < config.link_fault_prob_per_tick
-        if endpoint_down or random_link_fault:
-            fault_type = "endpoint_node_fault" if endpoint_down else random.choice(LINK_FAULT_TYPES)
-            l["status"] = "down"
-            l["fault_tag"] = fault_type
-            l["bandwidth_available_gbps"] = 0.0
-            events.append({
-                "type": "fault_event",
-                "entity_type": "link",
-                "entity_id": f"{l['source']}->{l['target']}",
-                "reason": fault_type,
-                "fault_type": fault_type,
-            })
+    # Link fault injection is disabled: failures are node-driven only.
     return nodes, links, events
 
 
@@ -347,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration-sec", type=int, default=300)
     p.add_argument("--isl-max-distance-km", type=float, default=5500.0)
     p.add_argument("--node-fault-prob-per-tick", type=float, default=0.0002)
-    p.add_argument("--link-fault-prob-per-tick", type=float, default=0.0005)
+    p.add_argument("--link-fault-prob-per-tick", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 

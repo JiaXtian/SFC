@@ -97,6 +97,12 @@ export default function Satellites() {
     return { targetPositions, colours }
   }, [satellites, selectedSatellite, vnfHighlightSet])
 
+  const sphereDetail = useMemo(() => {
+    if (satellites.length >= 5000) return { r: 0.055, seg: 6 }
+    if (satellites.length >= 3000) return { r: 0.06, seg: 8 }
+    return { r: 0.07, seg: 10 }
+  }, [satellites.length])
+
   useEffect(() => {
     const current = currentPosMapRef.current
     const target = targetPosMapRef.current
@@ -216,7 +222,7 @@ export default function Satellites() {
           document.body.style.cursor = 'default'
         }}
       >
-        <sphereGeometry args={[0.07, 10, 10]} />
+        <sphereGeometry args={[sphereDetail.r, sphereDetail.seg, sphereDetail.seg]} />
         <meshStandardMaterial
           vertexColors
           toneMapped={false}

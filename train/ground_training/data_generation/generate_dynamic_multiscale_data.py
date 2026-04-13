@@ -183,7 +183,7 @@ def generate_multiscale_dynamic_dataset(
                 duration_sec=duration_sec,
                 isl_max_distance_km=isl_max_distance_km,
                 node_fault_prob_per_tick=0.00015 + 0.00005 * (seq_id % 4),
-                link_fault_prob_per_tick=0.00045 + 0.00010 * (seq_id % 3),
+                link_fault_prob_per_tick=0.0,
                 seed=seq_seed,
             )
 
@@ -199,7 +199,7 @@ def generate_multiscale_dynamic_dataset(
                     "steps": len(topology_timeline),
                     "step_seconds": float(step_sec),
                     "seed": seq_seed,
-                    "fault_probability": round(scene_cfg.link_fault_prob_per_tick, 6),
+                    "node_fault_probability": round(scene_cfg.node_fault_prob_per_tick, 6),
                     "created_at": scene_payload.get("generated_at", ""),
                     "total_sats": scale,
                     "num_planes": num_planes,

@@ -215,9 +215,9 @@ void TopologyController::startDynamicSimulation(
         auto json = req->getJsonObject();
         const double interval_sec = json ? (*json).get("sampling_interval_sec", 5.0).asDouble() : 5.0;
         const double sim_speed = json ? (*json).get("simulation_speed", 1.0).asDouble() : 1.0;
-        const bool enable_faults = json ? (*json).get("enable_faults", true).asBool() : true;
-        const double node_fault_prob = json ? (*json).get("node_fault_prob_per_tick", 0.0002).asDouble() : 0.0002;
-        const double link_fault_prob = json ? (*json).get("link_fault_prob_per_tick", 0.0005).asDouble() : 0.0005;
+        const bool enable_faults = false;
+        const double node_fault_prob = 0.0;
+        const double link_fault_prob = 0.0;
 
         const bool started = g_dynamic_sim->start(
             interval_sec,

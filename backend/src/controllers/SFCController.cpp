@@ -475,7 +475,7 @@ void SFCController::plan(
         } else {
             response_candidates = infeasible_candidates;
             response["warning"] =
-                "当前未找到满足全部SLA的方案，已返回候选策略供人工决策（可强制部署）。";
+                "当前未找到满足全部SLA的可部署方案，以下候选仅用于问题定位与原因分析。";
         }
 
         response["returned_topk"] = static_cast<int>(response_candidates.size());

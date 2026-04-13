@@ -42,9 +42,6 @@ export default function DynamicPanel() {
   const [busy, setBusy] = useState(false)
   const [intervalSec, setIntervalSec] = useState(5)
   const [speed, setSpeed] = useState(1)
-  const [enableFaults, setEnableFaults] = useState(true)
-  const [nodeFaultProb, setNodeFaultProb] = useState(0.0002)
-  const [linkFaultProb, setLinkFaultProb] = useState(0.0005)
   const [selectedTraceKey, setSelectedTraceKey] = useState('')
   const [sessions, setSessions] = useState<any[]>([])
   const [sessionsBusy, setSessionsBusy] = useState(false)
@@ -97,9 +94,6 @@ export default function DynamicPanel() {
       const res = await apiClient.startDynamicSimulation({
         sampling_interval_sec: intervalSec,
         simulation_speed: speed,
-        enable_faults: enableFaults,
-        node_fault_prob_per_tick: nodeFaultProb,
-        link_fault_prob_per_tick: linkFaultProb,
       })
       setSimulationStatus({
         running: !!res?.status?.running,
@@ -207,26 +201,6 @@ export default function DynamicPanel() {
               className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
           </label>
         </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          <label className="space-y-1">
-            <div className="text-[10px] text-slate-400">节点故障概率/tick</div>
-            <input type="number" min={0} max={0.1} step={0.0001} value={nodeFaultProb}
-              onChange={e => setNodeFaultProb(Math.max(0, Math.min(0.1, Number(e.target.value) || 0)))}
-              className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
-          </label>
-          <label className="space-y-1">
-            <div className="text-[10px] text-slate-400">链路故障概率/tick</div>
-            <input type="number" min={0} max={0.2} step={0.0001} value={linkFaultProb}
-              onChange={e => setLinkFaultProb(Math.max(0, Math.min(0.2, Number(e.target.value) || 0)))}
-              className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
-          </label>
-        </div>
-
-        <label className="inline-flex items-center gap-2 text-[11px]">
-          <input type="checkbox" checked={enableFaults} onChange={e => setEnableFaults(e.target.checked)} />
-          启用低概率故障注入
-        </label>
 
         <div className="flex items-center gap-2">
           <button

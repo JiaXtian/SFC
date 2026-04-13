@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Sphere, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '@/store/useStore'
@@ -172,6 +172,7 @@ function EarthContent({
 
 export default function Earth() {
   const display = useStore((s: any) => s.display)
+  const satCount = useStore((s: any) => s.satellites.length)
   const [gridLines, setGridLines] = useState<THREE.Vector3[][]>([])
   const [latLineCount, setLatLineCount] = useState(0)
   const [borderLines, setBorderLines] = useState<THREE.Vector3[][]>([])
@@ -231,12 +232,12 @@ export default function Earth() {
           const { type, coordinates } = f.geometry
           if (type === 'Polygon') {
             coordinates.forEach((ring: number[][]) => {
-              allLines.push(ring.map(([lon, lat]) => latLonToVec3(lat, lon, R + 0.055)))
+              allLines.push(ring.map(([lon, lat]) => latLonToVec3(lat, lon, R + 0.065)))
             })
           } else if (type === 'MultiPolygon') {
             coordinates.forEach((poly: number[][][]) => {
               poly.forEach((ring: number[][]) => {
-                allLines.push(ring.map(([lon, lat]) => latLonToVec3(lat, lon, R + 0.055)))
+                allLines.push(ring.map(([lon, lat]) => latLonToVec3(lat, lon, R + 0.065)))
               })
             })
           }
@@ -259,6 +260,10 @@ export default function Earth() {
       disposed = true
     }
   }, [])
+
+  const borderRenderLines = useMemo(() => {
+    return borderLines.filter((pts) => pts.length >= 2)
+  }, [borderLines])
 
   return (
     <group>
@@ -287,14 +292,14 @@ export default function Earth() {
         })}
 
       {display.showBorders &&
-        borderLines.map((pts, i) => (
+        borderRenderLines.map((pts, i) => (
           <Line
             key={`border-${i}`}
             points={pts}
             color="#b5d8fc"
-            lineWidth={0.3}
+            lineWidth={satCount >= 5000 ? 0.24 : 0.34}
             transparent
-            opacity={0.9}
+            opacity={satCount >= 5000 ? 0.68 : 0.9}
             depthTest
             depthWrite={false}
           />

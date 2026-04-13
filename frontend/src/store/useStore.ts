@@ -598,7 +598,9 @@ function pickTracePerVnf(trace: DecisionTrace): VNFDeploy[] {
   const requestVnfs = Array.isArray(trace?.request_core_nfs)
     ? trace.request_core_nfs
     : (Array.isArray(trace?.request_vnfs) ? trace.request_vnfs : [])
-  const bestCandidate = Array.isArray(trace?.candidates) ? trace.candidates[0] : null
+  const bestCandidate = Array.isArray(trace?.candidates)
+    ? (trace.candidates.find((c: any) => !!c?.satisfies_constraints) ?? trace.candidates[0])
+    : null
   const candidatePer = bestCandidate && Array.isArray((bestCandidate as any).per_core_nf)
     ? (bestCandidate as any).per_core_nf
     : ((bestCandidate && Array.isArray((bestCandidate as any).per_vnf)) ? (bestCandidate as any).per_vnf : [])
@@ -739,7 +741,6 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
     const src = byKey.get(linkKey(String(lk.source), String(lk.target)))
     if (!src) return lk
     const resourceStatus = String(src.status ?? lk.__resource_status ?? lk.status ?? 'active')
-    const visibleStatus = String(lk.status ?? resourceStatus ?? 'active')
     return {
       ...lk,
       bandwidth_gbps: Number(src.bandwidth_gbps ?? lk.bandwidth_gbps ?? 0),
@@ -748,9 +749,8 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
       fault_tag: String(src.fault_tag ?? lk.fault_tag ?? ''),
       __resource_status: resourceStatus,
       __resource_status_seed: resourceStatus,
-      // Keep current visual/link-topology status stable in realtime mode to avoid
-      // periodic flicker from backend snapshot cadence.
-      status: visibleStatus,
+      // Keep visual status aligned with backend resource status so links recover immediately.
+      status: resourceStatus,
     }
   })
 }
@@ -1010,7 +1010,8 @@ export const useStore = create<Store>((set, get) => ({
     const depId = `sess-deploy-${trace.session_id}`
     const nowIso = new Date().toISOString()
     const topoV = Number(trace.topology_version || s.topologyVersion || 0)
-    const chosen = Array.isArray(trace.candidates) ? trace.candidates[0] : null
+    const candidates = Array.isArray(trace.candidates) ? trace.candidates : []
+    const chosen = candidates.find((c: any) => !!c?.satisfies_constraints) ?? null
     const perVnf = pickTracePerVnf(trace)
 
     const existing = s.deployments.find((d) => d.deployment_id === depId)
@@ -1027,8 +1028,9 @@ export const useStore = create<Store>((set, get) => ({
           dep.deployment_id === depId
             ? {
                 ...dep,
-                status: 'failed',
-                progress: 100,
+                status: 'in-progress',
+                progress: 70,
+                satisfies_constraints: false,
                 decision_trigger: trace.trigger,
                 topology_version_bound: topoV,
                 deployed_at: nowIso,

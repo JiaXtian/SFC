@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Activity,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
@@ -34,6 +33,15 @@ function faultTypeLabel(tag: string): string {
   }
   return map[tag] ?? tag
 }
+
+const DEFAULT_NODE_FAULT_TYPES = [
+  'power_failure',
+  'cpu_overload',
+  'thermal_shutdown',
+  'control_plane_sync_loss',
+  'software_crash',
+  'clock_drift',
+]
 
 function navigateTo(path: string) {
   if (window.location.pathname === path) return
@@ -300,26 +308,10 @@ export default function MonitoringPage() {
   const {
     simulation,
     setSimulationStatus,
-    addToast,
     runtimeEvents,
     decisionTraces,
     deployments,
-    satellites,
   } = useStore()
-  const [updatingFaults, setUpdatingFaults] = useState(false)
-  const [injectingFaults, setInjectingFaults] = useState(false)
-  const [enableFaults, setEnableFaults] = useState(true)
-  const [nodeFaultProb, setNodeFaultProb] = useState(0.0002)
-  const [linkFaultProb, setLinkFaultProb] = useState(0.0005)
-  const [nodeFaultCatalog, setNodeFaultCatalog] = useState<string[]>([])
-  const [injectScope, setInjectScope] = useState<'single' | 'batch'>('single')
-  const [injectMode, setInjectMode] = useState<'random' | 'manual'>('random')
-  const [injectNodeId, setInjectNodeId] = useState('')
-  const [injectManualIds, setInjectManualIds] = useState('')
-  const [injectBatchCount, setInjectBatchCount] = useState(5)
-  const [injectFaultType, setInjectFaultType] = useState('auto')
-  const [injectTtlTicks, setInjectTtlTicks] = useState(4)
-  const [injectOnlyActive, setInjectOnlyActive] = useState(true)
   const [viewport, setViewport] = useState(() => ({
     w: window.innerWidth,
     h: window.innerHeight,
@@ -338,28 +330,10 @@ export default function MonitoringPage() {
           sim_time: String(res.sim_time ?? ''),
           metrics: res.metrics ?? null,
         })
-        setEnableFaults(Boolean(res.enable_faults ?? true))
-        setNodeFaultProb(Math.max(0, Number(res.node_fault_prob_per_tick ?? 0.0002)))
-        setLinkFaultProb(Math.max(0, Number(res.link_fault_prob_per_tick ?? 0.0005)))
-        const nodeFaults = Array.isArray(res?.fault_catalog?.node)
-          ? res.fault_catalog.node.map((x: any) => String(x))
-          : []
-        setNodeFaultCatalog(nodeFaults)
       })
       .catch(() => {})
     return () => { mounted = false }
   }, [setSimulationStatus])
-
-  useEffect(() => {
-    if (!Array.isArray(satellites) || satellites.length === 0) {
-      setInjectNodeId('')
-      return
-    }
-    const exists = satellites.some((s: any) => String(s?.id ?? '') === injectNodeId)
-    if (!injectNodeId || !exists) {
-      setInjectNodeId(String((satellites[0] as any)?.id ?? ''))
-    }
-  }, [satellites, injectNodeId])
 
   useEffect(() => {
     const onResize = () => {
@@ -371,78 +345,6 @@ export default function MonitoringPage() {
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
-
-  const applyFaultConfig = async () => {
-    setUpdatingFaults(true)
-    try {
-      const samplingSec = Math.max(1, Number(simulation.sampling_interval_sec || 5))
-      const speed = Math.max(0.1, Number(simulation.simulation_speed || 1))
-      const res = await apiClient.startDynamicSimulation({
-        sampling_interval_sec: samplingSec,
-        simulation_speed: speed,
-        enable_faults: enableFaults,
-        node_fault_prob_per_tick: nodeFaultProb,
-        link_fault_prob_per_tick: linkFaultProb,
-      })
-      setSimulationStatus({
-        running: !!res?.status?.running,
-        sampling_interval_sec: Number(res?.status?.sampling_interval_sec ?? samplingSec),
-        simulation_speed: Number(res?.status?.simulation_speed ?? speed),
-      })
-      addToast('故障注入参数已更新', 'success')
-    } catch (e: any) {
-      addToast(`故障参数更新失败: ${e?.message ?? e}`, 'error')
-    } finally {
-      setUpdatingFaults(false)
-    }
-  }
-
-  const injectSpecificFault = async () => {
-    setInjectingFaults(true)
-    try {
-      const payload: any = {
-        entity_type: 'node',
-        ttl_ticks: Math.max(1, Math.min(120, Number(injectTtlTicks || 4))),
-        fault_type: injectFaultType || 'auto',
-        overwrite_existing: true,
-      }
-      if (injectScope === 'single') {
-        if (!injectNodeId) throw new Error('请先选择目标卫星')
-        payload.node_id = injectNodeId
-      } else if (injectMode === 'manual') {
-        const ids = injectManualIds
-          .split(/[\\s,;，；]+/)
-          .map((x) => x.trim())
-          .filter(Boolean)
-        if (ids.length === 0) throw new Error('请填写批量卫星ID')
-        payload.node_ids = ids
-      } else {
-        payload.batch_count = Math.max(1, Math.min(200, Number(injectBatchCount || 1)))
-        payload.only_active = injectOnlyActive
-      }
-
-      const res = await apiClient.injectDynamicFaults(payload)
-      const injected = Number(res?.injected ?? 0)
-      setSimulationStatus({
-        running: !!res?.status?.running,
-        sampling_interval_sec: Number(res?.status?.sampling_interval_sec ?? simulation.sampling_interval_sec),
-        simulation_speed: Number(res?.status?.simulation_speed ?? simulation.simulation_speed),
-        topology_version: Number(res?.status?.topology_version ?? simulation.topology_version),
-      })
-      if (Array.isArray(res?.status?.fault_catalog?.node)) {
-        setNodeFaultCatalog(res.status.fault_catalog.node.map((x: any) => String(x)))
-      }
-      if (injected > 0) {
-        addToast(`已注入 ${injected} 个卫星故障`, 'success')
-      } else {
-        addToast('未注入故障（目标可能无效）', 'warning')
-      }
-    } catch (e: any) {
-      addToast(`故障注入失败: ${e?.message ?? e}`, 'error')
-    } finally {
-      setInjectingFaults(false)
-    }
-  }
 
   const metrics = simulation.metrics
   const orch = simulation.orchestration
@@ -461,7 +363,7 @@ export default function MonitoringPage() {
     [history]
   )
   const faultInfraSeries = useMemo(
-    () => history.map((h) => Number(h.metrics?.down_links ?? 0) + Number(h.metrics?.down_nodes ?? 0)),
+    () => history.map((h) => Number(h.metrics?.down_nodes ?? 0)),
     [history]
   )
   const inferenceSeries = useMemo(
@@ -482,9 +384,7 @@ export default function MonitoringPage() {
     [runtimeEvents]
   )
   const faultHeatmap = useMemo(() => {
-    const fallbackRows = (nodeFaultCatalog.length > 0
-      ? nodeFaultCatalog.slice(0, 6)
-      : ['power_failure', 'cpu_overload', 'thermal_shutdown', 'optical_signal_loss', 'interference_jamming', 'routing_blackhole'])
+    const fallbackRows = DEFAULT_NODE_FAULT_TYPES
     const rows: string[] = []
     const cols = 12
     const faults = runtimeEvents.filter((e) => e.type === 'fault_event')
@@ -529,7 +429,7 @@ export default function MonitoringPage() {
       }
     })
     return { rows: rows.map((r) => faultTypeLabel(r)), matrix }
-  }, [runtimeEvents, nodeFaultCatalog])
+  }, [runtimeEvents])
 
   const sessionImpactSeries = useMemo(() => {
     const ordered = [...runtimeEvents].reverse()
@@ -727,174 +627,6 @@ export default function MonitoringPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-2.5">
-          <div className="col-span-12 rounded-2xl p-3"
-            style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
-            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <Activity className="w-4 h-4 text-cyan-300" />故障注入控制
-            </div>
-
-            <div className="flex items-center gap-2.5 overflow-x-auto whitespace-nowrap py-0.5">
-              <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
-                节点故障概率/周期
-                <input
-                  type="number"
-                  min={0}
-                  max={0.05}
-                  step={0.0001}
-                  value={nodeFaultProb}
-                  onChange={(e) => setNodeFaultProb(Math.max(0, Math.min(0.05, Number(e.target.value) || 0)))}
-                  className="w-28 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-amber-200 font-mono"
-                />
-              </label>
-              <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
-                链路故障概率/周期
-                <input
-                  type="number"
-                  min={0}
-                  max={0.1}
-                  step={0.0001}
-                  value={linkFaultProb}
-                  onChange={(e) => setLinkFaultProb(Math.max(0, Math.min(0.1, Number(e.target.value) || 0)))}
-                  className="w-28 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-orange-200 font-mono"
-                />
-              </label>
-              <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={enableFaults}
-                  onChange={(e) => setEnableFaults(e.target.checked)}
-                  className="accent-cyan-400 w-3.5 h-3.5"
-                />
-                启用随机故障注入
-              </label>
-              <button
-                disabled={updatingFaults}
-                onClick={applyFaultConfig}
-                className="px-3.5 py-1.5 rounded-lg text-xs text-cyan-100 transition hover:brightness-110 disabled:opacity-60"
-                style={{
-                  background: 'linear-gradient(135deg, rgba(25,101,151,0.84), rgba(16,69,116,0.82))',
-                  border: '1px solid rgba(119,194,238,0.38)',
-                  boxShadow: '0 6px 14px rgba(0,0,0,0.32), inset 0 1px 0 rgba(184,230,255,0.2)',
-                }}
-              >
-                {updatingFaults ? '更新中...' : '应用概率参数'}
-              </button>
-              <div className="text-[10px] text-slate-500">
-                周期 {simulation.sampling_interval_sec}s · 倍速 {simulation.simulation_speed.toFixed(1)}x
-              </div>
-            </div>
-
-            <div className="mt-2 flex items-center gap-2.5 overflow-x-auto whitespace-nowrap py-0.5">
-              <span className="text-[11px] text-slate-400">定向故障注入</span>
-              <select
-                value={injectScope}
-                onChange={(e) => setInjectScope((e.target.value as 'single' | 'batch') || 'single')}
-                className="h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-slate-200 text-[11px]"
-              >
-                <option value="single">单颗卫星</option>
-                <option value="batch">批量卫星</option>
-              </select>
-
-              {injectScope === 'single' ? (
-                <>
-                  <input
-                    list="monitor-satellite-list"
-                    value={injectNodeId}
-                    onChange={(e) => setInjectNodeId(e.target.value)}
-                    placeholder="输入卫星ID"
-                    className="w-44 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-cyan-200 font-mono text-[11px]"
-                  />
-                  <datalist id="monitor-satellite-list">
-                    {satellites.slice(0, 4000).map((sat: any) => (
-                      <option key={String(sat?.id ?? '')} value={String(sat?.id ?? '')} />
-                    ))}
-                  </datalist>
-                </>
-              ) : (
-                <>
-                  <select
-                    value={injectMode}
-                    onChange={(e) => setInjectMode((e.target.value as 'random' | 'manual') || 'random')}
-                    className="h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-slate-200 text-[11px]"
-                  >
-                    <option value="random">随机批量</option>
-                    <option value="manual">手动ID列表</option>
-                  </select>
-                  {injectMode === 'random' ? (
-                    <>
-                      <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
-                        数量
-                        <input
-                          type="number"
-                          min={1}
-                          max={200}
-                          step={1}
-                          value={injectBatchCount}
-                          onChange={(e) => setInjectBatchCount(Math.max(1, Math.min(200, Number(e.target.value) || 1)))}
-                          className="w-20 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-amber-200 font-mono"
-                        />
-                      </label>
-                      <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={injectOnlyActive}
-                          onChange={(e) => setInjectOnlyActive(e.target.checked)}
-                          className="accent-cyan-400 w-3.5 h-3.5"
-                        />
-                        仅活跃卫星
-                      </label>
-                    </>
-                  ) : (
-                    <input
-                      type="text"
-                      value={injectManualIds}
-                      onChange={(e) => setInjectManualIds(e.target.value)}
-                      placeholder="SAT_000_001,SAT_000_002"
-                      className="w-72 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-cyan-200 font-mono text-[11px]"
-                    />
-                  )}
-                </>
-              )}
-
-              <select
-                value={injectFaultType}
-                onChange={(e) => setInjectFaultType(e.target.value)}
-                className="h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-slate-200 text-[11px]"
-              >
-                <option value="auto">故障类型: 自动</option>
-                {nodeFaultCatalog.map((ft) => (
-                  <option key={ft} value={ft}>{faultTypeLabel(ft)}</option>
-                ))}
-              </select>
-
-              <label className="inline-flex items-center gap-1 text-[11px] text-slate-400">
-                持续周期
-                <input
-                  type="number"
-                  min={1}
-                  max={120}
-                  step={1}
-                  value={injectTtlTicks}
-                  onChange={(e) => setInjectTtlTicks(Math.max(1, Math.min(120, Number(e.target.value) || 1)))}
-                  className="w-20 h-7 px-2 rounded bg-slate-900/60 border border-slate-700/65 text-orange-200 font-mono"
-                />
-              </label>
-
-              <button
-                disabled={injectingFaults}
-                onClick={injectSpecificFault}
-                className="px-3.5 py-1.5 rounded-lg text-xs text-rose-100 transition hover:brightness-110 disabled:opacity-60"
-                style={{
-                  background: 'linear-gradient(135deg, rgba(185,28,28,0.84), rgba(127,29,29,0.82))',
-                  border: '1px solid rgba(251,146,60,0.45)',
-                  boxShadow: '0 6px 14px rgba(0,0,0,0.32), inset 0 1px 0 rgba(254,202,202,0.2)',
-                }}
-              >
-                {injectingFaults ? '注入中...' : '注入指定故障'}
-              </button>
-            </div>
-          </div>
-
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{
               background: 'rgba(8,16,28,0.66)',
@@ -965,7 +697,7 @@ export default function MonitoringPage() {
               </div>
             </div>
             <div className="mt-2">
-              <AxisLineChart values={faultInfraSeries} color="#f59e0b" title="故障节点+链路数量趋势" yLabel="数量" xLabel="采样时序" />
+              <AxisLineChart values={faultInfraSeries} color="#f59e0b" title="故障节点数量趋势" yLabel="数量" xLabel="采样时序" />
             </div>
           </div>
 
