@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, Clock3, ListChecks, Plus, RotateCw, X } from 'lucide-react'
+import { Activity, AlertTriangle, Clock3, ListChecks, Plus, RotateCw, X, Trash2 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 
@@ -462,23 +462,29 @@ export default function FaultInjectionControl() {
                     {faultTypeLabel(f.fault_type)}
                     <span className="text-slate-500"> · {f.injection_mode === 'manual' ? '手动注入' : f.injection_mode}</span>
                   </div>
-                  <div className="flex items-center gap-2 mt-1.5">
+                  <div className="flex items-center justify-between gap-2 mt-1.5">
+                    <div className="text-[10px] text-slate-500">操作</div>
+                    <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => extendFault(f.node_id)}
                       disabled={managingFaults}
-                      className="h-7 px-2 rounded-md text-[11px] text-amber-100 bg-amber-900/30 border border-amber-800/60 disabled:opacity-60"
+                      className="h-7 px-2.5 rounded-md text-[11px] text-amber-100 bg-amber-900/30 border border-amber-800/60 disabled:opacity-60 inline-flex items-center gap-1"
+                      title={`延长 ${extendSeconds}s`}
                     >
-                      延长 +{extendSeconds}s
+                      <Plus className="w-3 h-3" />
+                      <span className="font-mono">{extendSeconds}s</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => removeFault(f.node_id)}
                       disabled={managingFaults}
-                      className="h-7 px-2 rounded-md text-[11px] text-rose-100 bg-rose-900/35 border border-rose-800/65 disabled:opacity-60"
+                      className="h-7 w-7 rounded-md text-rose-100 bg-rose-900/35 border border-rose-800/65 disabled:opacity-60 inline-flex items-center justify-center"
+                      title="移除故障"
                     >
-                      手动移除
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
+                    </div>
                   </div>
                 </div>
               )

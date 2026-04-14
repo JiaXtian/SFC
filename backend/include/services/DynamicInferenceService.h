@@ -52,6 +52,8 @@ private:
         DeploymentCandidate last_candidate;
         bool has_last_candidate = false;
         std::string last_candidate_signature;
+        bool pending_replanning = false;
+        int last_replanning_attempt_topology_version = -1;
         std::string last_required_recompute_signature;
         int last_required_recompute_topology_version = -1;
         nlohmann::json last_decision_trace;

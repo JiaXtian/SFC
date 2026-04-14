@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
+import { resolveSfcLabel } from '@/utils/sfcLabel'
 
 function defaultWsUrl() {
   const envUrl = (import.meta as any)?.env?.VITE_WS_URL?.trim?.()
@@ -29,25 +30,12 @@ function faultTypeLabel(tag: string): string {
   return map[tag] ?? tag
 }
 
-function shortToken(raw: string): string {
-  const text = String(raw ?? '').trim()
-  if (!text) return '0000'
-  const parts = text.split(/[_-]/).filter(Boolean)
-  const tail = parts.length > 0 ? parts[parts.length - 1] : text
-  return tail.slice(-6)
-}
-
 function sfcLabelByIds(sessionId: string, requestId?: string): string {
   const st = useStore.getState()
-  const deployments = Array.isArray(st.deployments) ? st.deployments : []
-  const bySession = sessionId
-    ? deployments.find((d: any) => String(d?.session_id ?? '') === sessionId)
-    : null
-  if (bySession?.sfc_name) return String(bySession.sfc_name)
-  if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
-  if (requestId) return `SFC-${shortToken(requestId)}`
-  if (sessionId) return `SFC-${shortToken(sessionId)}`
-  return 'SFC-未知'
+  return resolveSfcLabel(st.deployments as any, {
+    sessionId,
+    requestId: String(requestId ?? ''),
+  })
 }
 
 export function useWebSocket() {
@@ -131,7 +119,17 @@ export function useWebSocket() {
                 if (now - last > 12000) {
                   endpointFaultPopupCooldownRef.current[key] = now
                   const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
-                  window.alert(`${sfcLabel} 触发必要重调度\n原因：${label}故障，当前部署不可继续保持`)
+                  pushRuntimeEvent({
+                    type: 'reschedule_trigger',
+                    sim_time: data.sim_time,
+                    message: `${sfcLabel} 触发重调度：${label}故障，系统正在重算可用路径`,
+                    raw: {
+                      session_id: trace?.session_id,
+                      request_id: trace?.request_id,
+                      trigger,
+                      label,
+                    },
+                  })
                 }
               }
               pushRuntimeEvent({

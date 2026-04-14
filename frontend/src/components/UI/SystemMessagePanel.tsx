@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Bell, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { toChineseFailureText } from '@/utils/failureText'
+import { resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
 function faultTypeLabel(tag: string): string {
   const map: Record<string, string> = {
@@ -42,14 +43,6 @@ function compactTime(raw: string) {
   return `${hh}:${mm}:${ss}`
 }
 
-function shortToken(raw: string) {
-  const text = String(raw ?? '').trim()
-  if (!text) return '0000'
-  const parts = text.split(/[_-]/).filter(Boolean)
-  const tail = parts.length > 0 ? parts[parts.length - 1] : text
-  return tail.slice(-6)
-}
-
 export default function SystemMessagePanel() {
   const { runtimeEvents, deployments } = useStore((s) => ({
     runtimeEvents: s.runtimeEvents,
@@ -58,20 +51,14 @@ export default function SystemMessagePanel() {
   const [collapsed, setCollapsed] = useState(false)
 
   const resolveSfcLabel = (sessionId?: string, requestId?: string) => {
-    const sid = String(sessionId ?? '')
-    const rid = String(requestId ?? '')
-    const bySession = sid
-      ? deployments.find((d: any) => String(d?.session_id ?? '') === sid)
-      : null
-    if (bySession?.sfc_name) return String(bySession.sfc_name)
-    if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
-    if (rid) return `SFC-${shortToken(rid)}`
-    if (sid) return `SFC-${shortToken(sid)}`
-    return 'SFC-未知'
+    return resolveSfcSeqLabel(deployments as any, {
+      sessionId: String(sessionId ?? ''),
+      requestId: String(requestId ?? ''),
+    })
   }
 
   const rows = useMemo(() => {
-    return runtimeEvents
+    const mapped = runtimeEvents
       .map((e) => {
         const time = compactTime(String(e.sim_time ?? ''))
         if (e.type === 'fault_event') {
@@ -96,6 +83,19 @@ export default function SystemMessagePanel() {
             tone: 'info',
             title: '故障时长调整',
             text: short(`${nodeId}（${fault}）持续时间已更新，当前TTL=${ttl}`),
+          }
+        }
+        if (e.type === 'reschedule_trigger') {
+          const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel(sid, rid)
+          const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
+          return {
+            id: e.id,
+            time,
+            tone: 'warn',
+            title: '触发重调度',
+            text: short(`${sfcLabel} 因${trig}进入重调度流程`),
           }
         }
 
@@ -156,7 +156,7 @@ export default function SystemMessagePanel() {
               id: e.id,
               time,
               tone: 'ok',
-              title: '重调度生效',
+              title: '重部署完成',
               text: short(`${sfcLabel} 已切换到新路径（${trig}）`),
             }
           }
@@ -190,6 +190,20 @@ export default function SystemMessagePanel() {
           return null
         }
 
+        if (e.type === 'deployment_update') {
+          const depId = String((e.raw as any)?.deployment_id ?? '')
+          const pct = Number((e.raw as any)?.progress ?? 0)
+          const st = String((e.raw as any)?.status ?? '')
+          const sfcLabel = resolveSfcSeqLabel(deployments as any, { deploymentId: depId })
+          return {
+            id: e.id,
+            time,
+            tone: st === 'completed' ? 'ok' : 'info',
+            title: st === 'completed' ? '部署完成' : '部署进行中',
+            text: short(`${sfcLabel} 当前进度 ${pct.toFixed(0)}%`),
+          }
+        }
+
         if (e.type === 'deployment_action') {
           return {
             id: e.id,
@@ -203,7 +217,18 @@ export default function SystemMessagePanel() {
         return null
       })
       .filter(Boolean)
-      .slice(0, 60) as Array<{ id: string; time: string; tone: string; title: string; text: string }>
+      .slice(0, 90) as Array<{ id: string; time: string; tone: string; title: string; text: string }>
+
+    // Deduplicate noisy repeated messages for the same SFC and same action.
+    const seen = new Set<string>()
+    const deduped: Array<{ id: string; time: string; tone: string; title: string; text: string }> = []
+    mapped.forEach((r) => {
+      const key = `${r.title}|${r.text}`
+      if (seen.has(key)) return
+      seen.add(key)
+      deduped.push(r)
+    })
+    return deduped.slice(0, 60)
   }, [runtimeEvents, deployments])
 
   const toneStyle = (tone: string) => {
@@ -217,9 +242,9 @@ export default function SystemMessagePanel() {
     <div
       className="absolute left-0 z-20 pointer-events-auto flex transition-all duration-300"
       style={{
-        top: 'calc(44px * var(--ui-scale, 1) + 8px)',
-        bottom: 'calc(44px * var(--ui-scale, 1) + 8px)',
-        width: collapsed ? 32 : 'clamp(340px, 24vw, 520px)',
+        top: 'calc(44px * var(--ui-scale, 0))',
+        bottom: '0',
+        width: collapsed ? 32 : 'clamp(320px, 21vw, 470px)',
       }}
     >
       <button
@@ -235,11 +260,13 @@ export default function SystemMessagePanel() {
 
       {!collapsed && (
         <div
-          className="h-full w-full rounded-r-2xl p-3 flex flex-col ml-2.5"
+          className="h-full w-full p-3 flex flex-col rounded-r-2xl"
           style={{
-            background: 'linear-gradient(160deg, rgba(9,18,31,0.6), rgba(6,13,24,0.52))',
-            border: '1px solid rgba(112,168,208,0.28)',
-            backdropFilter: 'blur(14px)',
+            background: 'transparent',
+            borderTop: '1px solid rgba(112,168,208,0.28)',
+            borderRight: '1px solid rgba(112,168,208,0.28)',
+            borderBottom: '1px solid rgba(112,168,208,0.28)',
+            backdropFilter: 'blur(16px)',
           }}
         >
           <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold inline-flex items-center gap-1.5 mb-1.5">

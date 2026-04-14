@@ -769,7 +769,7 @@ export const useStore = create<Store>((set, get) => ({
   backendTopologySynced: false,
   display: {
     showTexture: true,
-    showBorders: true,
+    showBorders: false,
     showLatLon: false,
     showLinks: false,
     linkOpacity: 0.7,

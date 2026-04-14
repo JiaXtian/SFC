@@ -549,6 +549,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
 
                 session.failures_total += 1;
                 total_failures_ += 1;
+                session.pending_replanning = true;
+                session.last_replanning_attempt_topology_version = session.last_topology_version;
                 const std::string fail_reason = restored_previous
                     ? "resource_allocation_failed_restored_previous"
                     : "resource_allocation_failed";
@@ -591,6 +593,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         session.last_candidate = chosen;
         session.last_candidate_signature = sig;
         session.has_last_candidate = true;
+        session.pending_replanning = false;
+        session.last_replanning_attempt_topology_version = -1;
 
         WSHandler::broadcast_json(trace_payload);
         WSHandler::broadcast_json({
@@ -618,6 +622,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     const std::string pending_reason = response_candidates.empty()
         ? "no_candidate"
         : "no_deployable_candidate";
+    session.pending_replanning = true;
+    session.last_replanning_attempt_topology_version = session.last_topology_version;
     WSHandler::broadcast_json(trace_payload);
     WSHandler::broadcast_json({
         {"type", "session_update"},
@@ -960,6 +966,42 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
             );
         }
         if (trigger.empty()) {
+            if (session.pending_replanning) {
+                if (session.last_replanning_attempt_topology_version == snapshot.topology_version) {
+                    continue;
+                }
+                auto result = evaluate_session(session, snapshot, "recovery_resume");
+                session.last_replanning_attempt_topology_version = snapshot.topology_version;
+                recovery_attempts_this_tick += 1;
+                total_recovery_attempts_ += 1;
+                const std::string status = result.value("status", "");
+                const bool success =
+                    status == "deployed" || status == "redeployed" || status == "stable";
+                if (success) {
+                    recovery_success_this_tick += 1;
+                    total_recovery_success_ += 1;
+                } else {
+                    recovery_failures_this_tick += 1;
+                    total_recovery_failures_ += 1;
+                }
+                WSHandler::broadcast_json({
+                    {"type", "recovery_event"},
+                    {"entity_type", "session"},
+                    {"entity_id", session.session_id},
+                    {"request_id", session.request.request_id},
+                    {"sim_time", snapshot.sim_time},
+                    {"topology_version", snapshot.topology_version},
+                    {"strategy", success ? "resume_replanning" : "continue_replanning"},
+                    {"trigger", "recovery_resume"},
+                    {"disconnected_from", ""},
+                    {"disconnected_to", ""},
+                    {"result", status},
+                    {"success", success},
+                    {"affected_services", 1}
+                });
+                decisions_this_tick += 1;
+                continue;
+            }
             session.last_required_recompute_signature.clear();
             session.last_required_recompute_topology_version = -1;
             continue;

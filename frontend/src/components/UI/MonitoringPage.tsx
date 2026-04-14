@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
+import { resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
 function faultTypeLabel(tag: string): string {
   const map: Record<string, string> = {
@@ -70,14 +71,6 @@ function rescheduleReasonLabel(trigger: string): string {
     default:
       return trigger && trigger !== 'unknown' ? trigger : '未标注触发器'
   }
-}
-
-function shortToken(raw: string): string {
-  const text = String(raw ?? '').trim()
-  if (!text) return '0000'
-  const parts = text.split(/[_-]/).filter(Boolean)
-  const tail = parts.length > 0 ? parts[parts.length - 1] : text
-  return tail.slice(-6)
 }
 
 function AxisLineChart({
@@ -528,16 +521,10 @@ export default function MonitoringPage() {
 
   const recoveryRate = Number(orch?.recovery_success_rate ?? 0) * 100
   const resolveSfcLabel = (sessionId?: string, requestId?: string) => {
-    const sid = String(sessionId ?? '')
-    const rid = String(requestId ?? '')
-    const bySession = sid
-      ? deployments.find((d: any) => String(d?.session_id ?? '') === sid)
-      : null
-    if (bySession?.sfc_name) return String(bySession.sfc_name)
-    if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
-    if (rid) return `SFC-${shortToken(rid)}`
-    if (sid) return `SFC-${shortToken(sid)}`
-    return 'SFC-未知'
+    return resolveSfcSeqLabel(deployments as any, {
+      sessionId: String(sessionId ?? ''),
+      requestId: String(requestId ?? ''),
+    })
   }
   const stabilityRows = useMemo(() => {
     const tracesBySession = new Map<string, any[]>()
@@ -583,7 +570,7 @@ export default function MonitoringPage() {
         return {
           sessionId,
           requestId: String(dep.request_id ?? '-'),
-          sfcName: String(dep.sfc_name ?? `SFC ${dep.request_id ?? ''}`),
+          sfcName: resolveSfcLabel(String(dep.session_id ?? ''), String(dep.request_id ?? '')),
           stabilityScore,
           stabilityLevel,
           forcedReschedules,
@@ -631,9 +618,7 @@ export default function MonitoringPage() {
             onClick={() => navigateTo('/')}
             className="h-9 px-3 rounded-xl text-cyan-100 text-sm flex items-center gap-1.5 transition hover:brightness-110"
             style={{
-              background: 'linear-gradient(135deg, rgba(22,52,78,0.52), rgba(11,26,44,0.48))',
-              border: '1px solid rgba(114,172,215,0.34)',
-              boxShadow: '0 8px 20px rgba(0,0,0,0.36), inset 0 1px 0 rgba(160,220,255,0.16)',
+              background: 'linear-gradient(135deg, rgba(22,52,78,0.14), rgba(11,26,44,0.1))',
               backdropFilter: 'blur(10px)',
             }}
           >

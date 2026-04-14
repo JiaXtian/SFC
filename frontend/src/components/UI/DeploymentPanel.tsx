@@ -3,6 +3,7 @@ import { Trash2, ChevronDown, ChevronUp, CheckCircle, Clock, XCircle, Eye, EyeOf
 import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
 import { toChineseFailureList } from '@/utils/failureText'
+import { resolveSfcLabel } from '@/utils/sfcLabel'
 
 function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0
@@ -53,13 +54,18 @@ export default function DeploymentPanel() {
   const rollback = async (dep: Deployment) => {
     setRolling(dep.deployment_id)
     setDeleteConfirm(null)
+    const sfcLabel = resolveSfcLabel(deployments as any, {
+      deploymentId: dep.deployment_id,
+      sessionId: String((dep as any).session_id ?? ''),
+      requestId: String(dep.request_id ?? ''),
+    })
     try {
       pushRuntimeEvent({
         type: 'deployment_action',
-        message: `开始回滚 ${dep.sfc_name || dep.deployment_id}`,
+        message: `开始回滚 ${sfcLabel}`,
         raw: {
           title: '部署回滚开始',
-          detail: `${dep.sfc_name || dep.deployment_id}`,
+          detail: `${sfcLabel}`,
           level: 'info',
         },
       })
@@ -74,10 +80,10 @@ export default function DeploymentPanel() {
       removeDeployment(dep.deployment_id)
       pushRuntimeEvent({
         type: 'deployment_action',
-        message: `回滚完成 ${dep.sfc_name || dep.deployment_id}`,
+        message: `回滚完成 ${sfcLabel}`,
         raw: {
           title: '部署回滚完成',
-          detail: `${dep.sfc_name || dep.deployment_id} 资源已释放`,
+          detail: `${sfcLabel} 资源已释放`,
           level: 'ok',
         },
       })
@@ -93,10 +99,10 @@ export default function DeploymentPanel() {
     } catch (e: any) { 
       pushRuntimeEvent({
         type: 'deployment_action',
-        message: `回滚失败 ${dep.sfc_name || dep.deployment_id}`,
+        message: `回滚失败 ${sfcLabel}`,
         raw: {
           title: '部署回滚失败',
-          detail: `${dep.sfc_name || dep.deployment_id} · ${e?.message ?? e}`,
+          detail: `${sfcLabel} · ${e?.message ?? e}`,
           level: 'warn',
         },
       })
@@ -126,6 +132,12 @@ export default function DeploymentPanel() {
           const isHL        = highlightedDeploymentIds.includes(dep.deployment_id)
           const [lbl, lc]   = StatusLabel[dep.status] ?? ['未知', 'text-gray-500']
 
+          const sfcLabel = resolveSfcLabel(deployments as any, {
+            deploymentId: dep.deployment_id,
+            sessionId: String((dep as any).session_id ?? ''),
+            requestId: String(dep.request_id ?? ''),
+          })
+
           return (
             <div key={dep.deployment_id} className="rounded-xl overflow-hidden transition-all"
               style={{
@@ -135,7 +147,7 @@ export default function DeploymentPanel() {
               <div className="px-3 py-2.5">
                 <div className="flex items-center gap-2 mb-1.5">
                   <StatusIcon s={dep.status} />
-                  <span className="flex-1 text-[14px] font-semibold text-white truncate">{dep.sfc_name || dep.deployment_id}</span>
+                  <span className="flex-1 text-[13px] font-semibold text-white truncate">{sfcLabel}</span>
                   
                   {/* 关键：眼睛图标切换高亮 */}
                   <button onClick={() => toggleHighlight(dep)} title={isHL ? "取消高亮" : "在地球上高亮显示"}
@@ -155,13 +167,13 @@ export default function DeploymentPanel() {
                   </button>
                 </div>
 
-                <div className="flex items-center justify-between text-[12px]">
+                <div className="flex items-center justify-between text-[11px]">
                   <span className={`${lc} font-medium`}>{lbl}</span>
                   <span className="text-gray-600 font-mono">{dep.total_latency_ms?.toFixed(1)}ms</span>
                   <span className="text-gray-700">{new Date(dep.deployed_at).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}</span>
                 </div>
                 {(typeof dep.inference_latency_ms === 'number' || typeof (dep as any).topology_version_bound === 'number') && (
-                  <div className="mt-1 flex items-center justify-between text-[11px] font-mono">
+                  <div className="mt-1 flex items-center justify-between text-[10px] font-mono">
                     <span className="text-cyan-300">
                       {typeof dep.inference_latency_ms === 'number' ? `推理时延 ${dep.inference_latency_ms.toFixed(1)}ms` : '-'}
                     </span>
@@ -204,23 +216,23 @@ export default function DeploymentPanel() {
               {isExpanded && (
                 <div className="px-3 pb-3 space-y-2" style={{ borderTop: '1px solid rgba(100,100,120,0.08)' }}>
                   {dep.satisfies_constraints === false && (
-                    <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
-                      <div className="text-[13px] text-rose-300 font-semibold mb-1">等待可部署方案</div>
+                  <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
+                      <div className="text-[12px] text-rose-300 font-semibold mb-1">等待可部署方案</div>
                       <div className="space-y-0.5">
                         {(toChineseFailureList(dep.violation_details).length > 0
                           ? toChineseFailureList(dep.violation_details)
                           : ['当前候选不满足SLA硬约束，系统正在持续路径重算/重调度']
                         ).map((reason, idx) => (
-                          <div key={idx} className="text-[12px] text-rose-100">- {reason}</div>
+                          <div key={idx} className="text-[11px] text-rose-100">- {reason}</div>
                         ))}
                       </div>
                     </div>
                   )}
                   <div className="mt-2">
-                    <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
+                    <div className="text-[12px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
                     <div className="space-y-1">
                       {dep.per_vnf?.map((v, i) => (
-                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[12px]"
+                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px]"
                           style={{ background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.12)' }}>
                           <div className="flex items-center gap-2">
                             <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[9px] font-bold"
@@ -230,7 +242,7 @@ export default function DeploymentPanel() {
                             <span className="text-gray-700">→</span>
                             <span className="font-mono text-green-400">{v.node}</span>
                           </div>
-                          <div className="flex gap-2 text-[11px] text-gray-500">
+                          <div className="flex gap-2 text-[10px] text-gray-500">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>
@@ -242,8 +254,8 @@ export default function DeploymentPanel() {
 
                   {dep.link_details && dep.link_details.length > 0 && (
                     <div>
-                      <div className="text-[13px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
-                      <div className="mb-1.5 text-[11px] text-green-400 font-mono">
+                      <div className="text-[12px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
+                      <div className="mb-1.5 text-[10px] text-green-400 font-mono">
                         路径总时延: {dep.link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0).toFixed(2)}ms
                       </div>
                       <div className="space-y-1">

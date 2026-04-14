@@ -1,5 +1,6 @@
 import { X, Cpu, HardDrive, Navigation, Zap } from 'lucide-react'
 import { useStore } from '@/store/useStore'
+import { resolveSfcLabel } from '@/utils/sfcLabel'
 
 function nodeFaultTypeLabel(tag: string): string {
   const map: Record<string, string> = {
@@ -95,9 +96,14 @@ export default function SatelliteDetail() {
       if (d?.source_node === sat?.id) roles.push('入口')
       if (d?.destination_node === sat?.id) roles.push('出口')
       if (roles.length === 0) return null
+      const label = resolveSfcLabel(safeDeployments as any, {
+        deploymentId: String(d?.deployment_id ?? ''),
+        sessionId: String(d?.session_id ?? ''),
+        requestId: String(d?.request_id ?? ''),
+      })
       return {
         deployment_id: d?.deployment_id,
-        sfc_name: d?.sfc_name ?? d?.request_id ?? 'unknown',
+        sfc_name: label,
         roles,
       }
     })
@@ -294,7 +300,11 @@ export default function SatelliteDetail() {
                   <div className="text-[9px] text-gray-600">
                     SFC:{' '}
                     <span className="text-gray-400">
-                      {item?.dep?.sfc_name ?? '-'}
+                      {resolveSfcLabel(safeDeployments as any, {
+                        deploymentId: String(item?.dep?.deployment_id ?? ''),
+                        sessionId: String(item?.dep?.session_id ?? ''),
+                        requestId: String(item?.dep?.request_id ?? ''),
+                      })}
                     </span>
                   </div>
 

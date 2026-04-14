@@ -23,9 +23,11 @@ const vnfTemplates = {
   upf: { cpu: 2.8, mem: 4.6, bw_in: 1.0, bw_out: 1.0, disk: 18 },
   ausf: { cpu: 1.2, mem: 2.4, bw_in: 0.2, bw_out: 0.2, disk: 8 },
   udm: { cpu: 1.5, mem: 3.2, bw_in: 0.2, bw_out: 0.2, disk: 20 },
+  udr: { cpu: 1.4, mem: 3.0, bw_in: 0.2, bw_out: 0.2, disk: 22 },
   pcf: { cpu: 1.6, mem: 3.0, bw_in: 0.2, bw_out: 0.2, disk: 12 },
   nrf: { cpu: 1.1, mem: 2.2, bw_in: 0.15, bw_out: 0.15, disk: 8 },
   nssf: { cpu: 1.1, mem: 2.0, bw_in: 0.15, bw_out: 0.15, disk: 8 },
+  scp: { cpu: 1.3, mem: 2.6, bw_in: 0.2, bw_out: 0.2, disk: 10 },
 }
 
 type VNFTemplateName = keyof typeof vnfTemplates
@@ -50,7 +52,7 @@ const sfcTemplates = [
   },
   {
     name: 'open5GS 扩展链',
-    vnfs: ['nrf', 'ausf', 'udm', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
+    vnfs: ['nrf', 'scp', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
     constraints: { max_latency_ms: 240, min_bandwidth_gbps: 1.2, min_reliability: 0.86 },
   },
 ]
@@ -112,9 +114,9 @@ export default function SFCForm() {
   const [customSFC, setCustomSFC] = useState({
     name: '自定义SFC',
     vnfs: [
-      { type: 'amf', name: 'core-nf-1-amf', ...vnfTemplates.amf },
-      { type: 'smf', name: 'core-nf-2-smf', ...vnfTemplates.smf },
-      { type: 'upf', name: 'core-nf-3-upf', ...vnfTemplates.upf },
+      { type: 'amf', name: 'AMF-1', ...vnfTemplates.amf },
+      { type: 'smf', name: 'SMF-2', ...vnfTemplates.smf },
+      { type: 'upf', name: 'UPF-3', ...vnfTemplates.upf },
     ] as VNFConfig[],
     constraints: { max_latency_ms: 180, min_bandwidth_gbps: 1.0, min_reliability: 0.88 },
     topk: 1,
@@ -159,7 +161,7 @@ export default function SFCForm() {
       const idx = prev.vnfs.length + 1
       return {
         ...prev,
-        vnfs: [...prev.vnfs, { type: 'amf', name: `core-nf-${idx}-amf`, ...vnfTemplates.amf }],
+        vnfs: [...prev.vnfs, { type: 'amf', name: `AMF-${idx}`, ...vnfTemplates.amf }],
       }
     })
   }
@@ -172,7 +174,8 @@ export default function SFCForm() {
     setCustomSFC(prev => {
       const next = [...prev.vnfs]
       const prevName = next[index]?.name || value
-      next[index] = { ...next[index], type: value, name: prevName, ...vnfTemplates[value] }
+      const suggested = `${String(value).toUpperCase()}-${index + 1}`
+      next[index] = { ...next[index], type: value, name: prevName || suggested, ...vnfTemplates[value] }
       return { ...prev, vnfs: next }
     })
   }
@@ -267,7 +270,7 @@ export default function SFCForm() {
           ? {
               name: selectedTpl.name,
               vnfs: selectedTpl.vnfs.map((type, idx) => ({
-                name: `core-nf-${idx + 1}-${type}`,
+                name: `${String(type).toUpperCase()}-${idx + 1}`,
                 type,
                 ...vnfTemplates[type],
               })),
@@ -553,7 +556,7 @@ export default function SFCForm() {
                               }}
                             >
                               <div className="px-2 py-1 text-cyan-100 font-mono">
-                                {idx + 1}. {type}
+                                {idx + 1}. {String(type).toUpperCase()}
                               </div>
                               <div className="px-2 py-1 text-right text-slate-300 font-mono">{vnf.cpu}</div>
                               <div className="px-2 py-1 text-right text-slate-300 font-mono">{vnf.mem}</div>
@@ -653,7 +656,7 @@ export default function SFCForm() {
                     >
                       {Object.keys(vnfTemplates).map(name => (
                         <option key={name} value={name}>
-                          {name}
+                          {name.toUpperCase()}
                         </option>
                       ))}
                     </select>

@@ -26,8 +26,7 @@ export default function ControlPage() {
             onClick={() => navigateTo('/')}
             className="h-10 px-3.5 rounded-xl text-cyan-100 text-[14px] flex items-center gap-1.5 transition hover:brightness-110"
             style={{
-              background: 'linear-gradient(135deg, rgba(22,52,78,0.52), rgba(11,26,44,0.48))',
-              border: '1px solid rgba(114,172,215,0.34)',
+              background: 'linear-gradient(135deg, rgba(22,52,78,0.14), rgba(11,26,44,0.1))',
               backdropFilter: 'blur(10px)',
             }}
           >

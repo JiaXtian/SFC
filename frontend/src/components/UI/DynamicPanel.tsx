@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore, type DecisionTrace } from '@/store/useStore'
+import { resolveSfcLabel } from '@/utils/sfcLabel'
 
 function traceKey(t: DecisionTrace) {
   return [
@@ -26,14 +27,6 @@ function traceKey(t: DecisionTrace) {
 function pickSelectedAttempt(t?: DecisionTrace) {
   const steps = Array.isArray(t?.decision_process?.steps) ? t!.decision_process.steps : []
   return steps.find((s: any) => !!s?.satisfies_constraints) ?? steps[0] ?? null
-}
-
-function shortToken(raw: string): string {
-  const text = String(raw ?? '').trim()
-  if (!text) return '0000'
-  const parts = text.split(/[_-]/).filter(Boolean)
-  const tail = parts.length > 0 ? parts[parts.length - 1] : text
-  return tail.slice(-6)
 }
 
 export default function DynamicPanel() {
@@ -145,7 +138,10 @@ export default function DynamicPanel() {
 
   const stopSession = async (sessionId: string) => {
     const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(sessionId))
-    const sfcLabel = dep?.sfc_name ? String(dep.sfc_name) : `SFC-${shortToken(String(dep?.request_id ?? sessionId))}`
+    const sfcLabel = resolveSfcLabel(deployments as any, {
+      sessionId,
+      requestId: String(dep?.request_id ?? ''),
+    })
     try {
       await apiClient.stopSFCSession(sessionId)
       addToast(`${sfcLabel} 已停止`, 'success')
@@ -157,7 +153,10 @@ export default function DynamicPanel() {
 
   const recomputeSession = async (sessionId: string) => {
     const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(sessionId))
-    const sfcLabel = dep?.sfc_name ? String(dep.sfc_name) : `SFC-${shortToken(String(dep?.request_id ?? sessionId))}`
+    const sfcLabel = resolveSfcLabel(deployments as any, {
+      sessionId,
+      requestId: String(dep?.request_id ?? ''),
+    })
     try {
       await apiClient.recomputeSFCSession(sessionId, 'manual_panel')
       addToast(`${sfcLabel} 已触发重算`, 'success')
@@ -325,8 +324,10 @@ export default function DynamicPanel() {
               <div className="text-slate-200">
                 {(() => {
                   const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(s.session_id))
-                  if (dep?.sfc_name) return String(dep.sfc_name)
-                  return `SFC-${shortToken(String(dep?.request_id ?? s.session_id ?? ''))}`
+                  return resolveSfcLabel(deployments as any, {
+                    sessionId: String(s.session_id ?? ''),
+                    requestId: String(dep?.request_id ?? ''),
+                  })
                 })()}
               </div>
               <div className="text-slate-400">v{s.last_topology_version} · {s.last_inference_time_ms?.toFixed?.(1) ?? s.last_inference_time_ms}ms · 决策{ s.decisions_total }</div>
