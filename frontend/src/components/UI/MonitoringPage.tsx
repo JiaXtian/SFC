@@ -626,9 +626,7 @@ export default function MonitoringPage() {
             返回主页面
           </button>
           <div className="text-xl font-semibold text-slate-100">系统监控中心</div>
-          <div className="ml-auto text-xs text-slate-400">
-            topo_v{simulation.topology_version} · {simulation.sim_time || '-'}
-          </div>
+          <div className="ml-auto text-xs text-slate-400">{simulation.sim_time || '-'}</div>
         </div>
 
         <div className="grid grid-cols-12 gap-2.5">
@@ -939,7 +937,7 @@ export default function MonitoringPage() {
                     <span className="text-slate-400">{t.sim_time}</span>
                   </div>
                   <div className="text-slate-300 mt-0.5">
-                    topo_v{t.topology_version} · 推理{Number(t.inference_time_ms ?? 0).toFixed(1)}ms ·
+                    推理{Number(t.inference_time_ms ?? 0).toFixed(1)}ms ·
                     deployable={t.deployable_count}/{t.returned_topk}
                   </div>
                 </div>

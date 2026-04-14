@@ -307,7 +307,7 @@ export default function FaultInjectionControl() {
               placeholder="例如: 20（表示故障持续20秒）"
               className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-orange-200"
             />
-            <div className="text-[11px] text-slate-500">系统将自动按仿真采样周期换算为 TTL tick。</div>
+            <div className="text-[11px] text-slate-500">系统将自动按仿真采样周期换算并执行该持续时间。</div>
           </label>
 
           {injectScope === 'single' ? (

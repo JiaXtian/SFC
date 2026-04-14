@@ -179,7 +179,7 @@ export default function DeploymentPanel() {
                     </span>
                     <span className="text-indigo-300">
                       {typeof (dep as any).topology_version_bound === 'number'
-                        ? `topo_v${(dep as any).topology_version_bound} · 路径重算 ${(dep as any).path_recompute_count ?? 0} 次`
+                        ? `路径重算 ${(dep as any).path_recompute_count ?? 0} 次`
                         : '-'}
                     </span>
                   </div>

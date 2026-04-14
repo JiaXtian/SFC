@@ -135,7 +135,7 @@ export function useWebSocket() {
               pushRuntimeEvent({
                 type: 'decision_trace',
                 sim_time: data.sim_time,
-                message: `策略决策完成: ${data.request_id} (topo_v${data.topology_version}) [${data.mode ?? 'single'}]`,
+                message: `策略决策完成: ${data.request_id} [${data.mode ?? 'single'}]`,
                 raw: data,
               })
               return
@@ -147,7 +147,7 @@ export function useWebSocket() {
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `SFC编排更新 ${sfcLabel}: ${data.status} (topo_v${data.topology_version})`,
+                message: `SFC编排更新 ${sfcLabel}: ${data.status}`,
                 raw: data,
               })
               return

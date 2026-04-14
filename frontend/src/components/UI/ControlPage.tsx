@@ -2,7 +2,6 @@ import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
 import ConstellationControlPanel from './ConstellationControlPanel'
 import SFCForm from './SFCForm'
 import FaultInjectionControl from './FaultInjectionControl'
-import { useStore } from '@/store/useStore'
 
 function navigateTo(path: string) {
   if (window.location.pathname === path) return
@@ -11,8 +10,6 @@ function navigateTo(path: string) {
 }
 
 export default function ControlPage() {
-  const { simulation } = useStore((s) => ({ simulation: s.simulation }))
-
   return (
     <div
       className="absolute inset-0 z-[92] overflow-auto"
@@ -37,9 +34,7 @@ export default function ControlPage() {
             <SlidersHorizontal className="w-5 h-5 text-cyan-300" />
             系统控制页面
           </div>
-          <div className="ml-auto text-[13px] text-slate-400">
-            topo_v{simulation.topology_version} · {simulation.sim_time || '-'}
-          </div>
+          <div className="ml-auto text-[13px] text-slate-400">控制台</div>
         </div>
 
         <div className="grid grid-cols-12 gap-3.5">

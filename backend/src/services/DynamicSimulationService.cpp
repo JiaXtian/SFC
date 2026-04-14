@@ -318,6 +318,13 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                     }
                     const std::string fault_type = it->second.fault_type;
                     node_fault_states_.erase(it);
+                    for (auto& sat : topology.nodes) {
+                        if (sat.id == node_id) {
+                            sat.status = "active";
+                            sat.fault_tag.clear();
+                            break;
+                        }
+                    }
                     removed_count += 1;
                     events.push_back({
                         {"type", "recovery_event"},
@@ -473,8 +480,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     const double inclination_deg = topology.metadata.inclination_deg;
     for (auto& sat : topology.nodes) {
         update_satellite_position(sat, inclination_deg, sim_dt_sec);
-        if (sat.status.empty()) sat.status = "active";
-        if (sat.fault_tag.empty() && sat.status != "down") sat.status = "active";
+        // Rebuild node fault view from source-of-truth `node_fault_states_` each tick.
+        // This prevents stale "down/fault_tag" residue after manual fault removal.
+        sat.status = "active";
+        sat.fault_tag.clear();
     }
 
     std::vector<nlohmann::json> change_events;

@@ -720,8 +720,8 @@ function mergeNodesForContinuousMotion(current: SatelliteData[], incoming: any[]
       disk_available: Number(src.disk_available ?? sat.disk_available),
       core_network_load: Number(src.core_network_load ?? sat.core_network_load ?? 0),
       node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
-      status: String(src.status ?? sat.status ?? 'active'),
-      fault_tag: String(src.fault_tag ?? sat.fault_tag ?? ''),
+      status: String(src.status ?? 'active'),
+      fault_tag: String(src.fault_tag ?? ''),
       vnfs: Array.isArray(src.core_nfs) ? src.core_nfs : (Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs),
     }
   })
@@ -747,7 +747,7 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
       bandwidth_gbps: Number(src.bandwidth_gbps ?? lk.bandwidth_gbps ?? 0),
       bandwidth_available_gbps: Number(src.bandwidth_available_gbps ?? lk.bandwidth_available_gbps ?? lk.bandwidth_gbps ?? 0),
       reliability: Number(src.reliability ?? src.link_reliability ?? lk.reliability ?? 0.999),
-      fault_tag: String(src.fault_tag ?? lk.fault_tag ?? ''),
+      fault_tag: String(src.fault_tag ?? ''),
       __resource_status: resourceStatus,
       __resource_status_seed: resourceStatus,
       // Keep visual status stable between periodic backend syncs to avoid link flashing.

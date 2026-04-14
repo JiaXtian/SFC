@@ -27,9 +27,9 @@ export default function TimeAxis() {
   const timelineLabel = useMemo(() => {
     if (simulation.view_mode === 'playback' && history.length > 0 && historyCursor >= 0) {
       const frame = history[historyCursor]
-      return `${frame?.sim_time ?? '-'} · topo_v${frame?.topology_version ?? 0}`
+      return `${frame?.sim_time ?? '-'}`
     }
-    return `${simulation.sim_time || '-'} · topo_v${simulation.topology_version || 0}`
+    return `${simulation.sim_time || '-'}`
   }, [simulation.view_mode, simulation.sim_time, simulation.topology_version, history, historyCursor])
 
   const syncBackendDynamicConfig = (samplingSec: number, speed: number) => {

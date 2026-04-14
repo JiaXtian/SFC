@@ -217,8 +217,8 @@ export function useAutoDynamics() {
               disk_available: Number(src.disk_available ?? sat.disk_available),
               core_network_load: Number(src.core_network_load ?? sat.core_network_load ?? 0),
               node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
-              status: String(src.status ?? sat.status ?? 'active'),
-              fault_tag: String(src.fault_tag ?? sat.fault_tag ?? ''),
+              status: String(src.status ?? 'active'),
+              fault_tag: String(src.fault_tag ?? ''),
               vnfs: Array.isArray(src.core_nfs) ? src.core_nfs : (Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs),
             }
           })
@@ -240,7 +240,7 @@ export function useAutoDynamics() {
               bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
               bandwidth_available_gbps: Number(src.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? 0),
               reliability: Number(src.reliability ?? src.link_reliability ?? l.reliability ?? 0.999),
-              fault_tag: String(src.fault_tag ?? l.fault_tag ?? ''),
+              fault_tag: String(src.fault_tag ?? ''),
               __resource_status: resourceStatus,
               __resource_status_seed: resourceStatus,
               // Keep visual state stable between resource sync ticks to avoid flicker.

@@ -293,7 +293,6 @@ export default function DynamicPanel() {
         <div>运行状态: <span className={simulation.running ? 'text-emerald-300' : 'text-slate-400'}>{simulation.running ? '运行中' : '已停止'}</span></div>
         <div>显示模式: <span className={simulation.view_mode === 'realtime' ? 'text-cyan-300' : 'text-indigo-300'}>{simulation.view_mode === 'realtime' ? '实时' : '回放'}</span></div>
         <div>仿真时间: <span className="text-slate-300">{simulation.sim_time || '-'}</span></div>
-        <div>拓扑版本: <span className="text-cyan-300 font-mono">{simulation.topology_version}</span></div>
         {metrics && (
           <>
             <div>节点: {metrics.active_nodes}/{metrics.total_nodes} 活跃</div>
@@ -330,7 +329,7 @@ export default function DynamicPanel() {
                   })
                 })()}
               </div>
-              <div className="text-slate-400">v{s.last_topology_version} · {s.last_inference_time_ms?.toFixed?.(1) ?? s.last_inference_time_ms}ms · 决策{ s.decisions_total }</div>
+              <div className="text-slate-400">{s.last_inference_time_ms?.toFixed?.(1) ?? s.last_inference_time_ms}ms · 决策{ s.decisions_total }</div>
               <div className="flex gap-2 mt-1">
                 <button onClick={() => recomputeSession(s.session_id)} className="px-2 py-0.5 rounded bg-sky-700/70 text-sky-100">重算</button>
                 <button onClick={() => stopSession(s.session_id)} className="px-2 py-0.5 rounded bg-rose-700/70 text-rose-100">停止</button>
@@ -384,7 +383,7 @@ export default function DynamicPanel() {
                 >
                   <div className="text-cyan-200 text-[11px]">{t.request_id}</div>
                   <div className="text-slate-400 text-[10px]">
-                    {t.mode ?? 'single'} · topo_v{t.topology_version} · {t.inference_time_ms?.toFixed?.(1) ?? t.inference_time_ms}ms
+                    {t.mode ?? 'single'} · {t.inference_time_ms?.toFixed?.(1) ?? t.inference_time_ms}ms
                   </div>
                 </button>
               )

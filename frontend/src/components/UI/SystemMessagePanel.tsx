@@ -76,13 +76,14 @@ export default function SystemMessagePanel() {
         if (e.type === 'fault_update_event') {
           const nodeId = String(e.raw?.entity_id ?? '')
           const fault = faultTypeLabel(String(e.raw?.fault_type ?? 'unknown'))
-          const ttl = Number(e.raw?.ttl_ticks ?? 0)
+          const remainSec = Number(e.raw?.remaining_sec ?? 0)
+          const remain = Number.isFinite(remainSec) && remainSec > 0 ? `${remainSec.toFixed(0)}s` : '已更新'
           return {
             id: e.id,
             time,
             tone: 'info',
             title: '故障时长调整',
-            text: short(`${nodeId}（${fault}）持续时间已更新，当前TTL=${ttl}`),
+            text: short(`${nodeId}（${fault}）持续时间已更新，剩余 ${remain}`),
           }
         }
         if (e.type === 'reschedule_trigger') {
