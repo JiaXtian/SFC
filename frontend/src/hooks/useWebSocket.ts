@@ -29,6 +29,27 @@ function faultTypeLabel(tag: string): string {
   return map[tag] ?? tag
 }
 
+function shortToken(raw: string): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return '0000'
+  const parts = text.split(/[_-]/).filter(Boolean)
+  const tail = parts.length > 0 ? parts[parts.length - 1] : text
+  return tail.slice(-6)
+}
+
+function sfcLabelByIds(sessionId: string, requestId?: string): string {
+  const st = useStore.getState()
+  const deployments = Array.isArray(st.deployments) ? st.deployments : []
+  const bySession = sessionId
+    ? deployments.find((d: any) => String(d?.session_id ?? '') === sessionId)
+    : null
+  if (bySession?.sfc_name) return String(bySession.sfc_name)
+  if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
+  if (requestId) return `SFC-${shortToken(requestId)}`
+  if (sessionId) return `SFC-${shortToken(sessionId)}`
+  return 'SFC-未知'
+}
+
 export function useWebSocket() {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
@@ -103,13 +124,14 @@ export function useWebSocket() {
               const trigger = String(trace?.trigger ?? '')
               if (trigger === 'source_node_down' || trigger === 'destination_node_down') {
                 const sessionId = String(trace?.session_id ?? trace?.request_id ?? 'unknown')
+                const sfcLabel = sfcLabelByIds(String(trace?.session_id ?? ''), String(trace?.request_id ?? ''))
                 const key = `${sessionId}:${trigger}`
                 const now = Date.now()
                 const last = endpointFaultPopupCooldownRef.current[key] ?? 0
                 if (now - last > 12000) {
                   endpointFaultPopupCooldownRef.current[key] = now
                   const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
-                  window.alert(`SFC ${sessionId} 触发必要重调度\n原因：${label}故障，当前部署不可继续保持`)
+                  window.alert(`${sfcLabel} 触发必要重调度\n原因：${label}故障，当前部署不可继续保持`)
                 }
               }
               pushRuntimeEvent({
@@ -121,10 +143,13 @@ export function useWebSocket() {
               return
             }
             if (type === 'session_update') {
+              const sid = String(data.session_id ?? '')
+              const rid = String(data.request_id ?? '')
+              const sfcLabel = sfcLabelByIds(sid, rid)
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `SFC编排更新 ${data.session_id}: ${data.status} (topo_v${data.topology_version})`,
+                message: `SFC编排更新 ${sfcLabel}: ${data.status} (topo_v${data.topology_version})`,
                 raw: data,
               })
               return
@@ -141,7 +166,11 @@ export function useWebSocket() {
               const label = type === 'fault_event'
                 ? '故障事件'
                 : (type === 'recovery_event' ? '恢复事件' : '故障更新')
-              const entity = `${data.entity_type ?? 'entity'}:${data.entity_id ?? ''}`
+              const entityType = String(data.entity_type ?? 'entity')
+              const entityId = String(data.entity_id ?? '')
+              const entity = entityType === 'session'
+                ? sfcLabelByIds(entityId, String(data.request_id ?? ''))
+                : `${entityType}:${entityId}`
               const faultType = String(data.fault_type ?? data.reason ?? '')
               const faultText = faultType ? ` (${faultTypeLabel(faultType)})` : ''
               pushRuntimeEvent({

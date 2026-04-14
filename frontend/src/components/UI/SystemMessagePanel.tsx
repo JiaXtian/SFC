@@ -42,9 +42,33 @@ function compactTime(raw: string) {
   return `${hh}:${mm}:${ss}`
 }
 
+function shortToken(raw: string) {
+  const text = String(raw ?? '').trim()
+  if (!text) return '0000'
+  const parts = text.split(/[_-]/).filter(Boolean)
+  const tail = parts.length > 0 ? parts[parts.length - 1] : text
+  return tail.slice(-6)
+}
+
 export default function SystemMessagePanel() {
-  const { runtimeEvents } = useStore((s) => ({ runtimeEvents: s.runtimeEvents }))
+  const { runtimeEvents, deployments } = useStore((s) => ({
+    runtimeEvents: s.runtimeEvents,
+    deployments: s.deployments,
+  }))
   const [collapsed, setCollapsed] = useState(false)
+
+  const resolveSfcLabel = (sessionId?: string, requestId?: string) => {
+    const sid = String(sessionId ?? '')
+    const rid = String(requestId ?? '')
+    const bySession = sid
+      ? deployments.find((d: any) => String(d?.session_id ?? '') === sid)
+      : null
+    if (bySession?.sfc_name) return String(bySession.sfc_name)
+    if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
+    if (rid) return `SFC-${shortToken(rid)}`
+    if (sid) return `SFC-${shortToken(sid)}`
+    return 'SFC-未知'
+  }
 
   const rows = useMemo(() => {
     return runtimeEvents
@@ -77,6 +101,7 @@ export default function SystemMessagePanel() {
 
         if (e.type === 'recovery_event' && String(e.raw?.entity_type ?? '') === 'session') {
           const sid = String(e.raw?.entity_id ?? '')
+          const sfcLabel = resolveSfcLabel(sid, String(e.raw?.request_id ?? ''))
           const trig = triggerLabel(String(e.raw?.trigger ?? ''))
           const ok = Boolean(e.raw?.success)
           return {
@@ -85,8 +110,8 @@ export default function SystemMessagePanel() {
             tone: ok ? 'ok' : 'warn',
             title: ok ? '重调度完成' : '重调度失败',
             text: ok
-              ? short(`会话 ${sid} 已恢复，触发原因：${trig}`)
-              : short(`会话 ${sid} 恢复失败，请检查资源与链路状态`),
+              ? short(`${sfcLabel} 已恢复，触发原因：${trig}`)
+              : short(`${sfcLabel} 恢复失败，请检查资源与链路状态`),
           }
         }
 
@@ -104,7 +129,9 @@ export default function SystemMessagePanel() {
         if (e.type === 'decision_trace') {
           const trig = String((e.raw as any)?.trigger ?? '')
           if (!trig || ['session_start', 'topology_tick_bootstrap', 'manual_initial_candidate'].includes(trig)) return null
-          const sid = String((e.raw as any)?.session_id ?? (e.raw as any)?.request_id ?? '')
+          const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel(sid, rid)
           const deployable = Number((e.raw as any)?.deployable_count ?? 0)
           const returned = Number((e.raw as any)?.returned_topk ?? 0)
           return {
@@ -113,14 +140,16 @@ export default function SystemMessagePanel() {
             tone: deployable > 0 ? 'info' : 'warn',
             title: deployable > 0 ? '路径重算完成' : '路径重算未通过',
             text: deployable > 0
-              ? short(`会话 ${sid} 已生成可部署方案（${deployable}/${returned}）`)
-              : short(`会话 ${sid} 未找到满足约束的可部署方案`),
+              ? short(`${sfcLabel} 已生成可部署方案（${deployable}/${returned}）`)
+              : short(`${sfcLabel} 未找到满足约束的可部署方案`),
           }
         }
 
         if (e.type === 'session_update') {
           const st = String((e.raw as any)?.status ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel(sid, rid)
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           if (st === 'redeployed') {
             return {
@@ -128,7 +157,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'ok',
               title: '重调度生效',
-              text: short(`会话 ${sid} 已切换到新路径（${trig}）`),
+              text: short(`${sfcLabel} 已切换到新路径（${trig}）`),
             }
           }
           if (st === 'deployed') {
@@ -137,7 +166,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'ok',
               title: '部署成功',
-              text: short(`会话 ${sid} 已完成部署并进入运行态`),
+              text: short(`${sfcLabel} 已完成部署并进入运行态`),
             }
           }
           if (st === 'decision_failed') {
@@ -155,7 +184,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'warn',
               title: '等待可部署方案',
-              text: short(`会话 ${sid} 暂无可部署方案，系统将持续重算（${trig}）`),
+              text: short(`${sfcLabel} 暂无可部署方案，系统将持续重算（${trig}）`),
             }
           }
           return null
@@ -175,7 +204,7 @@ export default function SystemMessagePanel() {
       })
       .filter(Boolean)
       .slice(0, 60) as Array<{ id: string; time: string; tone: string; title: string; text: string }>
-  }, [runtimeEvents])
+  }, [runtimeEvents, deployments])
 
   const toneStyle = (tone: string) => {
     if (tone === 'ok') return { tx: 'text-emerald-200', dot: '#34d399' }
@@ -190,7 +219,7 @@ export default function SystemMessagePanel() {
       style={{
         top: 'calc(44px * var(--ui-scale, 1) + 8px)',
         bottom: 'calc(44px * var(--ui-scale, 1) + 8px)',
-        width: collapsed ? 32 : 'clamp(280px, 20vw, 410px)',
+        width: collapsed ? 32 : 'clamp(340px, 24vw, 520px)',
       }}
     >
       <button
@@ -216,7 +245,6 @@ export default function SystemMessagePanel() {
           <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold inline-flex items-center gap-1.5 mb-1.5">
             <Bell className="w-3.5 h-3.5 text-cyan-300" />系统监控消息
           </div>
-          <div className="text-[10px] text-slate-400 mb-2">显示故障、重调度、路径重算、部署和回滚的关键动态</div>
           <div className="flex-1 overflow-y-auto pr-1">
             {rows.map((r) => {
               const st = toneStyle(r.tone)

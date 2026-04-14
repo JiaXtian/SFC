@@ -72,6 +72,14 @@ function rescheduleReasonLabel(trigger: string): string {
   }
 }
 
+function shortToken(raw: string): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return '0000'
+  const parts = text.split(/[_-]/).filter(Boolean)
+  const tail = parts.length > 0 ? parts[parts.length - 1] : text
+  return tail.slice(-6)
+}
+
 function AxisLineChart({
   values,
   color,
@@ -519,6 +527,18 @@ export default function MonitoringPage() {
   }, [orch?.latency_p95_ms, orchestrationTraces])
 
   const recoveryRate = Number(orch?.recovery_success_rate ?? 0) * 100
+  const resolveSfcLabel = (sessionId?: string, requestId?: string) => {
+    const sid = String(sessionId ?? '')
+    const rid = String(requestId ?? '')
+    const bySession = sid
+      ? deployments.find((d: any) => String(d?.session_id ?? '') === sid)
+      : null
+    if (bySession?.sfc_name) return String(bySession.sfc_name)
+    if (bySession?.request_id) return `SFC-${shortToken(String(bySession.request_id))}`
+    if (rid) return `SFC-${shortToken(rid)}`
+    if (sid) return `SFC-${shortToken(sid)}`
+    return 'SFC-未知'
+  }
   const stabilityRows = useMemo(() => {
     const tracesBySession = new Map<string, any[]>()
     orchestrationTraces.forEach((trace: any) => {
@@ -766,7 +786,11 @@ export default function MonitoringPage() {
                     </span>
                     <span className="text-slate-400">{e.sim_time || '-'}</span>
                   </div>
-                  <div className="text-slate-200 mt-0.5">{e.message}</div>
+                  <div className="text-slate-200 mt-0.5">
+                    {String(e.raw?.entity_type ?? '') === 'session'
+                      ? `${e.type === 'fault_event' ? '故障事件' : '恢复事件'} ${resolveSfcLabel(String(e.raw?.entity_id ?? ''), String(e.raw?.request_id ?? ''))}`
+                      : e.message}
+                  </div>
                   <div className="text-[10px] text-slate-400 mt-0.5">
                     类型: {faultTypeLabel(String(e.raw?.fault_type ?? e.raw?.reason ?? 'unknown'))}
                   </div>

@@ -265,9 +265,8 @@ export default function FaultInjectionControl() {
       }}
     >
       <div className="text-[14px] uppercase tracking-wide text-cyan-100 font-semibold mb-1.5 flex items-center gap-1.5">
-        <Activity className="w-4 h-4 text-cyan-300" />故障注入控制（仅手动）
+        <Activity className="w-4 h-4 text-cyan-300" />故障注入控制
       </div>
-      <div className="text-[11px] text-slate-400 mb-2">系统已关闭周期自动故障注入，仅支持手动单颗/批量注入节点故障。</div>
 
       <div className="flex-1 overflow-y-auto pr-1.5 space-y-3 text-[12px]">
         <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2.5">

@@ -201,6 +201,14 @@ export default function Satellites() {
     return Array.from(ids)
   }, [vnfHighlightSet, endpointSets])
 
+  const faultSatIds = useMemo(() => {
+    const out: string[] = []
+    satellites.forEach((sat: any) => {
+      if (isNodeFault(sat)) out.push(String(sat.id))
+    })
+    return out
+  }, [satellites])
+
   if (satellites.length === 0) return null
 
   const hov = hoveredIdx >= 0 ? satellites[hoveredIdx] : null
@@ -277,6 +285,26 @@ export default function Satellites() {
             <mesh raycast={() => null}>
               <sphereGeometry args={[0.118, 14, 14]} />
               <meshBasicMaterial color={core} transparent opacity={0.28} depthWrite={false} />
+            </mesh>
+          </group>
+        )
+      })}
+
+      {/* Fault node subtle red bulge highlight */}
+      {faultSatIds.map((satId) => {
+        const idx = satelliteIndexById.get(satId)
+        if (idx == null || idx < 0) return null
+        const p = getDisplayPosition(idx)
+        if (!p) return null
+        return (
+          <group key={`fault-glow-${satId}`} position={vecToTuple(p)}>
+            <mesh raycast={() => null}>
+              <sphereGeometry args={[0.095, 14, 14]} />
+              <meshBasicMaterial color="#ff6b63" transparent opacity={0.9} />
+            </mesh>
+            <mesh raycast={() => null}>
+              <sphereGeometry args={[0.132, 14, 14]} />
+              <meshBasicMaterial color="#ff3b30" transparent opacity={0.28} depthWrite={false} />
             </mesh>
           </group>
         )

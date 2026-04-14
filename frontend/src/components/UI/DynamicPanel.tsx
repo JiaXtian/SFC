@@ -28,6 +28,14 @@ function pickSelectedAttempt(t?: DecisionTrace) {
   return steps.find((s: any) => !!s?.satisfies_constraints) ?? steps[0] ?? null
 }
 
+function shortToken(raw: string): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return '0000'
+  const parts = text.split(/[_-]/).filter(Boolean)
+  const tail = parts.length > 0 ? parts[parts.length - 1] : text
+  return tail.slice(-6)
+}
+
 export default function DynamicPanel() {
   const {
     simulation,
@@ -36,6 +44,7 @@ export default function DynamicPanel() {
     setPlaybackCursor,
     decisionTraces,
     runtimeEvents,
+    deployments,
     addToast,
   } = useStore()
 
@@ -135,9 +144,11 @@ export default function DynamicPanel() {
   }
 
   const stopSession = async (sessionId: string) => {
+    const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(sessionId))
+    const sfcLabel = dep?.sfc_name ? String(dep.sfc_name) : `SFC-${shortToken(String(dep?.request_id ?? sessionId))}`
     try {
       await apiClient.stopSFCSession(sessionId)
-      addToast(`会话 ${sessionId} 已停止`, 'success')
+      addToast(`${sfcLabel} 已停止`, 'success')
       loadSessions()
     } catch (e: any) {
       addToast(`停止会话失败: ${e?.message ?? e}`, 'error')
@@ -145,9 +156,11 @@ export default function DynamicPanel() {
   }
 
   const recomputeSession = async (sessionId: string) => {
+    const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(sessionId))
+    const sfcLabel = dep?.sfc_name ? String(dep.sfc_name) : `SFC-${shortToken(String(dep?.request_id ?? sessionId))}`
     try {
       await apiClient.recomputeSFCSession(sessionId, 'manual_panel')
-      addToast(`会话 ${sessionId} 已触发重算`, 'success')
+      addToast(`${sfcLabel} 已触发重算`, 'success')
     } catch (e: any) {
       addToast(`会话重算失败: ${e?.message ?? e}`, 'error')
     }
@@ -309,7 +322,13 @@ export default function DynamicPanel() {
         <div className="max-h-36 overflow-y-auto space-y-1">
           {sessions.map((s: any) => (
             <div key={s.session_id} className="rounded px-2 py-1 bg-slate-900/60 border border-slate-800 text-[11px]">
-              <div className="text-slate-200">{s.session_id}</div>
+              <div className="text-slate-200">
+                {(() => {
+                  const dep = deployments.find((d: any) => String(d?.session_id ?? '') === String(s.session_id))
+                  if (dep?.sfc_name) return String(dep.sfc_name)
+                  return `SFC-${shortToken(String(dep?.request_id ?? s.session_id ?? ''))}`
+                })()}
+              </div>
               <div className="text-slate-400">v{s.last_topology_version} · {s.last_inference_time_ms?.toFixed?.(1) ?? s.last_inference_time_ms}ms · 决策{ s.decisions_total }</div>
               <div className="flex gap-2 mt-1">
                 <button onClick={() => recomputeSession(s.session_id)} className="px-2 py-0.5 rounded bg-sky-700/70 text-sky-100">重算</button>

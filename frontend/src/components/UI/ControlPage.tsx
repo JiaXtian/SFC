@@ -42,9 +42,6 @@ export default function ControlPage() {
             topo_v{simulation.topology_version} · {simulation.sim_time || '-'}
           </div>
         </div>
-        <div className="text-[14px] text-slate-400 mb-3">
-          通过本页面执行星座生成、部署策略配置与故障注入；主页面用于实时大屏展示，不再承载操作面板。
-        </div>
 
         <div className="grid grid-cols-12 gap-3.5">
           <div className="col-span-12 xl:col-span-3 2xl:col-span-3 min-h-[800px]">
