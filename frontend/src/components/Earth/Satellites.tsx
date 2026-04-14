@@ -21,6 +21,12 @@ function blendColors(colors: string[]): string {
   return `#${out.getHexString()}`
 }
 
+function isNodeFault(sat: any): boolean {
+  const status = String(sat?.status ?? 'active').toLowerCase()
+  const faultTag = String(sat?.fault_tag ?? '').trim()
+  return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
+}
+
 export default function Satellites() {
   const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
     satellites: s.satellites,
@@ -79,8 +85,7 @@ export default function Satellites() {
     const selectedFaultRed = new THREE.Color('#ff6b63')
 
     satellites.forEach(sat => {
-      const status = String((sat as any)?.status ?? 'active')
-      const isFault = status === 'down'
+      const isFault = isNodeFault(sat)
       targetPositions.push(satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z))
       if (isFault && selectedSatellite?.id === sat.id) {
         colours.push(selectedFaultRed)
@@ -295,7 +300,7 @@ export default function Satellites() {
                 磁盘 <span style={{ color: '#f0f9ff', fontWeight: 600 }}>{(hov as any).disk_available?.toFixed?.(0) ?? '0'}</span>/{(hov as any).disk_total ?? 0}GB
               </div>
               <div style={{ color: '#64748b', marginTop: 3, fontSize: 9 }}>
-                状态: {String((hov as any)?.status ?? 'active') === 'down' ? '故障' : '正常'}
+                状态: {isNodeFault(hov) ? '故障' : '正常'}
                 {String((hov as any)?.fault_tag ?? '').trim()
                   ? ` · ${String((hov as any).fault_tag)}`
                   : ''}

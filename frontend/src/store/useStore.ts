@@ -741,6 +741,7 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
     const src = byKey.get(linkKey(String(lk.source), String(lk.target)))
     if (!src) return lk
     const resourceStatus = String(src.status ?? lk.__resource_status ?? lk.status ?? 'active')
+    const visualStatus = String(lk.status ?? 'active')
     return {
       ...lk,
       bandwidth_gbps: Number(src.bandwidth_gbps ?? lk.bandwidth_gbps ?? 0),
@@ -749,8 +750,8 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
       fault_tag: String(src.fault_tag ?? lk.fault_tag ?? ''),
       __resource_status: resourceStatus,
       __resource_status_seed: resourceStatus,
-      // Keep visual status aligned with backend resource status so links recover immediately.
-      status: resourceStatus,
+      // Keep visual status stable between periodic backend syncs to avoid link flashing.
+      status: visualStatus,
     }
   })
 }

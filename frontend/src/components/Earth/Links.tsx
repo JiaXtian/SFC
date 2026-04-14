@@ -230,8 +230,10 @@ export default function Links() {
     const a = new THREE.Vector3()
     const b = new THREE.Vector3()
     const pt = new THREE.Vector3()
+    const endpoint = new THREE.Vector3()
     let best: RenderLink | null = null
     let bestD = Number.POSITIVE_INFINITY
+    let bestEndpointD = Number.POSITIVE_INFINITY
     const cam = ray.origin
     for (const link of item.links) {
       const s = satMap.get(link.source)
@@ -246,8 +248,16 @@ export default function Links() {
       if (d < bestD) {
         bestD = d
         best = link
+        endpoint.set(pa[0], pa[1], pa[2])
+        const dA = ray.distanceSqToPoint(endpoint)
+        endpoint.set(pb[0], pb[1], pb[2])
+        const dB = ray.distanceSqToPoint(endpoint)
+        bestEndpointD = Math.min(dA, dB)
       }
     }
+    // Prioritize node picking when user clicks near a satellite endpoint.
+    const endpointThreshold = satellites.length >= 5000 ? 0.028 : 0.036
+    if (Number.isFinite(bestEndpointD) && Math.sqrt(bestEndpointD) <= endpointThreshold) return
     // Keep threshold tight to prioritize satellite picking when near nodes.
     const clickThreshold = satellites.length >= 5000 ? 0.028 : 0.024
     if (!Number.isFinite(bestD) || Math.sqrt(bestD) > clickThreshold) return

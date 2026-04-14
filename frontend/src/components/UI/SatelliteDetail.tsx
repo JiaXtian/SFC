@@ -13,6 +13,12 @@ function nodeFaultTypeLabel(tag: string): string {
   return map[tag] ?? (tag || '无')
 }
 
+function isNodeFault(sat: any): boolean {
+  const status = String(sat?.status ?? 'active').toLowerCase()
+  const faultTag = String(sat?.fault_tag ?? '').trim()
+  return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
+}
+
 /**
  * 安全资源条组件
  */
@@ -53,9 +59,8 @@ export default function SatelliteDetail() {
   if (!selectedSatellite) return null
 
   const sat = selectedSatellite
-  const satStatus = String((sat as any)?.status ?? 'active')
   const satFaultTag = String((sat as any)?.fault_tag ?? '')
-  const isFault = satStatus === 'down'
+  const isFault = isNodeFault(sat)
 
 
   const cpuTotal = Number(sat?.cpu_total ?? 0)

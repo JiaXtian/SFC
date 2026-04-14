@@ -178,10 +178,10 @@ export default function SystemMessagePanel() {
   }, [runtimeEvents])
 
   const toneStyle = (tone: string) => {
-    if (tone === 'ok') return { bd: 'rgba(74,222,128,0.24)', tx: 'text-emerald-200' }
-    if (tone === 'warn') return { bd: 'rgba(251,146,60,0.28)', tx: 'text-amber-200' }
-    if (tone === 'info') return { bd: 'rgba(125,211,252,0.26)', tx: 'text-sky-200' }
-    return { bd: 'rgba(100,116,139,0.3)', tx: 'text-cyan-100' }
+    if (tone === 'ok') return { tx: 'text-emerald-200', dot: '#34d399' }
+    if (tone === 'warn') return { tx: 'text-amber-200', dot: '#f59e0b' }
+    if (tone === 'info') return { tx: 'text-sky-200', dot: '#38bdf8' }
+    return { tx: 'text-cyan-100', dot: '#94a3b8' }
   }
 
   return (
@@ -217,23 +217,25 @@ export default function SystemMessagePanel() {
             <Bell className="w-3.5 h-3.5 text-cyan-300" />系统监控消息
           </div>
           <div className="text-[10px] text-slate-400 mb-2">显示故障、重调度、路径重算、部署和回滚的关键动态</div>
-          <div className="flex-1 overflow-y-auto space-y-1 pr-1">
+          <div className="flex-1 overflow-y-auto pr-1">
             {rows.map((r) => {
               const st = toneStyle(r.tone)
               return (
                 <div
                   key={r.id}
-                  className="rounded-md border px-2 py-1 text-[11px]"
+                  className="px-1.5 py-1.5 text-[11px]"
                   style={{
-                    background: 'rgba(12,20,32,0.2)',
-                    borderColor: st.bd,
+                    borderBottom: '1px solid rgba(148,163,184,0.18)',
                   }}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className={st.tx}>{r.title}</span>
+                  <div className="flex items-center justify-between gap-2 leading-5">
+                    <span className={`${st.tx} font-semibold inline-flex items-center gap-1.5`}>
+                      <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: st.dot }} />
+                      {r.title}
+                    </span>
                     <span className="text-slate-500 text-[10px]">{r.time}</span>
                   </div>
-                  <div className="text-slate-200 mt-0.5 leading-tight">{r.text}</div>
+                  <div className="text-slate-200 mt-0.5 leading-5">{r.text}</div>
                 </div>
               )
             })}

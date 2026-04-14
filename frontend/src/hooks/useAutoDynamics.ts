@@ -233,7 +233,8 @@ export function useAutoDynamics() {
           const mergedLinks = s.links.map((l: any) => {
             const src = linkMap.get(linkKey(String(l.source), String(l.target)))
             if (!src) return l
-            const resourceStatus = String(src.status ?? l.status ?? 'active')
+            const resourceStatus = String(src.status ?? l.__resource_status ?? l.status ?? 'active')
+            const visualStatus = String(l.status ?? 'active')
             return {
               ...l,
               bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
@@ -242,8 +243,8 @@ export function useAutoDynamics() {
               fault_tag: String(src.fault_tag ?? l.fault_tag ?? ''),
               __resource_status: resourceStatus,
               __resource_status_seed: resourceStatus,
-              // Keep visual state consistent with backend so link recovery is immediate.
-              status: resourceStatus,
+              // Keep visual state stable between resource sync ticks to avoid flicker.
+              status: visualStatus,
             }
           })
           const selectedLink = remapSelectedLink(s.selectedLink, mergedLinks)
