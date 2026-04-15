@@ -12,6 +12,7 @@ import LinkDetailPanel from './components/UI/LinkDetailPanel'
 import BottomHub from './components/UI/BottomHub'
 import TimeAxis from './components/UI/TimeAxis'
 import ControlPage from './components/UI/ControlPage'
+import SystemPopup from './components/UI/SystemPopup'
 import { useStore } from './store/useStore'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useAutoDynamics } from './hooks/useAutoDynamics'
@@ -217,6 +218,8 @@ export default function App() {
           <MonitoringPage />
         </Suspense>
       )}
+
+      <SystemPopup />
     </div>
   )
 }

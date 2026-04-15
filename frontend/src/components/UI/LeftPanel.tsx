@@ -129,6 +129,7 @@ export default function LeftPanel() {
     setBackendTopologySynced,
     setAutoDynamics,
     setSimulationStatus,
+    openSystemPopup,
     setSelectedSatellite,
     setSelectedLink,
   } = useStore()
@@ -201,7 +202,11 @@ export default function LeftPanel() {
       } catch (err: any) {
         setBackendTopologySynced(false)
         console.warn('后端同步失败', err?.message)
-        alert('星座已在前端更新，但后端同步失败。为避免部署使用旧星座，请先确保后端可用并重新生成/导入。')
+        openSystemPopup(
+          '后端同步失败',
+          '星座已在前端更新，但后端同步失败。为避免部署使用旧星座，请先确保后端可用并重新生成/导入。',
+          'error',
+        )
       }
       clearDeployments()
 
@@ -228,7 +233,7 @@ export default function LeftPanel() {
       const errors = validateImportedTopology(parsed)
 
       if (errors.length > 0) {
-        alert(`导入校验失败（共 ${errors.length} 项）:\n${errors.slice(0, 8).join('\n')}`)
+        openSystemPopup('导入校验失败', `共 ${errors.length} 项问题：\n${errors.slice(0, 8).join('\n')}`, 'warning')
         return
       }
 
@@ -272,16 +277,24 @@ export default function LeftPanel() {
           console.warn('动态仿真自动启动失败，将继续使用前端准实时动画模式', e)
         }
         setBackendTopologySynced(true)
-        alert(`导入成功并通过校验：${parsed.satellites.length} 颗卫星，${parsed.links.length} 条链路。`)
+        openSystemPopup(
+          '导入成功',
+          `导入成功并通过校验：${parsed.satellites.length} 颗卫星，${parsed.links.length} 条链路。`,
+          'success',
+        )
       } catch (e) {
         setBackendTopologySynced(false)
         console.warn('导入拓扑已本地生效，但后端同步失败', e)
-        alert('导入拓扑后端同步失败。为避免部署使用旧星座，请先修复后端连接后重新导入。')
+        openSystemPopup(
+          '后端同步失败',
+          '导入拓扑后端同步失败。为避免部署使用旧星座，请先修复后端连接后重新导入。',
+          'error',
+        )
       }
       clearDeployments()
     } catch (e) {
       console.error(e)
-      alert('导入失败：请提供合法的 JSON 拓扑文件')
+      openSystemPopup('导入失败', '请提供合法的 JSON 拓扑文件。', 'error')
     } finally {
       setLoading(false)
     }

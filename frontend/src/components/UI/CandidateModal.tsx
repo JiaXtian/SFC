@@ -75,6 +75,7 @@ export default function CandidateModal() {
     backendTopologySynced,
     satellites,
     pushRuntimeEvent,
+    openSystemPopup,
   } = useStore()
   const [sel, setSel] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -136,12 +137,16 @@ export default function CandidateModal() {
   const deploy = async () => {
     if (busy || deployingRef.current) return
     if (!backendTopologySynced) {
-      alert('后端拓扑未同步，已禁止部署。请先重新生成/导入星座并完成同步。')
+      openSystemPopup('部署已阻止', '后端拓扑未同步，已禁止部署。请先重新生成/导入星座并完成同步。', 'warning')
       return
     }
 
     if (!cand.satisfies_constraints) {
-      alert(`该方案不满足SLA约束，无法部署。\n\n详细原因:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`)
+      openSystemPopup(
+        '方案不满足约束',
+        `该方案不满足SLA约束，无法部署。\n\n详细原因:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`,
+        'warning',
+      )
       return
     }
 
@@ -209,7 +214,11 @@ export default function CandidateModal() {
         const sessionResp = await apiClient.startSFCSession(sessionStartPayload)
         sessionId = String(sessionResp?.session_id ?? '')
       } catch (e: any) {
-        alert(`初始部署成功，但连续编排会话启动失败: ${toChineseFailureText(e?.message ?? e)}`)
+        openSystemPopup(
+          '会话启动失败',
+          `初始部署成功，但连续编排会话启动失败：${toChineseFailureText(e?.message ?? e)}`,
+          'warning',
+        )
       }
 
       const deploymentId = sessionId ? `sess-deploy-${sessionId}` : backendDeploymentId
@@ -281,7 +290,7 @@ export default function CandidateModal() {
           level: 'warn',
         },
       })
-      alert(`部署失败: ${toChineseFailureText(e.message ?? e)}`)
+      openSystemPopup('部署失败', toChineseFailureText(e.message ?? e), 'error')
     }
     setBusy(false)
     deployingRef.current = false

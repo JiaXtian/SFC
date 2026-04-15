@@ -54,6 +54,11 @@ public:
         const std::string& src,
         const std::string& dst
     ) const;
+
+    // 查询某个节点当前被部署占用的资源（CPU, MEM, DISK）
+    std::tuple<double, double, double> get_allocated_node_resources(
+        const std::string& node_id
+    ) const;
     
 private:
     mutable std::mutex mutex_;

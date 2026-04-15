@@ -105,7 +105,7 @@ function FoldHeader({
 }
 
 export default function SFCForm() {
-  const { setCandidateResult, addToast, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
+  const { setCandidateResult, addToast, openSystemPopup, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
 
   const [mode, setMode] = useState<'template' | 'custom'>('template')
   const [selectedTemplate, setSelectedTemplate] = useState(0)
@@ -237,28 +237,28 @@ export default function SFCForm() {
 
   const submit = async () => {
     if (!backendTopologySynced) {
-      alert('当前星座未完成后端同步，无法规划部署。请先重新生成/导入并确认同步成功。')
+      openSystemPopup('无法生成部署策略', '当前星座未完成后端同步，无法规划部署。请先重新生成/导入并确认同步成功。', 'warning')
       return
     }
 
     if (enableCustomWeights && Math.abs(scoreWeightSum - 1.0) > 1e-6) {
-      alert(`自定义评分权重总和必须为 1.0，当前为 ${scoreWeightSum.toFixed(3)}。`)
+      openSystemPopup('参数校验失败', `自定义评分权重总和必须为 1.0，当前为 ${scoreWeightSum.toFixed(3)}。`, 'warning')
       return
     }
     if (satelliteIds.length < 2) {
-      alert('当前拓扑卫星数量不足，至少需要 2 颗卫星才能配置 source_node/destination_node。')
+      openSystemPopup('参数校验失败', '当前拓扑卫星数量不足，至少需要 2 颗卫星才能配置 source_node/destination_node。', 'warning')
       return
     }
     if (!trafficEndpoints.source_node || !trafficEndpoints.destination_node) {
-      alert('请填写 SFC 流量入口（source_node）和出口（destination_node）。')
+      openSystemPopup('参数校验失败', '请填写 SFC 流量入口（source_node）和出口（destination_node）。', 'warning')
       return
     }
     if (!satelliteIds.includes(trafficEndpoints.source_node) || !satelliteIds.includes(trafficEndpoints.destination_node)) {
-      alert('source_node 或 destination_node 不存在于当前星座，请从下拉候选选择或输入正确卫星 ID。')
+      openSystemPopup('参数校验失败', 'source_node 或 destination_node 不存在于当前星座，请从下拉候选选择或输入正确卫星 ID。', 'warning')
       return
     }
     if (trafficEndpoints.source_node === trafficEndpoints.destination_node) {
-      alert('source_node 与 destination_node 不能相同。')
+      openSystemPopup('参数校验失败', 'source_node 与 destination_node 不能相同。', 'warning')
       return
     }
 
@@ -366,10 +366,8 @@ export default function SFCForm() {
         const errorMsg = toChineseFailureText(result.error || 'No feasible deployment found')
         addToast(`部署失败: ${errorMsg}`, 'error')
         if (result.failure_reasons || result.details) {
-          setTimeout(() => {
-            const details = toChineseFailureList(result.failure_reasons || result.details).join('\n')
-            alert(`无可行部署方案\n\n详细原因:\n${details}`)
-          }, 500)
+          const details = toChineseFailureList(result.failure_reasons || result.details).join('\n')
+          openSystemPopup('无可行部署方案', `详细原因:\n${details}`, 'error')
         }
         setBusy(false)
         return
@@ -392,7 +390,7 @@ export default function SFCForm() {
         })
         const uniqReasons = Array.from(new Set(reasonPool)).slice(0, 12)
         addToast('未找到满足约束的可部署方案', 'error')
-        alert(`未找到满足约束的可部署方案\n\n详细原因:\n${uniqReasons.join('\n')}`)
+        openSystemPopup('未找到满足约束的可部署方案', `详细原因:\n${uniqReasons.join('\n')}`, 'error')
         setBusy(false)
         return
       }
@@ -433,7 +431,11 @@ export default function SFCForm() {
 
       addToast(`生成 ${finalCandidates.length} 个候选方案`, 'success')
       if (result.warning || finalCandidates.length < (sfc.topk || 1)) {
-        alert(toChineseFailureText(result.warning || `仅生成 ${finalCandidates.length} 个可行方案，少于请求的 Top-${sfc.topk || 1}。`))
+        openSystemPopup(
+          '候选方案提示',
+          toChineseFailureText(result.warning || `仅生成 ${finalCandidates.length} 个可行方案，少于请求的 Top-${sfc.topk || 1}。`),
+          'warning',
+        )
       }
     } catch (err: any) {
       console.error('[SFCForm] Submit error:', err)

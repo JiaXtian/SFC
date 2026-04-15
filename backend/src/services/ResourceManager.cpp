@@ -297,6 +297,33 @@ double ResourceManager::get_allocated_link_bandwidth(
     return std::max(0.0, it->second);
 }
 
+std::tuple<double, double, double> ResourceManager::get_allocated_node_resources(
+    const std::string& node_id
+) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    double cpu = 0.0;
+    double mem = 0.0;
+    double disk = 0.0;
+
+    for (const auto& dep_kv : deployments_) {
+        const auto& snapshot = dep_kv.second;
+        for (const auto& [nid, amount] : snapshot.cpu_allocations) {
+            if (nid == node_id) cpu += amount;
+        }
+        for (const auto& [nid, amount] : snapshot.mem_allocations) {
+            if (nid == node_id) mem += amount;
+        }
+        for (const auto& [nid, amount] : snapshot.disk_allocations) {
+            if (nid == node_id) disk += amount;
+        }
+    }
+    return {
+        std::max(0.0, cpu),
+        std::max(0.0, mem),
+        std::max(0.0, disk)
+    };
+}
+
 std::string ResourceManager::make_link_key(const std::string& src, const std::string& dst) const {
     return src + "->" + dst;
 }

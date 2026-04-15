@@ -30,6 +30,7 @@ export default function DeploymentPanel() {
     applyTopologySnapshot,
     suppressSessionDeployment,
     pushRuntimeEvent,
+    openSystemPopup,
   } = useStore()
   const [expanded, setExpanded] = useState<string | null>(null)
   const [expandedLinks, setExpandedLinks] = useState<Record<string, boolean>>({})
@@ -106,7 +107,7 @@ export default function DeploymentPanel() {
           level: 'warn',
         },
       })
-      alert(`回滚失败: ${e.message ?? e}`) 
+      openSystemPopup('回滚失败', String(e?.message ?? e), 'error')
     }
     setRolling(null)
   }

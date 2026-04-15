@@ -246,6 +246,12 @@ export interface DisplaySettings {
   rotationSpeed: number
 }
 export interface Toast { id: string; message: string; type: 'info' | 'success' | 'warning' | 'error' }
+export interface SystemPopup {
+  open: boolean
+  title: string
+  message: string
+  type: 'info' | 'success' | 'warning' | 'error'
+}
 
 interface Store {
   satellites: SatelliteData[]
@@ -259,6 +265,7 @@ interface Store {
   backendTopologySynced: boolean
   display: DisplaySettings
   toasts: Toast[]
+  systemPopup: SystemPopup
   simulation: {
     connected: boolean
     running: boolean
@@ -295,6 +302,8 @@ interface Store {
   setDisplay: (s: Partial<DisplaySettings>) => void
   addToast: (msg: string, type?: Toast['type']) => void
   removeToast: (id: string) => void
+  openSystemPopup: (title: string, message: string, type?: SystemPopup['type']) => void
+  closeSystemPopup: () => void
   setSimulationStatus: (status: Partial<Store['simulation']>) => void
   setAutoDynamics: (patch: Partial<AutoDynamicsState>) => void
   setSimulationViewMode: (mode: 'realtime' | 'playback') => void
@@ -765,6 +774,12 @@ export const useStore = create<Store>((set, get) => ({
   deployments: [],
   highlightedDeploymentIds: [],
   toasts: [],
+  systemPopup: {
+    open: false,
+    title: '',
+    message: '',
+    type: 'info',
+  },
   topologyVersion: 0,
   backendTopologySynced: false,
   display: {
@@ -880,6 +895,12 @@ export const useStore = create<Store>((set, get) => ({
     setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), 4000)
   },
   removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  openSystemPopup: (title, message, type = 'info') => set({
+    systemPopup: { open: true, title, message, type },
+  }),
+  closeSystemPopup: () => set((s) => ({
+    systemPopup: { ...s.systemPopup, open: false },
+  })),
   setSimulationStatus: (status) => set((s) => ({ simulation: { ...s.simulation, ...status } })),
   setAutoDynamics: (patch) => set((s) => ({
     autoDynamics: { ...s.autoDynamics, ...patch },

@@ -484,6 +484,29 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         // This prevents stale "down/fault_tag" residue after manual fault removal.
         sat.status = "active";
         sat.fault_tag.clear();
+
+        const auto [alloc_cpu, alloc_mem, alloc_disk] = res_mgr_->get_allocated_node_resources(sat.id);
+        const size_t hv = std::hash<std::string>{}(sat.id);
+        const double phase = 0.001 * static_cast<double>(topology_version_ * 29 + static_cast<int>(hv % 4096));
+
+        const double cpu_factor = clamp(0.78 + 0.16 * std::sin(phase) + 0.08 * std::cos(phase * 0.61), 0.45, 1.0);
+        const double mem_factor = clamp(0.80 + 0.14 * std::sin(phase * 1.07 + 0.9) + 0.07 * std::cos(phase * 0.73), 0.48, 1.0);
+        const double disk_factor = clamp(0.87 + 0.08 * std::sin(phase * 0.83 + 1.7) + 0.04 * std::cos(phase * 0.57), 0.62, 1.0);
+
+        const double dyn_cpu_cap = clamp(sat.cpu_total * cpu_factor, 0.0, sat.cpu_total);
+        const double dyn_mem_cap = clamp(sat.mem_total * mem_factor, 0.0, sat.mem_total);
+        const double dyn_disk_cap = clamp(sat.disk_total * disk_factor, 0.0, sat.disk_total);
+
+        sat.cpu_available = clamp(dyn_cpu_cap - alloc_cpu, 0.0, sat.cpu_total);
+        sat.mem_available = clamp(dyn_mem_cap - alloc_mem, 0.0, sat.mem_total);
+        sat.disk_available = clamp(dyn_disk_cap - alloc_disk, 0.0, sat.disk_total);
+
+        const double cpu_util = sat.cpu_total > 1e-9 ? 1.0 - sat.cpu_available / sat.cpu_total : 1.0;
+        const double mem_util = sat.mem_total > 1e-9 ? 1.0 - sat.mem_available / sat.mem_total : 1.0;
+        const double disk_util = sat.disk_total > 1e-9 ? 1.0 - sat.disk_available / sat.disk_total : 1.0;
+        const double avg_util = clamp((cpu_util + mem_util + disk_util) / 3.0, 0.0, 1.0);
+        sat.core_network_load = avg_util;
+        sat.node_reliability = clamp(0.997 - 0.045 * avg_util, 0.93, 0.9995);
     }
 
     std::vector<nlohmann::json> change_events;
@@ -524,6 +547,11 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         if (fault_it != node_fault_states_.end()) {
             sat.status = "down";
             sat.fault_tag = fault_it->second.fault_type;
+            sat.cpu_available = 0.0;
+            sat.mem_available = 0.0;
+            sat.disk_available = 0.0;
+            sat.core_network_load = 1.0;
+            sat.node_reliability = 0.0;
         }
     }
 
