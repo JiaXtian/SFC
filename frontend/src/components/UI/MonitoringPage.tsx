@@ -66,10 +66,18 @@ function rescheduleReasonLabel(trigger: string): string {
       return '会话启动'
     case 'manual_initial_candidate':
       return '手动初始方案'
+    case 'recovery_resume':
+      return '故障恢复后继续编排'
+    case 'manual':
+      return '人工触发重算'
+    case 'periodic_health_check':
+      return '周期健康检查'
+    case 'resource_or_link_fault':
+      return '资源或链路异常'
     case 'unlabeled':
       return '未标注触发器'
     default:
-      return trigger && trigger !== 'unknown' ? trigger : '未标注触发器'
+      return '策略调整'
   }
 }
 

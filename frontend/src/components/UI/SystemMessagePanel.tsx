@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Bell, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { toChineseFailureText } from '@/utils/failureText'
-import { resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
+import { buildSfcLabelMaps, formatSfcSeq, resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
 function faultTypeLabel(tag: string): string {
   const map: Record<string, string> = {
@@ -24,7 +24,15 @@ function triggerLabel(trigger: string): string {
     case 'destination_node_down': return '宿节点故障'
     case 'deployment_node_down': return '部署节点故障'
     case 'anchor_path_disconnected': return '业务路径中断'
-    default: return trigger || '策略调整'
+    case 'recovery_resume': return '故障恢复后继续编排'
+    case 'topology_tick_bootstrap': return '系统拓扑初始化'
+    case 'session_start': return '会话启动'
+    case 'manual_initial_candidate': return '手动触发初始方案'
+    case 'manual': return '人工触发重算'
+    case 'periodic_health_check': return '周期健康检查'
+    case 'resource_or_link_fault': return '资源或链路异常'
+    case 'unlabeled': return '状态变化触发'
+    default: return '策略调整'
   }
 }
 
@@ -50,14 +58,59 @@ export default function SystemMessagePanel() {
   }))
   const [collapsed, setCollapsed] = useState(false)
 
-  const resolveSfcLabel = (sessionId?: string, requestId?: string) => {
-    return resolveSfcSeqLabel(deployments as any, {
-      sessionId: String(sessionId ?? ''),
-      requestId: String(requestId ?? ''),
-    })
-  }
-
   const rows = useMemo(() => {
+    const baseMaps = buildSfcLabelMaps(deployments as any)
+    const bySession = new Map<string, string>(baseMaps.bySession)
+    const byRequest = new Map<string, string>(baseMaps.byRequest)
+    const byDeployment = new Map<string, string>(baseMaps.byDeployment)
+    const usedLabels = new Set<string>()
+    ;[...bySession.values(), ...byRequest.values(), ...byDeployment.values()].forEach((x) => usedLabels.add(String(x)))
+
+    const parseSeq = (label: string) => {
+      const m = /^SFC-(\d{3,})$/.exec(label.trim())
+      return m ? Number(m[1]) : 0
+    }
+    let nextSeq = Math.max(
+      1,
+      ...Array.from(usedLabels).map((x) => parseSeq(String(x))).filter((v) => Number.isFinite(v) && v > 0),
+    ) + 1
+
+    const allocLabel = () => {
+      let label = formatSfcSeq(nextSeq++)
+      while (usedLabels.has(label)) {
+        label = formatSfcSeq(nextSeq++)
+      }
+      usedLabels.add(label)
+      return label
+    }
+
+    // Fill labels for sessions/requests that have appeared in events but not yet materialized in deployments.
+    ;[...runtimeEvents].reverse().forEach((e) => {
+      const raw: any = e.raw ?? {}
+      const sid = String(raw.session_id ?? (raw.entity_type === 'session' ? raw.entity_id : '') ?? '')
+      const rid = String(raw.request_id ?? '')
+      const did = String(raw.deployment_id ?? '')
+      let label = ''
+      if (did && byDeployment.has(did)) label = String(byDeployment.get(did))
+      else if (sid && bySession.has(sid)) label = String(bySession.get(sid))
+      else if (rid && byRequest.has(rid)) label = String(byRequest.get(rid))
+      else if (sid || rid || did) label = allocLabel()
+      if (!label) return
+      if (did && !byDeployment.has(did)) byDeployment.set(did, label)
+      if (sid && !bySession.has(sid)) bySession.set(sid, label)
+      if (rid && !byRequest.has(rid)) byRequest.set(rid, label)
+    })
+
+    const resolveSfcLabel = (ids?: { sessionId?: string; requestId?: string; deploymentId?: string }) => {
+      const sid = String(ids?.sessionId ?? '')
+      const rid = String(ids?.requestId ?? '')
+      const did = String(ids?.deploymentId ?? '')
+      if (did && byDeployment.has(did)) return String(byDeployment.get(did))
+      if (sid && bySession.has(sid)) return String(bySession.get(sid))
+      if (rid && byRequest.has(rid)) return String(byRequest.get(rid))
+      return resolveSfcSeqLabel(deployments as any, { sessionId: sid, requestId: rid, deploymentId: did })
+    }
+
     const mapped = runtimeEvents
       .map((e) => {
         const time = compactTime(String(e.sim_time ?? ''))
@@ -89,7 +142,7 @@ export default function SystemMessagePanel() {
         if (e.type === 'reschedule_trigger') {
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel(sid, rid)
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           return {
             id: e.id,
@@ -102,7 +155,7 @@ export default function SystemMessagePanel() {
 
         if (e.type === 'recovery_event' && String(e.raw?.entity_type ?? '') === 'session') {
           const sid = String(e.raw?.entity_id ?? '')
-          const sfcLabel = resolveSfcLabel(sid, String(e.raw?.request_id ?? ''))
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: String(e.raw?.request_id ?? '') })
           const trig = triggerLabel(String(e.raw?.trigger ?? ''))
           const ok = Boolean(e.raw?.success)
           return {
@@ -132,7 +185,7 @@ export default function SystemMessagePanel() {
           if (!trig || ['session_start', 'topology_tick_bootstrap', 'manual_initial_candidate'].includes(trig)) return null
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel(sid, rid)
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
           const deployable = Number((e.raw as any)?.deployable_count ?? 0)
           const returned = Number((e.raw as any)?.returned_topk ?? 0)
           return {
@@ -150,7 +203,7 @@ export default function SystemMessagePanel() {
           const st = String((e.raw as any)?.status ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel(sid, rid)
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           if (st === 'redeployed') {
             return {
@@ -192,17 +245,7 @@ export default function SystemMessagePanel() {
         }
 
         if (e.type === 'deployment_update') {
-          const depId = String((e.raw as any)?.deployment_id ?? '')
-          const pct = Number((e.raw as any)?.progress ?? 0)
-          const st = String((e.raw as any)?.status ?? '')
-          const sfcLabel = resolveSfcSeqLabel(deployments as any, { deploymentId: depId })
-          return {
-            id: e.id,
-            time,
-            tone: st === 'completed' ? 'ok' : 'info',
-            title: st === 'completed' ? '部署完成' : '部署进行中',
-            text: short(`${sfcLabel} 当前进度 ${pct.toFixed(0)}%`),
-          }
+          return null
         }
 
         if (e.type === 'deployment_action') {
