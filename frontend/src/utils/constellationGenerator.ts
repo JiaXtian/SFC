@@ -108,6 +108,7 @@ export const CONSTELLATION_TEMPLATES: Record<ConstellationType, ConstellationTem
 
 export interface SatelliteData {
   id: string
+  template_id?: string
   orbital_params: {
     plane: number; position_in_plane: number
     raan: number; true_anomaly: number
@@ -119,6 +120,29 @@ export interface SatelliteData {
   disk_total: number; disk_available: number
   status?: 'active' | 'down'
   fault_tag?: string
+  fault_injected?: boolean
+  podman?: {
+    container_name?: string
+    container_id?: string
+    status?: string
+  }
+  podman_container_name?: string
+  podman_container_id?: string
+  podman_status?: string
+  deployment_state?: string
+  deployment_detail?: string
+  core_nf_policy_applied?: boolean
+  core_nf_policy?: string
+  cpu_utilization_ratio?: number
+  mem_utilization_ratio?: number
+  disk_utilization_ratio?: number
+  last_collected_at?: string
+  telemetry?: {
+    cpu_utilization_ratio?: number
+    mem_utilization_ratio?: number
+    disk_utilization_ratio?: number
+    last_collected_at?: string
+  }
   vnfs: any[]
   core_nfs?: any[]
 }
@@ -354,6 +378,7 @@ export function prepareTopologyForBackend(
       num_planes: numPlanes,              // 显式传递前端选择的面数
       altitude_km: tpl.altitude_km,
       inclination_deg: tpl.inclination_deg,
+      template_id: type,
       timestamp: new Date().toISOString() // 后端字段名是 timestamp
     },
     // 注意：后端 Topology 结构体的 to_json 返回的是 { metadata: ..., topology: { nodes: ..., links: ... } }
@@ -407,6 +432,7 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
 
     return {
       id,
+      template_id: String(n.template_id ?? 'starlink_v1'),
       orbital_params: {
         plane: Number(orbital.plane ?? orbital.plane_id ?? 0),
         position_in_plane: Number(orbital.position_in_plane ?? orbital.slot ?? idx),
@@ -430,6 +456,23 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
       disk_available: diskAvail,
       status: String(n.status ?? 'active') as 'active' | 'down',
       fault_tag: String(n.fault_tag ?? ''),
+      fault_injected: Boolean(n.fault_injected ?? false),
+      deployment_state: String(n.deployment_state ?? 'none'),
+      deployment_detail: String(n.deployment_detail ?? ''),
+      core_nf_policy_applied: Boolean(n.core_nf_policy_applied ?? false),
+      core_nf_policy: String(n.core_nf_policy ?? ''),
+      cpu_utilization_ratio: Number(n.cpu_utilization_ratio ?? n.telemetry?.cpu_utilization_ratio ?? 0),
+      mem_utilization_ratio: Number(n.mem_utilization_ratio ?? n.telemetry?.mem_utilization_ratio ?? 0),
+      disk_utilization_ratio: Number(n.disk_utilization_ratio ?? n.telemetry?.disk_utilization_ratio ?? 0),
+      last_collected_at: String(n.last_collected_at ?? n.telemetry?.last_collected_at ?? ''),
+      podman: n.podman ? {
+        container_name: String(n.podman.container_name ?? ''),
+        container_id: String(n.podman.container_id ?? ''),
+        status: String(n.podman.status ?? 'unknown'),
+      } : undefined,
+      podman_container_name: String(n.podman_container_name ?? ''),
+      podman_container_id: String(n.podman_container_id ?? ''),
+      podman_status: String(n.podman_status ?? ''),
       vnfs: Array.isArray(n.core_nfs) ? n.core_nfs : (Array.isArray(n.vnfs) ? n.vnfs : []),
       core_nfs: Array.isArray(n.core_nfs) ? n.core_nfs : (Array.isArray(n.vnfs) ? n.vnfs : []),
     }

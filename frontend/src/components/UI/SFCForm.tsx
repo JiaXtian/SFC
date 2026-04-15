@@ -448,7 +448,7 @@ export default function SFCForm() {
   const selectedTpl = sfcTemplates[selectedTemplate]
 
   return (
-    <div className="space-y-3 h-full pr-1 pb-2 text-slate-100">
+    <div className="sfc-form-modern h-full min-h-0 overflow-y-auto pr-1 pb-2">
       <div className="flex gap-2">
         <button
           onClick={() => setMode('template')}
@@ -903,8 +903,7 @@ export default function SFCForm() {
       <button
         onClick={submit}
         disabled={busy}
-        className="w-full py-3 rounded-xl text-sm font-bold text-white flex items-center justify-center gap-2 transition shadow-lg disabled:opacity-50"
-        style={{ background: busy ? 'rgba(50,50,60,0.8)' : 'linear-gradient(135deg, #15385d, #0f243b)' }}
+        className="w-full py-3 rounded-xl border border-slate-300 bg-white text-base font-semibold text-black flex items-center justify-center gap-2 transition disabled:opacity-50"
       >
         {busy ? (
           <>

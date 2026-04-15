@@ -79,6 +79,7 @@ struct VNFDeployment {
 struct Satellite {
     std::string id;
     std::string type = "satellite";
+    std::string template_id = "starlink_v1";
     OrbitalParams orbital_params;
     Coordinates coordinates;
     double cpu_total;
@@ -91,6 +92,18 @@ struct Satellite {
     double node_reliability = 0.98;
     std::string status = "active";  // active, down
     std::string fault_tag = "";
+    bool fault_injected = false;
+    std::string podman_container_name = "";
+    std::string podman_container_id = "";
+    std::string podman_status = "not_created"; // running, stopped, exited, not_created, unknown
+    std::string deployment_state = "none";     // none, deployed, rolled_back
+    std::string deployment_detail = "";
+    bool core_nf_policy_applied = false;
+    std::string core_nf_policy = "";
+    double cpu_utilization_ratio = 0.0;
+    double mem_utilization_ratio = 0.0;
+    double disk_utilization_ratio = 0.0;
+    std::string last_collected_at = "";
     std::vector<VNFDeployment> vnfs;
     
     json to_json() const {
@@ -102,6 +115,7 @@ struct Satellite {
         return {
             {"id", id},
             {"type", type},
+            {"template_id", template_id},
             {"orbital_params", orbital_params.to_json()},
             {"coordinates", coordinates.to_json()},
             {"cpu_total", cpu_total},
@@ -114,6 +128,22 @@ struct Satellite {
             {"node_reliability", node_reliability},
             {"status", status},
             {"fault_tag", fault_tag},
+            {"fault_injected", fault_injected},
+            {"podman", {
+                {"container_name", podman_container_name},
+                {"container_id", podman_container_id},
+                {"status", podman_status}
+            }},
+            {"deployment_state", deployment_state},
+            {"deployment_detail", deployment_detail},
+            {"core_nf_policy_applied", core_nf_policy_applied},
+            {"core_nf_policy", core_nf_policy},
+            {"telemetry", {
+                {"cpu_utilization_ratio", cpu_utilization_ratio},
+                {"mem_utilization_ratio", mem_utilization_ratio},
+                {"disk_utilization_ratio", disk_utilization_ratio},
+                {"last_collected_at", last_collected_at}
+            }},
             {"vnfs", vnfs_json},
             {"core_nfs", vnfs_json}
         };

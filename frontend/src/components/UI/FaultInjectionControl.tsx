@@ -256,29 +256,20 @@ export default function FaultInjectionControl() {
   }, [activeFaults, nowMs])
 
   return (
-    <div
-      className="rounded-2xl p-3.5 h-full flex flex-col"
-      style={{
-        background: 'linear-gradient(160deg, rgba(11,17,30,0.78), rgba(8,13,24,0.66))',
-        border: '1px solid rgba(112,168,208,0.28)',
-        backdropFilter: 'blur(14px)',
-      }}
-    >
-      <div className="text-[14px] uppercase tracking-wide text-cyan-100 font-semibold mb-1.5 flex items-center gap-1.5">
-        <Activity className="w-4 h-4 text-cyan-300" />故障注入控制
+    <div className="flex h-full min-h-0 flex-col rounded-2xl bg-white p-3">
+      <div className="mb-3 flex items-center gap-2 text-2xl font-semibold text-black">
+        <Activity className="h-6 w-6" />故障控制中心
       </div>
 
-      <div className="flex-1 overflow-y-auto pr-1.5 space-y-3 text-[12px]">
-        <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2.5">
-          <div className="text-slate-200 inline-flex items-center gap-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />手动注入
-          </div>
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-12">
+        <section className="xl:col-span-5 min-h-0 overflow-auto space-y-3 pr-1">
+          <div className="text-lg font-semibold">手动注入</div>
 
           <div className="grid grid-cols-2 gap-2">
             <select
               value={injectScope}
               onChange={(e) => setInjectScope((e.target.value as 'single' | 'batch') || 'single')}
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+              className="h-10 rounded-xl border border-slate-200 bg-white px-3"
             >
               <option value="single">单颗卫星</option>
               <option value="batch">批量卫星</option>
@@ -286,7 +277,7 @@ export default function FaultInjectionControl() {
             <select
               value={injectFaultType}
               onChange={(e) => setInjectFaultType(e.target.value)}
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+              className="h-10 rounded-xl border border-slate-200 bg-white px-3"
             >
               <option value="auto">故障类型: 自动匹配</option>
               {nodeFaultCatalog.map((ft) => <option key={ft} value={ft}>{faultTypeLabel(ft)}</option>)}
@@ -294,8 +285,8 @@ export default function FaultInjectionControl() {
           </div>
 
           <label className="block space-y-1">
-            <div className="text-slate-400 inline-flex items-center gap-1">
-              <Clock3 className="w-3.5 h-3.5 text-cyan-300" />故障注入时间（s）
+            <div className="inline-flex items-center gap-1 text-sm">
+              <Clock3 className="h-4 w-4" />故障注入时间（s）
             </div>
             <input
               type="number"
@@ -304,29 +295,24 @@ export default function FaultInjectionControl() {
               step={1}
               value={injectDurationSec}
               onChange={(e) => setInjectDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
-              placeholder="例如: 20（表示故障持续20秒）"
-              className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-orange-200"
+              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3"
             />
-            <div className="text-[11px] text-slate-500">系统将自动按仿真采样周期换算并执行该持续时间。</div>
           </label>
 
           {injectScope === 'single' ? (
-            <div className="space-y-1.5">
-              <input
-                list="control-satellite-list"
-                value={injectNodeId}
-                onChange={(e) => setInjectNodeId(e.target.value)}
-                placeholder="输入卫星ID（支持下拉选择）"
-                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
-              />
-              <div className="text-[11px] text-slate-500">支持输入、删除和重新编辑。</div>
-            </div>
+            <input
+              list="control-satellite-list"
+              value={injectNodeId}
+              onChange={(e) => setInjectNodeId(e.target.value)}
+              placeholder="输入卫星ID（支持下拉选择）"
+              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 font-mono"
+            />
           ) : (
             <div className="space-y-2">
               <select
                 value={injectMode}
                 onChange={(e) => setInjectMode((e.target.value as 'random' | 'manual') || 'random')}
-                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+                className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3"
               >
                 <option value="random">随机批量</option>
                 <option value="manual">手动列表</option>
@@ -339,10 +325,10 @@ export default function FaultInjectionControl() {
                     max={1000}
                     value={injectBatchCount}
                     onChange={(e) => setInjectBatchCount(Math.max(1, Math.min(1000, Number(e.target.value) || 1)))}
-                    className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+                    className="h-10 rounded-xl border border-slate-200 bg-white px-3"
                   />
-                  <label className="inline-flex items-center gap-2 text-slate-300">
-                    <input type="checkbox" checked={injectOnlyActive} onChange={(e) => setInjectOnlyActive(e.target.checked)} className="accent-cyan-400" />
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={injectOnlyActive} onChange={(e) => setInjectOnlyActive(e.target.checked)} />
                     仅活跃节点
                   </label>
                 </div>
@@ -355,7 +341,7 @@ export default function FaultInjectionControl() {
                       value={manualEntryInput}
                       onChange={(e) => setManualEntryInput(e.target.value)}
                       placeholder="输入卫星ID后添加，支持粘贴多个"
-                      className="flex-1 h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
+                      className="h-10 flex-1 rounded-xl border border-slate-200 bg-white px-3 font-mono"
                     />
                     <button
                       type="button"
@@ -363,24 +349,23 @@ export default function FaultInjectionControl() {
                         addManualIds(manualEntryInput)
                         setManualEntryInput('')
                       }}
-                      className="h-9 px-3 rounded-lg text-cyan-100 bg-slate-800/70 border border-cyan-700/40 inline-flex items-center gap-1"
+                      className="inline-flex h-10 items-center gap-1 rounded-xl border border-slate-200 bg-white px-3"
                     >
-                      <Plus className="w-3.5 h-3.5" />添加
+                      <Plus className="h-3.5 w-3.5" />添加
                     </button>
                   </div>
-                  <div className="text-[11px] text-slate-500">可一次粘贴多个ID（逗号/空格/换行分隔）。</div>
-                  <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-700/65 bg-slate-900/35 p-1.5 flex flex-wrap gap-1.5">
-                    {manualNodeIds.length === 0 && <div className="text-[11px] text-slate-500">尚未添加卫星ID</div>}
+                  <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2">
+                    {manualNodeIds.length === 0 && <div className="text-xs">尚未添加卫星ID</div>}
                     {manualNodeIds.map((id) => (
-                      <span key={id} className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-cyan-100 bg-slate-800/70 border border-slate-600/60">
+                      <span key={id} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs">
                         {id}
                         <button
                           type="button"
                           onClick={() => setManualNodeIds((prev) => prev.filter((x) => x !== id))}
-                          className="text-slate-400 hover:text-rose-300"
+                          className="text-slate-600"
                           aria-label={`remove-${id}`}
                         >
-                          <X className="w-3 h-3" />
+                          <X className="h-3 w-3" />
                         </button>
                       </span>
                     ))}
@@ -393,40 +378,39 @@ export default function FaultInjectionControl() {
           <button
             disabled={injectingFaults}
             onClick={injectSpecificFault}
-            className="w-full h-9 rounded-lg text-rose-100 text-[13px] font-semibold disabled:opacity-60"
-            style={{ background: 'linear-gradient(135deg, rgba(185,28,28,0.84), rgba(127,29,29,0.82))', border: '1px solid rgba(251,146,60,0.45)' }}
+            className="h-10 w-full rounded-xl border border-slate-300 bg-white text-sm font-semibold disabled:opacity-60"
           >
             {injectingFaults ? '注入中...' : '注入故障'}
           </button>
         </section>
 
-        <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="text-slate-200 inline-flex items-center gap-1.5">
-              <ListChecks className="w-3.5 h-3.5 text-cyan-300" />当前手动故障管理
+        <section className="xl:col-span-7 flex min-h-0 flex-col">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="inline-flex items-center gap-1.5 text-lg font-semibold">
+              <ListChecks className="h-4 w-4" />手动故障列表
             </div>
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => refreshStatus(false)}
                 disabled={refreshing}
-                className="h-7 px-2 rounded-md text-[11px] text-cyan-100 bg-slate-800/70 border border-slate-700/70 inline-flex items-center gap-1 disabled:opacity-60"
+                className="inline-flex h-9 items-center gap-1 rounded-xl border border-slate-200 bg-white px-2 text-sm disabled:opacity-60"
               >
-                <RotateCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />刷新
+                <RotateCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />刷新
               </button>
               <button
                 type="button"
                 onClick={removeAllFaults}
                 disabled={managingFaults || activeFaults.length === 0}
-                className="h-7 px-2 rounded-md text-[11px] text-rose-100 bg-rose-900/40 border border-rose-800/70 disabled:opacity-60"
+                className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:opacity-60"
               >
                 全部移除
               </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="text-[11px] text-slate-400">延长时长</div>
+          <div className="mb-2 flex items-center gap-2 text-sm">
+            <div>延长时长</div>
             <input
               type="number"
               min={1}
@@ -434,57 +418,52 @@ export default function FaultInjectionControl() {
               step={1}
               value={extendSeconds}
               onChange={(e) => setExtendSeconds(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
-              className="w-20 h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-amber-200"
+              className="h-9 w-24 rounded-xl border border-slate-200 bg-white px-2"
             />
-            <div className="text-[11px] text-slate-500">s（对单条故障点“延长”生效）</div>
+            <div>s</div>
           </div>
 
-          <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+          <div className="min-h-0 flex-1 overflow-y-auto space-y-1.5 rounded-xl border border-slate-200 bg-white p-2">
             {sortedFaults.length === 0 && (
-              <div className="text-[11px] text-slate-500 rounded-lg border border-slate-700/60 bg-slate-900/25 px-2 py-2">
+              <div className="rounded-xl border border-slate-200 px-3 py-2 text-sm">
                 当前无手动注入故障
               </div>
             )}
             {sortedFaults.map((f) => {
               const remain = liveRemaining(f)
               const remainLabel = remain > 0 ? `${remain.toFixed(0)}s` : '0s'
-              const remainColor = remain <= 5 ? 'text-rose-300' : remain <= 15 ? 'text-amber-300' : 'text-emerald-300'
+              const remainClass =
+                remain <= 5 ? 'text-red-600' : remain <= 15 ? 'text-amber-600' : 'text-emerald-600'
               return (
-                <div
-                  key={`${f.node_id}-${f.fault_type}`}
-                  className="rounded-lg border border-slate-700/60 bg-slate-900/30 px-2.5 py-2"
-                >
+                <div key={`${f.node_id}-${f.fault_type}`} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="text-[12px] text-cyan-100 font-mono">{f.node_id}</div>
-                    <div className={`text-[11px] font-semibold ${remainColor}`}>{remainLabel}</div>
+                    <div className="font-mono text-sm">{f.node_id}</div>
+                    <div className={`text-sm font-semibold ${remainClass}`}>{remainLabel}</div>
                   </div>
-                  <div className="text-[11px] text-slate-300 mt-0.5">
+                  <div className="mt-0.5 text-xs">
                     {faultTypeLabel(f.fault_type)}
-                    <span className="text-slate-500"> · {f.injection_mode === 'manual' ? '手动注入' : f.injection_mode}</span>
+                    <span className="text-slate-600"> · {f.injection_mode === 'manual' ? '手动注入' : f.injection_mode}</span>
                   </div>
-                  <div className="flex items-center justify-between gap-2 mt-1.5">
-                    <div className="text-[10px] text-slate-500">操作</div>
-                    <div className="flex items-center gap-2">
+                  <div className="mt-1.5 flex items-center justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => extendFault(f.node_id)}
                       disabled={managingFaults}
-                      className="h-7 px-2.5 rounded-md text-[11px] text-amber-100 bg-amber-900/30 border border-amber-800/60 disabled:opacity-60 inline-flex items-center gap-1"
+                      className="inline-flex h-8 items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 text-xs disabled:opacity-60"
                       title={`延长 ${extendSeconds}s`}
                     >
-                      <Plus className="w-3 h-3" />
+                      <Plus className="h-3 w-3" />
                       <span className="font-mono">{extendSeconds}s</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => removeFault(f.node_id)}
                       disabled={managingFaults}
-                      className="h-7 w-7 rounded-md text-rose-100 bg-rose-900/35 border border-rose-800/65 disabled:opacity-60 inline-flex items-center justify-center"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-slate-200 bg-white disabled:opacity-60"
                       title="移除故障"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="h-3.5 w-3.5" />
                     </button>
-                    </div>
                   </div>
                 </div>
               )

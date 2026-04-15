@@ -695,7 +695,26 @@ void SFCController::deploy(
         
         // 保存更新后的拓扑
         auto updated_topology = g_res_mgr->export_current_topology();
+        if (g_sat_runtime) {
+            g_sat_runtime->mark_deployment_policy(
+                updated_topology,
+                candidate.deployed_nodes,
+                "core_nf_deployment",
+                true,
+                "deployment_id=" + deployment_id + ";request_id=" + request_id
+            );
+        }
         g_topo_mgr->save_current_topology(updated_topology);
+        g_res_mgr->load_topology(updated_topology);
+
+        if (g_persistence) {
+            (void)g_persistence->persist_topology_snapshot(updated_topology, "deploy", true);
+            (void)g_persistence->persist_event(
+                "deploy",
+                deployment_id,
+                "request_id=" + request_id + ",nodes=" + std::to_string(candidate.deployed_nodes.size())
+            );
+        }
         
         spdlog::info("✓ Deployment {} completed: {} core NFs on {} nodes",
                     deployment_id, candidate.per_vnf.size(), candidate.deployed_nodes.size());
@@ -782,10 +801,39 @@ void SFCController::rollback(
         std::string deployment_id = (*json).get("deployment_id", "").asString();
         
         bool success = g_res_mgr->release_resources(deployment_id);
+        std::vector<std::string> affected_nodes;
         
         if (success) {
             auto updated_topology = g_res_mgr->export_current_topology();
+            {
+                std::lock_guard<std::mutex> lock(g_deployments_mutex);
+                for (const auto& dep : g_deployments) {
+                    if (dep.deployment_id == deployment_id) {
+                        affected_nodes = dep.deployed_nodes;
+                        break;
+                    }
+                }
+            }
+            if (g_sat_runtime && !affected_nodes.empty()) {
+                g_sat_runtime->mark_deployment_policy(
+                    updated_topology,
+                    affected_nodes,
+                    "core_nf_deployment",
+                    false,
+                    "rollback deployment_id=" + deployment_id
+                );
+            }
             g_topo_mgr->save_current_topology(updated_topology);
+            g_res_mgr->load_topology(updated_topology);
+
+            if (g_persistence) {
+                (void)g_persistence->persist_topology_snapshot(updated_topology, "rollback", true);
+                (void)g_persistence->persist_event(
+                    "rollback",
+                    deployment_id,
+                    "nodes=" + std::to_string(affected_nodes.size())
+                );
+            }
             
             spdlog::info("✓ Deployment {} rolled back", deployment_id);
 

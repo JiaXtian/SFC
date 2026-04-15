@@ -8,8 +8,11 @@
 #include "services/InferenceEngine.h"
 #include "services/DynamicSimulationService.h"
 #include "services/DynamicInferenceService.h"
+#include "services/SatelliteRuntimeService.h"
+#include "services/PersistenceService.h"
 #include <fstream>
 #include <filesystem>
+#include <stdexcept>
 #include <vector>
 
 using namespace drogon;
@@ -22,6 +25,8 @@ namespace sfc {
     std::shared_ptr<InferenceEngine> g_inference_engine;
     std::shared_ptr<DynamicSimulationService> g_dynamic_sim;
     std::shared_ptr<DynamicInferenceService> g_dynamic_inference;
+    std::shared_ptr<SatelliteRuntimeService> g_sat_runtime;
+    std::shared_ptr<PersistenceService> g_persistence;
 }
 
 struct Config {
@@ -40,6 +45,39 @@ struct Config {
     struct {
         std::string level = "info";
     } logging;
+
+    struct {
+        bool enabled = false;
+        std::string podman_bin = "podman";
+        std::string default_image = "docker.io/library/alpine:3.20";
+        bool auto_pull_image = true;
+        bool recreate_existing = false;
+        int telemetry_interval_sec = 5;
+        double cpu_limit_per_sat = 0.001;
+        int mem_limit_mb_per_sat = 2;
+        int tmpfs_limit_mb_per_sat = 1;
+        int pids_limit_per_sat = 8;
+        bool lightweight_create_only = true;
+        int provision_parallelism = 24;
+        int start_parallelism = 24;
+        int stop_parallelism = 48;
+    } podman;
+
+    struct {
+        bool enabled = true;
+        bool strict_startup = true;
+        int snapshot_interval_ticks = 1;
+        std::string fallback_dir = "data/persistence_fallback";
+        struct {
+            bool enabled = true;
+            std::string container_runtime = "docker";
+            std::string container_name = "sfc-mysql";
+            std::string podman_container = "sfc-mysql";
+            std::string user = "sfc";
+            std::string password = "sfc123456";
+            std::string database = "sfc_runtime";
+        } mysql;
+    } persistence;
 };
 
 Config load_config(const std::string& config_file) {
@@ -67,6 +105,42 @@ Config load_config(const std::string& config_file) {
             
             if (j.contains("logging")) {
                 config.logging.level = j["logging"].value("level", config.logging.level);
+            }
+
+            if (j.contains("podman")) {
+                auto& p = j["podman"];
+                config.podman.enabled = p.value("enabled", config.podman.enabled);
+                config.podman.podman_bin = p.value("podman_bin", config.podman.podman_bin);
+                config.podman.default_image = p.value("default_image", config.podman.default_image);
+                config.podman.auto_pull_image = p.value("auto_pull_image", config.podman.auto_pull_image);
+                config.podman.recreate_existing = p.value("recreate_existing", config.podman.recreate_existing);
+                config.podman.telemetry_interval_sec = p.value("telemetry_interval_sec", config.podman.telemetry_interval_sec);
+                config.podman.cpu_limit_per_sat = p.value("cpu_limit_per_sat", config.podman.cpu_limit_per_sat);
+                config.podman.mem_limit_mb_per_sat = p.value("mem_limit_mb_per_sat", config.podman.mem_limit_mb_per_sat);
+                config.podman.tmpfs_limit_mb_per_sat = p.value("tmpfs_limit_mb_per_sat", config.podman.tmpfs_limit_mb_per_sat);
+                config.podman.pids_limit_per_sat = p.value("pids_limit_per_sat", config.podman.pids_limit_per_sat);
+                config.podman.lightweight_create_only = p.value("lightweight_create_only", config.podman.lightweight_create_only);
+                config.podman.provision_parallelism = p.value("provision_parallelism", config.podman.provision_parallelism);
+                config.podman.start_parallelism = p.value("start_parallelism", config.podman.start_parallelism);
+                config.podman.stop_parallelism = p.value("stop_parallelism", config.podman.stop_parallelism);
+            }
+
+            if (j.contains("persistence")) {
+                auto& p = j["persistence"];
+                config.persistence.enabled = p.value("enabled", config.persistence.enabled);
+                config.persistence.strict_startup = p.value("strict_startup", config.persistence.strict_startup);
+                config.persistence.snapshot_interval_ticks = p.value("snapshot_interval_ticks", config.persistence.snapshot_interval_ticks);
+                config.persistence.fallback_dir = p.value("fallback_dir", config.persistence.fallback_dir);
+                if (p.contains("mysql")) {
+                    auto& m = p["mysql"];
+                    config.persistence.mysql.enabled = m.value("enabled", config.persistence.mysql.enabled);
+                    config.persistence.mysql.container_runtime = m.value("container_runtime", config.persistence.mysql.container_runtime);
+                    config.persistence.mysql.container_name = m.value("container_name", config.persistence.mysql.container_name);
+                    config.persistence.mysql.podman_container = m.value("podman_container", config.persistence.mysql.podman_container);
+                    config.persistence.mysql.user = m.value("user", config.persistence.mysql.user);
+                    config.persistence.mysql.password = m.value("password", config.persistence.mysql.password);
+                    config.persistence.mysql.database = m.value("database", config.persistence.mysql.database);
+                }
             }
             
             spdlog::info("Config loaded from {}", config_file);
@@ -136,9 +210,58 @@ int main() {
             config.onnx.actor_model,
             config.onnx.num_threads
         );
+
+        sfc::g_sat_runtime = std::make_shared<sfc::SatelliteRuntimeService>();
+        {
+            sfc::SatelliteRuntimeService::Config runtime_cfg;
+            runtime_cfg.enabled = config.podman.enabled;
+            runtime_cfg.podman_bin = config.podman.podman_bin;
+            runtime_cfg.default_image = config.podman.default_image;
+            runtime_cfg.auto_pull_image = config.podman.auto_pull_image;
+            runtime_cfg.recreate_existing = config.podman.recreate_existing;
+            runtime_cfg.telemetry_interval_sec = config.podman.telemetry_interval_sec;
+            runtime_cfg.cpu_limit_per_sat = config.podman.cpu_limit_per_sat;
+            runtime_cfg.mem_limit_mb_per_sat = config.podman.mem_limit_mb_per_sat;
+            runtime_cfg.tmpfs_limit_mb_per_sat = config.podman.tmpfs_limit_mb_per_sat;
+            runtime_cfg.pids_limit_per_sat = config.podman.pids_limit_per_sat;
+            runtime_cfg.lightweight_create_only = config.podman.lightweight_create_only;
+            runtime_cfg.provision_parallelism = config.podman.provision_parallelism;
+            runtime_cfg.start_parallelism = config.podman.start_parallelism;
+            runtime_cfg.stop_parallelism = config.podman.stop_parallelism;
+            sfc::g_sat_runtime->configure(runtime_cfg);
+        }
+
+        sfc::g_persistence = std::make_shared<sfc::PersistenceService>();
+        {
+            sfc::PersistenceService::Config persistence_cfg;
+            persistence_cfg.enabled = config.persistence.enabled;
+            persistence_cfg.strict_startup = config.persistence.strict_startup;
+            persistence_cfg.snapshot_interval_ticks = config.persistence.snapshot_interval_ticks;
+            persistence_cfg.fallback_dir = resolve_with_base(config_dir, config.persistence.fallback_dir);
+            persistence_cfg.mysql.enabled = config.persistence.mysql.enabled;
+            persistence_cfg.mysql.container_runtime = config.persistence.mysql.container_runtime;
+            persistence_cfg.mysql.container_name = config.persistence.mysql.container_name;
+            persistence_cfg.mysql.podman_container = config.persistence.mysql.podman_container;
+            persistence_cfg.mysql.user = config.persistence.mysql.user;
+            persistence_cfg.mysql.password = config.persistence.mysql.password;
+            persistence_cfg.mysql.database = config.persistence.mysql.database;
+            sfc::g_persistence->configure(persistence_cfg);
+            const auto init_result = sfc::g_persistence->initialize_schema();
+            if (!init_result.value("ok", false)) {
+                if (config.persistence.strict_startup) {
+                    throw std::runtime_error(
+                        "Strict DB startup enabled, persistence initialization failed: " + init_result.dump()
+                    );
+                }
+                spdlog::warn("Persistence initialization reported errors: {}", init_result.dump());
+            }
+        }
+
         sfc::g_dynamic_sim = std::make_shared<sfc::DynamicSimulationService>(
             sfc::g_topo_mgr,
-            sfc::g_res_mgr
+            sfc::g_res_mgr,
+            sfc::g_sat_runtime,
+            sfc::g_persistence
         );
         sfc::g_dynamic_inference = std::make_shared<sfc::DynamicInferenceService>(
             sfc::g_inference_engine,
@@ -234,6 +357,13 @@ int main() {
         spdlog::info("  - Threads: {}", config.server.threads);
         spdlog::info("  - GNN Model: {}", config.onnx.gnn_model);
         spdlog::info("  - Actor Model: {}", config.onnx.actor_model);
+        spdlog::info("  - Podman Runtime Enabled: {}", config.podman.enabled ? "true" : "false");
+        spdlog::info(
+            "  - Persistence: {} (strict_startup={}, mode={})",
+            config.persistence.enabled ? "enabled" : "disabled",
+            config.persistence.strict_startup ? "true" : "false",
+            "mysql_only"
+        );
         spdlog::info("  - Upload Temp Path: {}", upload_tmp_path);
         spdlog::info("");
         spdlog::info("Starting server...");

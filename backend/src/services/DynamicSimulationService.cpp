@@ -56,9 +56,13 @@ std::vector<std::string> parse_target_ids(const nlohmann::json& req, const char*
 
 DynamicSimulationService::DynamicSimulationService(
     std::shared_ptr<TopologyManager> topo_mgr,
-    std::shared_ptr<ResourceManager> res_mgr
+    std::shared_ptr<ResourceManager> res_mgr,
+    std::shared_ptr<SatelliteRuntimeService> sat_runtime,
+    std::shared_ptr<PersistenceService> persistence
 ) : topo_mgr_(std::move(topo_mgr)),
     res_mgr_(std::move(res_mgr)),
+    sat_runtime_(std::move(sat_runtime)),
+    persistence_(std::move(persistence)),
     running_(false),
     sampling_interval_sec_(5.0),
     simulation_speed_(1.0),
@@ -223,7 +227,9 @@ nlohmann::json DynamicSimulationService::status_json() const {
             {"node", node_fault_catalog()},
             {"link", nlohmann::json::array()}
         }},
-        {"metrics", latest_snapshot_.to_json().value("metrics", nlohmann::json::object())}
+        {"metrics", latest_snapshot_.to_json().value("metrics", nlohmann::json::object())},
+        {"runtime", sat_runtime_ ? sat_runtime_->runtime_status() : nlohmann::json{{"enabled", false}}},
+        {"persistence", persistence_ ? persistence_->status() : nlohmann::json{{"enabled", false}}}
     };
 }
 
@@ -295,6 +301,9 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                             : requested_type;
 
                     node_fault_states_[node_id] = FaultState{ttl_ticks, fault_type, "manual"};
+                    if (sat_runtime_) {
+                        sat_runtime_->mark_fault_state(topology, node_id, true, fault_type);
+                    }
                     injected_count += 1;
                     events.push_back({
                         {"type", "fault_event"},
@@ -324,6 +333,9 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                             sat.fault_tag.clear();
                             break;
                         }
+                    }
+                    if (sat_runtime_) {
+                        sat_runtime_->mark_fault_state(topology, node_id, false, fault_type);
                     }
                     removed_count += 1;
                     events.push_back({
@@ -477,6 +489,11 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
 
     const std::string sim_time = current_sim_time_iso_locked();
 
+    nlohmann::json runtime_collect_result = {
+        {"ok", false},
+        {"enabled", false}
+    };
+
     const double inclination_deg = topology.metadata.inclination_deg;
     for (auto& sat : topology.nodes) {
         update_satellite_position(sat, inclination_deg, sim_dt_sec);
@@ -525,6 +542,9 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
                     break;
                 }
             }
+            if (sat_runtime_) {
+                sat_runtime_->mark_fault_state(topology, sat_id, false, fault_type);
+            }
             change_events.push_back({
                 {"type", "recovery_event"},
                 {"entity_type", "node"},
@@ -553,6 +573,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
             sat.core_network_load = 1.0;
             sat.node_reliability = 0.0;
         }
+    }
+
+    if (sat_runtime_) {
+        runtime_collect_result = sat_runtime_->collect_node_telemetry(topology, false);
     }
 
     link_fault_states_.clear();
@@ -661,6 +685,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     res_mgr_->load_topology(snapshot.topology);
     latest_snapshot_ = snapshot;
 
+    if (persistence_) {
+        (void)persistence_->persist_topology_snapshot(snapshot.topology, "dynamic_tick", false);
+    }
+
     if (emit_events) {
         WSHandler::broadcast_json({
             {"type", "topology_tick"},
@@ -674,6 +702,15 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         });
         for (const auto& evt : change_events) {
             WSHandler::broadcast_json(evt);
+        }
+        if (runtime_collect_result.value("ok", false) &&
+            !runtime_collect_result.value("skipped", false)) {
+            WSHandler::broadcast_json({
+                {"type", "satellite_telemetry_tick"},
+                {"sim_time", snapshot.sim_time},
+                {"topology_version", snapshot.topology_version},
+                {"runtime", runtime_collect_result.value("runtime", nlohmann::json::object())}
+            });
         }
     }
 

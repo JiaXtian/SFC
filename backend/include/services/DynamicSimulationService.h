@@ -3,6 +3,8 @@
 #include "models/types.h"
 #include "services/ResourceManager.h"
 #include "services/TopologyManager.h"
+#include "services/SatelliteRuntimeService.h"
+#include "services/PersistenceService.h"
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -26,7 +28,9 @@ public:
 
     DynamicSimulationService(
         std::shared_ptr<TopologyManager> topo_mgr,
-        std::shared_ptr<ResourceManager> res_mgr
+        std::shared_ptr<ResourceManager> res_mgr,
+        std::shared_ptr<SatelliteRuntimeService> sat_runtime = nullptr,
+        std::shared_ptr<PersistenceService> persistence = nullptr
     );
     ~DynamicSimulationService();
 
@@ -76,6 +80,8 @@ private:
 
     std::shared_ptr<TopologyManager> topo_mgr_;
     std::shared_ptr<ResourceManager> res_mgr_;
+    std::shared_ptr<SatelliteRuntimeService> sat_runtime_;
+    std::shared_ptr<PersistenceService> persistence_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> running_;

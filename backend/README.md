@@ -10,6 +10,10 @@
 - ✅ RESTful API（Drogon框架）
 - ✅ WebSocket实时推送
 - ✅ 动态拓扑仿真（可配置1~30s采样周期）
+- ✅ Podman 卫星节点真实模拟（模板化批量拉起/停止）
+- ✅ 卫星节点状态采集（容器状态 + 模拟资源占用 + 部署策略状态）
+- ✅ MySQL 持久化（关系型存储）
+- ✅ 严格连库模式（数据库不可用时启动失败）
 - ✅ 线程安全的资源管理
 - ✅ 完整的错误处理
 
@@ -24,10 +28,17 @@ sudo apt-get install -y \
     build-essential \
     cmake \
     git \
+    curl \
     libssl-dev \
     libjsoncpp-dev \
     uuid-dev \
     zlib1g-dev
+
+# Podman (卫星节点模拟)
+sudo apt-get install -y podman
+
+# Docker (MySQL 持久化容器)
+sudo apt-get install -y docker.io
 ```
 
 ### 第三方库
@@ -143,6 +154,39 @@ curl http://localhost:8080/api/v1/topology/dynamic/status
 # 停止
 curl -X POST http://localhost:8080/api/v1/topology/dynamic/stop
 ```
+
+### 卫星节点运行时控制
+```bash
+# 运行时状态
+curl http://localhost:8080/api/v1/satellites/runtime/status
+
+# 触发一次卫星节点采集
+curl -X POST http://localhost:8080/api/v1/satellites/runtime/collect \
+  -H "Content-Type: application/json" \
+  -d '{"force": true}'
+
+# 停止指定卫星节点 pod
+curl -X POST http://localhost:8080/api/v1/satellites/pods/stop \
+  -H "Content-Type: application/json" \
+  -d '{"node_ids":["SAT_000_000","SAT_000_001"]}'
+
+# 停止全部卫星节点 pod
+curl -X POST http://localhost:8080/api/v1/satellites/pods/stop_all \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+### 数据库连接与严格模式
+```bash
+# 查看持久化状态
+curl http://localhost:8080/api/v1/persistence/status
+```
+
+`backend/config.json` 关键项：
+- `persistence.enabled=true`
+- `persistence.strict_startup=true`（DB未连通则后端直接启动失败）
+- `persistence.mysql.enabled=true`
+- 当前持久化仅使用 MySQL（Neo4j 逻辑已移除）
 
 ## 🧪 测试
 

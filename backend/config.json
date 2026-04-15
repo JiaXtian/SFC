@@ -13,8 +13,39 @@
     "use_gpu": false
   },
   "database": {
-    "type": "sqlite",
-    "path": "./data/sfc.db"
+    "type": "mysql",
+    "note": "持久化由 mysql 实现，database.path 不再使用"
+  },
+  "podman": {
+    "enabled": true,
+    "podman_bin": "podman",
+    "default_image": "docker.m.daocloud.io/library/alpine:3.20",
+    "auto_pull_image": true,
+    "recreate_existing": false,
+    "telemetry_interval_sec": 5,
+    "cpu_limit_per_sat": 0.001,
+    "mem_limit_mb_per_sat": 2,
+    "tmpfs_limit_mb_per_sat": 1,
+    "pids_limit_per_sat": 8,
+    "lightweight_create_only": true,
+    "provision_parallelism": 24,
+    "start_parallelism": 24,
+    "stop_parallelism": 48
+  },
+  "persistence": {
+    "enabled": true,
+    "strict_startup": true,
+    "snapshot_interval_ticks": 1,
+    "fallback_dir": "./data/persistence_fallback",
+    "mysql": {
+      "enabled": true,
+      "container_runtime": "docker",
+      "container_name": "sfc-mysql",
+      "podman_container": "sfc-mysql",
+      "user": "sfc",
+      "password": "sfc123456",
+      "database": "sfc_runtime"
+    }
   },
   "logging": {
     "level": "info",

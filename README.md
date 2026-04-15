@@ -72,6 +72,42 @@ npm run dev
 - 前端：`http://localhost:5173`
 - 后端：`http://localhost:8080`
 
+## 4.3 工程化一键启动（含 Podman 卫星模拟 + MySQL）
+
+项目根目录提供统一脚本：
+
+```bash
+cd /Users/t1an/Desktop/project/SFC/sfc_deploy
+
+# 可直接使用完整启动脚本
+./start_system.sh
+
+# 或者分步执行：
+# 启动基础设施（mysql）
+./dev.sh infra-up
+
+# 启动完整系统（基础设施 + backend + frontend）
+./dev.sh start
+
+# 查看状态（含卫星pod数量）
+./dev.sh status
+
+# 停止完整系统（会额外停止卫星pod与数据库容器）
+./dev.sh stop
+
+# 等价停止脚本
+./stop_system.sh
+```
+
+默认容器与端口：
+- MySQL: `sfc-mysql` (`3306`)
+- 后端: `8080`
+- 前端: `3001`
+
+严格连库模式：
+- `backend/config.json` 中 `persistence.strict_startup=true`
+- 含义：后端启动时若 MySQL 未连通/建表失败，将直接退出，不会降级为“继续运行”。
+
 ## 5. 训练与导出完整流程
 
 ### 5.1 安装训练依赖

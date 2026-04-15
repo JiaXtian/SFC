@@ -256,6 +256,7 @@ export default function LeftPanel() {
             num_planes: planes,
             altitude_km: parsed.satellites[0]?.orbital_params?.altitude_km ?? tpl.altitude_km,
             inclination_deg: parsed.satellites[0]?.orbital_params?.inclination ?? tpl.inclination_deg,
+            template_id: type,
             timestamp: new Date().toISOString(),
           },
           nodes: parsed.satellites,

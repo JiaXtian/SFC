@@ -54,5 +54,75 @@ input[type=range]::-moz-range-thumb {
   box-shadow: 0 0 0 2px rgba(12, 34, 52, 0.7);
 }
 input[type='number'] {
-  color-scheme: dark;
+  color-scheme: light;
+}
+
+.control-monochrome {
+  color: #111827;
+  background: #ffffff;
+}
+.control-monochrome * {
+  color: #111827;
+}
+.control-monochrome [class*='shadow'] {
+  box-shadow: none !important;
+}
+.control-monochrome [class*='rounded'] {
+  border-radius: 12px !important;
+}
+.control-monochrome [class*='bg-'],
+.control-monochrome [style*='background'] {
+  background: #ffffff !important;
+}
+.control-monochrome [style*='border'] {
+  border-color: #e5e7eb !important;
+}
+.control-monochrome [style*='color'] {
+  color: #111827 !important;
+}
+.control-monochrome [class*='text-'] {
+  color: #111827 !important;
+}
+.control-monochrome [class*='border-'] {
+  border-color: #e5e7eb !important;
+}
+.control-monochrome input,
+.control-monochrome select,
+.control-monochrome textarea,
+.control-monochrome table,
+.control-monochrome thead,
+.control-monochrome tbody,
+.control-monochrome tr {
+  border-color: #e5e7eb !important;
+}
+.control-monochrome input,
+.control-monochrome select,
+.control-monochrome textarea {
+  background: #ffffff !important;
+  color: #111827 !important;
+}
+
+.control-monochrome .mono-progress-track {
+  background: #e5e7eb !important;
+}
+
+.control-monochrome .mono-progress-fill {
+  background: #111827 !important;
+}
+
+.control-monochrome .sfc-form-modern {
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.control-monochrome .sfc-form-modern * {
+  color: #111827 !important;
+}
+
+.control-monochrome .sfc-form-modern input,
+.control-monochrome .sfc-form-modern select,
+.control-monochrome .sfc-form-modern textarea {
+  border-color: #e5e7eb !important;
+  border-radius: 12px !important;
+  background: #fff !important;
 }

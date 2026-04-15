@@ -7,7 +7,7 @@ class APIClient {
   
   async generateTopology(p: any) { 
     try {
-      return (await http.post('/topology/generate', p, { timeout: 180000 })).data 
+      return (await http.post('/topology/generate', p, { timeout: 1800000 })).data 
     } catch (err: any) {
       console.warn('后端API调用失败')
       throw err
@@ -15,6 +15,42 @@ class APIClient {
   }
   
   async getSatellites() { return (await http.get('/satellites')).data }
+  async getRuntimeStatus() { return (await http.get('/satellites/runtime/status')).data }
+  async getPersistenceStatus() { return (await http.get('/persistence/status')).data }
+  async collectSatelliteTelemetry(force = false) {
+    return (await http.post('/satellites/runtime/collect', { force })).data
+  }
+  async startSatellitePods(nodeIds: string[], recreateContainers = false) {
+    return (await http.post(
+      '/satellites/pods/start',
+      { node_ids: nodeIds, recreate_containers: recreateContainers },
+      { timeout: 600000 },
+    )).data
+  }
+  async stopSatellitePods(nodeIds: string[], removeContainers = false) {
+    return (await http.post(
+      '/satellites/pods/stop',
+      { node_ids: nodeIds, remove_containers: removeContainers },
+      { timeout: 600000 },
+    )).data
+  }
+  async stopAllSatellitePods(removeContainers = false) {
+    return (await http.post(
+      '/satellites/pods/stop_all',
+      { remove_containers: removeContainers },
+      { timeout: 600000 },
+    )).data
+  }
+  async deleteSatelliteNodes(nodeIds: string[], removeContainers = true) {
+    return (await http.post(
+      '/satellites/nodes/delete',
+      { node_ids: nodeIds, remove_containers: removeContainers },
+      { timeout: 600000 },
+    )).data
+  }
+  async resetPersistence(confirm = true) {
+    return (await http.post('/persistence/reset', { confirm })).data
+  }
 
   async getDynamicStatus() { return (await http.get('/topology/dynamic/status')).data }
 

@@ -1,66 +1,85 @@
-import { ArrowLeft, SlidersHorizontal } from 'lucide-react'
-import ConstellationControlPanel from './ConstellationControlPanel'
-import SFCForm from './SFCForm'
-import FaultInjectionControl from './FaultInjectionControl'
+import { Satellite, ShieldAlert, SlidersHorizontal } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import FaultControlPage from './control/FaultControlPage'
+import SatelliteControlPage from './control/SatelliteControlPage'
+import StrategyControlPage from './control/StrategyControlPage'
 
-function navigateTo(path: string) {
-  if (window.location.pathname === path) return
-  window.history.pushState({}, '', path)
-  window.dispatchEvent(new PopStateEvent('popstate'))
+type ControlTab = 'fault' | 'satellite' | 'strategy'
+
+function readTabFromUrl(): ControlTab {
+  const sp = new URLSearchParams(window.location.search)
+  const tab = String(sp.get('tab') || '').toLowerCase()
+  if (tab === 'fault' || tab === 'strategy' || tab === 'satellite') return tab
+  return 'satellite'
+}
+
+function writeTabToUrl(tab: ControlTab) {
+  const url = new URL(window.location.href)
+  url.searchParams.set('tab', tab)
+  window.history.replaceState({}, '', `${url.pathname}${url.search}`)
 }
 
 export default function ControlPage() {
+  const [activeTab, setActiveTab] = useState<ControlTab>(() => readTabFromUrl())
+
+  useEffect(() => {
+    const onPop = () => setActiveTab(readTabFromUrl())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  useEffect(() => {
+    writeTabToUrl(activeTab)
+  }, [activeTab])
+
+  const tabs = useMemo(() => ([
+    { key: 'fault' as const, label: '故障控制', icon: ShieldAlert },
+    { key: 'satellite' as const, label: '卫星节点控制', icon: Satellite },
+    { key: 'strategy' as const, label: '部署策略', icon: SlidersHorizontal },
+  ]), [])
+
   return (
-    <div
-      className="absolute inset-0 z-[92] overflow-auto"
-      style={{
-        background: 'radial-gradient(1200px 600px at 50% -20%, rgba(33,88,128,0.24), rgba(3,8,16,0.94) 54%, #02050b 100%)',
-      }}
-    >
-      <div className="mx-auto px-4 py-3.5" style={{ width: 'min(99vw, 1980px)' }}>
-        <div className="flex items-center gap-2.5 mb-3.5">
-          <button
-            onClick={() => navigateTo('/')}
-            className="h-10 px-3.5 rounded-xl text-cyan-100 text-[14px] flex items-center gap-1.5 transition hover:brightness-110"
-            style={{
-              background: 'linear-gradient(135deg, rgba(22,52,78,0.14), rgba(11,26,44,0.1))',
-              backdropFilter: 'blur(10px)',
-            }}
-          >
-            <ArrowLeft className="w-4 h-4" />
-            返回大屏
-          </button>
-          <div className="text-2xl font-semibold text-slate-100 inline-flex items-center gap-2">
-            <SlidersHorizontal className="w-5 h-5 text-cyan-300" />
-            系统控制页面
+    <div className="control-monochrome absolute inset-0 z-[92] overflow-hidden bg-white">
+      <div className="h-full w-full">
+        <div className="h-16 border-b border-slate-200 bg-white px-8 text-black">
+          <div className="flex h-full items-center">
+            <div className="text-2xl font-semibold tracking-wide">系统控制中心</div>
           </div>
-          <div className="ml-auto text-[13px] text-slate-400">控制台</div>
         </div>
 
-        <div className="grid grid-cols-12 gap-3.5">
-          <div className="col-span-12 xl:col-span-3 2xl:col-span-3 min-h-[800px]">
-            <ConstellationControlPanel />
-          </div>
-
-          <div className="col-span-12 xl:col-span-5 2xl:col-span-6 min-h-[800px]">
-            <div
-              className="rounded-2xl p-3.5 h-full"
-              style={{
-                background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
-                border: '1px solid rgba(112,168,208,0.28)',
-                backdropFilter: 'blur(14px)',
-              }}
-            >
-              <div className="text-[14px] uppercase tracking-wide text-cyan-100 font-semibold mb-2.5">部署策略生成</div>
-              <div className="h-[calc(100%-28px)] overflow-y-auto" style={{ zoom: 1.08 }}>
-                <SFCForm />
-              </div>
+        <div className="flex h-[calc(100%-64px)]">
+          <aside className="w-[250px] border-r border-slate-200 bg-white px-4 py-6">
+            <div className="space-y-2">
+              {tabs.map((item) => {
+                const Icon = item.icon
+                const active = activeTab === item.key
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => setActiveTab(item.key)}
+                    className={`w-full rounded-xl border border-transparent px-3 py-3 text-left transition ${
+                      active
+                        ? 'border-slate-300 text-black'
+                        : 'bg-transparent text-black hover:border-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Icon className="h-5 w-5 text-black" />
+                      <div className={`text-lg ${active ? 'font-semibold' : 'font-medium'}`}>{item.label}</div>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
-          </div>
+          </aside>
 
-          <div className="col-span-12 xl:col-span-4 2xl:col-span-3 min-h-[800px]">
-            <FaultInjectionControl />
-          </div>
+          <main className="flex-1 overflow-hidden bg-white px-6 py-5">
+            <div className="h-full w-full">
+              {activeTab === 'fault' && <FaultControlPage />}
+              {activeTab === 'satellite' && <SatelliteControlPage />}
+              {activeTab === 'strategy' && <StrategyControlPage />}
+            </div>
+          </main>
         </div>
       </div>
     </div>
