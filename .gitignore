@@ -4,6 +4,7 @@ Thumbs.db
 .vscode/
 .idea/
 .run/
+data/
 
 # Python
 __pycache__/
