@@ -1,8 +1,48 @@
 import axios from 'axios'
+import { getAuthToken } from '@/auth/session'
+import type { AuthUser, UserRole } from '@/types/auth'
 
 const http = axios.create({ baseURL: '/api/v1', timeout: 30000, headers: { 'Content-Type': 'application/json' } })
 
+http.interceptors.request.use((config) => {
+  const token = getAuthToken()
+  if (token) {
+    const headers = (config.headers ?? {}) as any
+    headers.Authorization = `Bearer ${token}`
+    config.headers = headers
+  }
+  return config
+})
+
 class APIClient {
+  async login(p: { username: string; password: string }) {
+    return (await http.post('/auth/login', p)).data as { token: string; user: AuthUser }
+  }
+
+  async register(p: { username: string; password: string; confirm_password: string }) {
+    return (await http.post('/auth/register', p)).data as { token: string; user: AuthUser }
+  }
+
+  async getCurrentUser() {
+    return (await http.get('/auth/me')).data as { user: AuthUser }
+  }
+
+  async listUsers() {
+    return (await http.get('/users')).data as { users: AuthUser[] }
+  }
+
+  async createUser(p: { username: string; password: string; role: UserRole }) {
+    return (await http.post('/users', p)).data as { user: AuthUser }
+  }
+
+  async updateUser(userId: number, p: { username?: string; password?: string; confirm_password?: string; role?: UserRole }) {
+    return (await http.put(`/users/${userId}`, p)).data as { user: AuthUser }
+  }
+
+  async deleteUser(userId: number) {
+    return (await http.delete(`/users/${userId}`)).data as { status: string; user_id: number }
+  }
+
   async getTopology() { return (await http.get('/topology')).data }
   
   async generateTopology(p: any) { 

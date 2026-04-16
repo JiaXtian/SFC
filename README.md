@@ -47,6 +47,9 @@ sfc_deploy/
 
 ### 4.1 启动后端
 ```bash
+# 确保 MySQL 容器已运行（容器名：sfc-mysql）
+docker start sfc-mysql
+
 cd /Users/t1an/Desktop/project/SFC/sfc_deploy/backend
 ./build.sh
 cd build
@@ -68,9 +71,16 @@ npm install
 npm run dev
 ```
 
-默认访问（以 Vite 输出为准）：
-- 前端：`http://localhost:5173`
+默认访问：
+- 大屏主页面：`http://localhost:3001`
+- 系统控制中心：`http://localhost:3002`
 - 后端：`http://localhost:8080`
+
+默认账号：
+- 管理员：`admin / 123456`
+- 普通用户：`user / 123456`
+
+说明：后端启动时会自动在 `sfc_runtime.users` 表初始化默认账号（若不存在则创建，已存在则更新密码与角色）。
 
 ## 5. 训练与导出完整流程
 

@@ -9,9 +9,11 @@ LOG_DIR="${RUNTIME_DIR}/logs"
 BACKEND_BUILD_DIR="${ROOT_DIR}/backend/build"
 BACKEND_BIN="${BACKEND_BUILD_DIR}/sfc_server"
 BACKEND_PID_FILE="${PID_DIR}/backend.pid"
-FRONTEND_PID_FILE="${PID_DIR}/frontend.pid"
+FRONTEND_MAIN_PID_FILE="${PID_DIR}/frontend-main.pid"
+FRONTEND_CONTROL_PID_FILE="${PID_DIR}/frontend-control.pid"
 BACKEND_LOG_FILE="${LOG_DIR}/backend.log"
-FRONTEND_LOG_FILE="${LOG_DIR}/frontend.log"
+FRONTEND_MAIN_LOG_FILE="${LOG_DIR}/frontend-main.log"
+FRONTEND_CONTROL_LOG_FILE="${LOG_DIR}/frontend-control.log"
 
 mkdir -p "${PID_DIR}" "${LOG_DIR}"
 
@@ -78,19 +80,34 @@ start_backend() {
   echo "backend started (pid=$(cat "${BACKEND_PID_FILE}")) log=${BACKEND_LOG_FILE}"
 }
 
-start_frontend() {
-  if is_running "${FRONTEND_PID_FILE}"; then
-    echo "frontend already running (pid=$(cat "${FRONTEND_PID_FILE}"))"
+start_frontend_main() {
+  if is_running "${FRONTEND_MAIN_PID_FILE}"; then
+    echo "frontend-main already running (pid=$(cat "${FRONTEND_MAIN_PID_FILE}"))"
     return 0
   fi
 
-  echo "starting frontend..."
+  echo "starting frontend-main (port 3001)..."
   (
     cd "${ROOT_DIR}/frontend"
-    nohup npm run dev -- --host 0.0.0.0 --port 3001 >>"${FRONTEND_LOG_FILE}" 2>&1 &
-    echo $! > "${FRONTEND_PID_FILE}"
+    nohup npm run dev:main -- --host 0.0.0.0 --port 3001 >>"${FRONTEND_MAIN_LOG_FILE}" 2>&1 &
+    echo $! > "${FRONTEND_MAIN_PID_FILE}"
   )
-  echo "frontend started (pid=$(cat "${FRONTEND_PID_FILE}")) log=${FRONTEND_LOG_FILE}"
+  echo "frontend-main started (pid=$(cat "${FRONTEND_MAIN_PID_FILE}")) log=${FRONTEND_MAIN_LOG_FILE}"
+}
+
+start_frontend_control() {
+  if is_running "${FRONTEND_CONTROL_PID_FILE}"; then
+    echo "frontend-control already running (pid=$(cat "${FRONTEND_CONTROL_PID_FILE}"))"
+    return 0
+  fi
+
+  echo "starting frontend-control (port 3002)..."
+  (
+    cd "${ROOT_DIR}/frontend"
+    nohup npm run dev:control -- --host 0.0.0.0 --port 3002 >>"${FRONTEND_CONTROL_LOG_FILE}" 2>&1 &
+    echo $! > "${FRONTEND_CONTROL_PID_FILE}"
+  )
+  echo "frontend-control started (pid=$(cat "${FRONTEND_CONTROL_PID_FILE}")) log=${FRONTEND_CONTROL_LOG_FILE}"
 }
 
 status_all() {
@@ -100,21 +117,29 @@ status_all() {
     echo "backend: stopped"
   fi
 
-  if is_running "${FRONTEND_PID_FILE}"; then
-    echo "frontend: running (pid=$(cat "${FRONTEND_PID_FILE}"))"
+  if is_running "${FRONTEND_MAIN_PID_FILE}"; then
+    echo "frontend-main: running (pid=$(cat "${FRONTEND_MAIN_PID_FILE}"))"
   else
-    echo "frontend: stopped"
+    echo "frontend-main: stopped"
+  fi
+
+  if is_running "${FRONTEND_CONTROL_PID_FILE}"; then
+    echo "frontend-control: running (pid=$(cat "${FRONTEND_CONTROL_PID_FILE}"))"
+  else
+    echo "frontend-control: stopped"
   fi
 }
 
 start_all() {
   start_backend
-  start_frontend
+  start_frontend_main
+  start_frontend_control
   status_all
 }
 
 stop_all() {
-  stop_one "frontend" "${FRONTEND_PID_FILE}"
+  stop_one "frontend-control" "${FRONTEND_CONTROL_PID_FILE}"
+  stop_one "frontend-main" "${FRONTEND_MAIN_PID_FILE}"
   stop_one "backend" "${BACKEND_PID_FILE}"
   status_all
 }

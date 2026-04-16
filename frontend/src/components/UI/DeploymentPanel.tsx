@@ -4,6 +4,7 @@ import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
 import { toChineseFailureList } from '@/utils/failureText'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
+import { useAuth } from '@/auth/AuthContext'
 
 function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0
@@ -22,6 +23,8 @@ const StatusLabel: Record<string, [string, string]> = {
 }
 
 export default function DeploymentPanel() {
+  const { user } = useAuth()
+  const canRollback = user?.role === 'admin'
   const {
     deployments,
     removeDeployment,
@@ -162,10 +165,12 @@ export default function DeploymentPanel() {
                     className="p-1 rounded hover:bg-white/5 transition">
                     {isExpanded ? <ChevronUp className="w-3.5 h-3.5 text-gray-500" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-500" />}
                   </button>
-                  <button onClick={() => setDeleteConfirm(dep.deployment_id)} disabled={rolling === dep.deployment_id}
-                    className="p-1 rounded hover:bg-red-900/30 transition">
-                    <Trash2 className="w-3.5 h-3.5 text-gray-700 hover:text-red-400" />
-                  </button>
+                  {canRollback && (
+                    <button onClick={() => setDeleteConfirm(dep.deployment_id)} disabled={rolling === dep.deployment_id}
+                      className="p-1 rounded hover:bg-red-900/30 transition">
+                      <Trash2 className="w-3.5 h-3.5 text-gray-700 hover:text-red-400" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between text-[11px]">
@@ -334,7 +339,7 @@ export default function DeploymentPanel() {
         })}
       </div>
 
-      {deleteConfirm && (
+      {canRollback && deleteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.75)' }}>
           <div className="w-80 rounded-2xl overflow-hidden shadow-2xl"
             style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #0a0a15 100%)', border: '1px solid rgba(248,113,113,0.3)' }}>

@@ -13,8 +13,15 @@
     "use_gpu": false
   },
   "database": {
-    "type": "sqlite",
-    "path": "./data/sfc.db"
+    "type": "mysql-docker-exec",
+    "container_name": "sfc-mysql",
+    "name": "sfc_runtime",
+    "user": "sfc",
+    "password": "sfc123456"
+  },
+  "auth": {
+    "jwt_secret": "sfc_jwt_secret_please_change_in_production",
+    "token_expire_hours": 24
   },
   "logging": {
     "level": "info",

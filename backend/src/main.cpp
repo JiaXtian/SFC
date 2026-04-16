@@ -3,14 +3,23 @@
 #include <nlohmann/json.hpp>
 #include "controllers/TopologyController.h"
 #include "controllers/SFCController.h"
+#include "controllers/AuthController.h"
+#include "controllers/UserController.h"
 #include "services/TopologyManager.h"
 #include "services/ResourceManager.h"
 #include "services/InferenceEngine.h"
 #include "services/DynamicSimulationService.h"
 #include "services/DynamicInferenceService.h"
+#include "services/AuthGlobals.h"
+#include "services/AuthService.h"
+#include "services/UserService.h"
 #include <fstream>
 #include <filesystem>
 #include <vector>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <stdexcept>
 
 using namespace drogon;
 using json = nlohmann::json;
@@ -22,6 +31,8 @@ namespace sfc {
     std::shared_ptr<InferenceEngine> g_inference_engine;
     std::shared_ptr<DynamicSimulationService> g_dynamic_sim;
     std::shared_ptr<DynamicInferenceService> g_dynamic_inference;
+    std::shared_ptr<AuthService> g_auth_service;
+    std::shared_ptr<UserService> g_user_service;
 }
 
 struct Config {
@@ -40,6 +51,18 @@ struct Config {
     struct {
         std::string level = "info";
     } logging;
+
+    struct {
+        std::string container_name = "sfc-mysql";
+        std::string name = "sfc_runtime";
+        std::string user = "sfc";
+        std::string password = "sfc123456";
+    } database;
+
+    struct {
+        std::string jwt_secret = "sfc-default-jwt-secret-change-this";
+        int token_expire_hours = 24;
+    } auth;
 };
 
 Config load_config(const std::string& config_file) {
@@ -68,6 +91,23 @@ Config load_config(const std::string& config_file) {
             if (j.contains("logging")) {
                 config.logging.level = j["logging"].value("level", config.logging.level);
             }
+
+            if (j.contains("database")) {
+                auto& d = j["database"];
+                config.database.container_name =
+                    d.value("container_name", d.value("host", config.database.container_name));
+                config.database.name =
+                    d.value("name", d.value("database", config.database.name));
+                config.database.user = d.value("user", config.database.user);
+                config.database.password = d.value("password", config.database.password);
+            }
+
+            if (j.contains("auth")) {
+                auto& a = j["auth"];
+                config.auth.jwt_secret = a.value("jwt_secret", config.auth.jwt_secret);
+                config.auth.token_expire_hours =
+                    a.value("token_expire_hours", config.auth.token_expire_hours);
+            }
             
             spdlog::info("Config loaded from {}", config_file);
         } else {
@@ -78,6 +118,50 @@ Config load_config(const std::string& config_file) {
     }
     
     return config;
+}
+
+std::string trim_copy(const std::string& s) {
+    size_t start = 0;
+    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+    size_t end = s.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+    return s.substr(start, end - start);
+}
+
+bool starts_with(const std::string& s, const std::string& prefix) {
+    return s.rfind(prefix, 0) == 0;
+}
+
+std::string extract_bearer_token(const HttpRequestPtr& req) {
+    const auto auth = req->getHeader("Authorization");
+    constexpr const char* kPrefix = "Bearer ";
+    if (auth.size() <= 7 || auth.rfind(kPrefix, 0) != 0) return {};
+    return trim_copy(auth.substr(7));
+}
+
+bool is_public_api_path(const std::string& path) {
+    return path == "/api/v1/health" ||
+           path == "/api/v1/auth/login" ||
+           path == "/api/v1/auth/register";
+}
+
+bool is_admin_only_path(const std::string& path) {
+    if (starts_with(path, "/api/v1/users")) return true;
+    if (starts_with(path, "/api/v1/sfc")) return true;
+    if (path == "/api/v1/topology/generate") return true;
+    if (starts_with(path, "/api/v1/topology/dynamic/") && path != "/api/v1/topology/dynamic/status") {
+        return true;
+    }
+    return false;
+}
+
+HttpResponsePtr build_auth_error(HttpStatusCode status, const std::string& message) {
+    Json::Value err;
+    err["code"] = static_cast<int>(status);
+    err["message"] = message;
+    auto resp = HttpResponse::newHttpJsonResponse(err);
+    resp->setStatusCode(status);
+    return resp;
 }
 
 std::filesystem::path find_config_file() {
@@ -109,6 +193,9 @@ int main() {
     
     const std::filesystem::path config_path = find_config_file();
     Config config = load_config(config_path.string());
+    if (const char* env_secret = std::getenv("SFC_JWT_SECRET"); env_secret && *env_secret) {
+        config.auth.jwt_secret = env_secret;
+    }
     const std::filesystem::path config_dir = config_path.parent_path();
     const std::string upload_tmp_path =
         (std::filesystem::temp_directory_path() / "sfc_drogon_upload").lexically_normal().string();
@@ -146,6 +233,10 @@ int main() {
             sfc::g_topo_mgr,
             sfc::g_dynamic_sim
         );
+        sfc::g_auth_service = std::make_shared<sfc::AuthService>(
+            config.auth.jwt_secret,
+            config.auth.token_expire_hours
+        );
         sfc::g_dynamic_sim->register_snapshot_listener(
             "dynamic_orchestrator",
             [service = sfc::g_dynamic_inference](const sfc::TopologySnapshot& snapshot) {
@@ -167,13 +258,61 @@ int main() {
             .enableSession(3600)
             .setUploadPath(upload_tmp_path)
             .setDocumentRoot("./public");
+
+        sfc::g_user_service = std::make_shared<sfc::UserService>(sfc::UserDBConfig{
+            config.database.container_name,
+            config.database.name,
+            config.database.user,
+            config.database.password,
+        });
+        if (!sfc::g_user_service->init_schema()) {
+            throw std::runtime_error("Failed to initialize users table");
+        }
+        if (!sfc::g_user_service->seed_default_accounts()) {
+            throw std::runtime_error("Failed to seed default users");
+        }
+
+        app().registerPreRoutingAdvice(
+            [](const HttpRequestPtr& req,
+               AdviceCallback&& callback,
+               AdviceChainCallback&& chain_callback) {
+                const std::string path = req->path();
+                if (!starts_with(path, "/api/v1/")) {
+                    chain_callback();
+                    return;
+                }
+                if (req->method() == Options || is_public_api_path(path)) {
+                    chain_callback();
+                    return;
+                }
+                if (!sfc::g_auth_service) {
+                    callback(build_auth_error(k500InternalServerError, "auth_service_unavailable"));
+                    return;
+                }
+                const std::string token = extract_bearer_token(req);
+                if (token.empty()) {
+                    callback(build_auth_error(k401Unauthorized, "missing_token"));
+                    return;
+                }
+                const auto claims = sfc::g_auth_service->verify_token(token);
+                if (!claims) {
+                    callback(build_auth_error(k401Unauthorized, "invalid_or_expired_token"));
+                    return;
+                }
+                if (is_admin_only_path(path) && !claims->is_admin()) {
+                    callback(build_auth_error(k403Forbidden, "admin_required"));
+                    return;
+                }
+                chain_callback();
+            }
+        );
         
         // 启用CORS
         app().registerPostHandlingAdvice(
             [](const HttpRequestPtr&, const HttpResponsePtr& resp) {
                 resp->addHeader("Access-Control-Allow-Origin", "*");
-                resp->addHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-                resp->addHeader("Access-Control-Allow-Headers", "Content-Type");
+                resp->addHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+                resp->addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
             }
         );
         
@@ -234,6 +373,8 @@ int main() {
         spdlog::info("  - Threads: {}", config.server.threads);
         spdlog::info("  - GNN Model: {}", config.onnx.gnn_model);
         spdlog::info("  - Actor Model: {}", config.onnx.actor_model);
+        spdlog::info("  - Database: docker:{} / {}", config.database.container_name, config.database.name);
+        spdlog::info("  - JWT Expire: {}h", config.auth.token_expire_hours);
         spdlog::info("  - Upload Temp Path: {}", upload_tmp_path);
         spdlog::info("");
         spdlog::info("Starting server...");

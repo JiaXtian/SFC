@@ -1,12 +1,14 @@
 import { useMemo, useState } from 'react'
-import { Activity, Settings, Satellite, Info, ChevronDown, SlidersHorizontal } from 'lucide-react'
+import { Activity, Settings, Satellite, Info, ChevronDown, SlidersHorizontal, LogOut } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { shallow } from 'zustand/shallow'
 import SettingsModal from './SettingsModal'
+import { useAuth } from '@/auth/AuthContext'
 
 export default function TopBar() {
   const [open, setOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const { user, logout } = useAuth()
   const { satCount, linkCount, deployCount, orch, decisionTraces } = useStore((s) => ({
     satCount: s.satellites.length,
     linkCount: s.links.length,
@@ -33,7 +35,8 @@ export default function TopBar() {
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const gotoControlPage = () => {
-    window.open('/control', '_blank', 'noopener,noreferrer')
+    const controlUrl = String((import.meta as any)?.env?.VITE_CONTROL_CENTER_URL || 'http://localhost:3002')
+    window.open(controlUrl, '_blank', 'noopener,noreferrer')
   }
   const iconBtnStyle = {
     color: 'rgba(186,230,253,0.92)',
@@ -101,14 +104,16 @@ export default function TopBar() {
         </div>
 
         <div className="flex items-center gap-1.5 relative">
-          <button
-            onClick={gotoControlPage}
-            title="系统控制页面（新窗口）"
-            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
-            style={iconBtnStyle}
-          >
-            <SlidersHorizontal className="w-4 h-4" />
-          </button>
+          {user?.role === 'admin' && (
+            <button
+              onClick={gotoControlPage}
+              title="系统控制中心（新窗口）"
+              className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+              style={iconBtnStyle}
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </button>
+          )}
           <button
             onClick={gotoMonitorPage}
             title="系统监控中心"
@@ -156,6 +161,18 @@ export default function TopBar() {
             style={iconBtnStyle}
           >
             <Settings className="w-4 h-4" />
+          </button>
+          <div className="ml-1 px-2.5 h-7 rounded-full text-[11px] inline-flex items-center"
+            style={{ background: 'rgba(8,31,52,0.5)', border: '1px solid rgba(125,211,252,0.24)', color: '#bae6fd' }}>
+            {user?.username ?? 'unknown'} · {user?.role === 'admin' ? '管理员' : '普通用户'}
+          </div>
+          <button
+            onClick={logout}
+            title="退出登录"
+            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+            style={iconBtnStyle}
+          >
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>

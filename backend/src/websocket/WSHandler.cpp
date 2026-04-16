@@ -1,4 +1,6 @@
 #include "websocket/WSHandler.h"
+#include "services/AuthGlobals.h"
+#include "services/AuthService.h"
 #include <spdlog/spdlog.h>
 
 namespace sfc {
@@ -22,6 +24,22 @@ void WSHandler::handleNewConnection(
     const HttpRequestPtr& req,
     const WebSocketConnectionPtr& wsConnPtr
 ) {
+    const auto token_param = req->getParameter("token");
+    std::string token = token_param;
+    if (token.empty()) {
+        const auto auth = req->getHeader("Authorization");
+        constexpr const char* kPrefix = "Bearer ";
+        if (auth.size() > 7 && auth.rfind(kPrefix, 0) == 0) {
+            token = auth.substr(7);
+        }
+    }
+
+    if (!g_auth_service || token.empty() || !g_auth_service->verify_token(token)) {
+        spdlog::warn("WebSocket rejected: unauthorized {}", wsConnPtr->peerAddr().toIpPort());
+        wsConnPtr->shutdown();
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(connections_mutex_);
     connections_.insert(wsConnPtr);
     

@@ -1,13 +1,21 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
+import { getAuthToken } from '@/auth/session'
 
 function defaultWsUrl() {
   const envUrl = (import.meta as any)?.env?.VITE_WS_URL?.trim?.()
-  if (envUrl) return envUrl
+  const token = getAuthToken()
+  if (envUrl) {
+    if (!token) return envUrl
+    const sep = envUrl.includes('?') ? '&' : '?'
+    return `${envUrl}${sep}token=${encodeURIComponent(token)}`
+  }
 
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${protocol}://${window.location.host}/ws/updates`
+  const base = `${protocol}://${window.location.host}/ws/updates`
+  if (!token) return base
+  return `${base}?token=${encodeURIComponent(token)}`
 }
 
 function faultTypeLabel(tag: string): string {

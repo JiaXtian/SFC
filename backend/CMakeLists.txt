@@ -9,6 +9,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Drogon REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 find_package(spdlog REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_library(CRYPTO_LIB NAMES crypto
+    PATHS
+        /opt/homebrew/opt/openssl@3/lib
+        /usr/local/opt/openssl/lib
+        /usr/lib
+)
+if(NOT CRYPTO_LIB)
+    set(CRYPTO_LIB ${OPENSSL_CRYPTO_LIBRARY})
+endif()
+if(NOT CRYPTO_LIB)
+    message(FATAL_ERROR "libcrypto not found")
+endif()
 
 # ONNX Runtime
 if(DEFINED ENV{ONNXRUNTIME_DIR})
@@ -49,6 +62,7 @@ target_link_libraries(sfc_server
     Drogon::Drogon
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    ${CRYPTO_LIB}
     ${ONNXRUNTIME_LIB}
 )
 

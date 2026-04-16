@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "dev": "sh -c 'npm run dev:main & npm run dev:control & wait'",
+    "dev:main": "vite --config vite.main.config.ts",
+    "dev:control": "vite --config vite.control.config.ts",
+    "build": "tsc --noEmit && npm run build:main && npm run build:control",
+    "build:main": "vite build --config vite.main.config.ts",
+    "build:control": "vite build --config vite.control.config.ts",
+    "preview": "vite preview --config vite.main.config.ts"
   },
   "dependencies": {
     "@react-three/drei": "^9.92.7",

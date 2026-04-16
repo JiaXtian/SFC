@@ -11,7 +11,6 @@ import SatelliteDetail from './components/UI/SatelliteDetail'
 import LinkDetailPanel from './components/UI/LinkDetailPanel'
 import BottomHub from './components/UI/BottomHub'
 import TimeAxis from './components/UI/TimeAxis'
-import ControlPage from './components/UI/ControlPage'
 import SystemPopup from './components/UI/SystemPopup'
 import { useStore } from './store/useStore'
 import { useWebSocket } from './hooks/useWebSocket'
@@ -41,9 +40,8 @@ export default function App() {
     w: window.innerWidth,
     h: window.innerHeight,
   }))
-  const [route, setRoute] = useState<'main' | 'monitor' | 'control'>(() => {
+  const [route, setRoute] = useState<'main' | 'monitor'>(() => {
     if (window.location.pathname.startsWith('/monitor')) return 'monitor'
-    if (window.location.pathname.startsWith('/control')) return 'control'
     return 'main'
   })
 
@@ -51,10 +49,6 @@ export default function App() {
     const onPop = () => {
       if (window.location.pathname.startsWith('/monitor')) {
         setRoute('monitor')
-        return
-      }
-      if (window.location.pathname.startsWith('/control')) {
-        setRoute('control')
         return
       }
       setRoute('main')
@@ -200,17 +194,6 @@ export default function App() {
             )}
           </div>
         </>
-      )}
-
-      {route === 'control' && (
-        <Suspense fallback={<div className="absolute inset-0 z-[90] bg-black" />}>
-          <ControlPage />
-          {candidateResult && (
-            <div className="pointer-events-auto absolute inset-0 z-[120]">
-              <CandidateModal />
-            </div>
-          )}
-        </Suspense>
       )}
 
       {route === 'monitor' && (
