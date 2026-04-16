@@ -259,7 +259,7 @@ export default function SatelliteRuntimePanel() {
   const failed = toNumber(runtime?.failed, 0)
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl bg-white p-3">
+    <div className="satellite-runtime-panel flex h-full min-h-0 flex-col p-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h3 className="text-2xl font-semibold text-black">卫星节点控制中心</h3>
         <span className={`rounded-lg border px-2 py-0.5 text-sm ${badgeClass('pod', 'running')}`}>运行 {running}</span>
@@ -513,7 +513,7 @@ export default function SatelliteRuntimePanel() {
                 关闭
               </button>
             </div>
-            <pre className="h-[calc(100%-56px)] overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs leading-6 text-black">
+            <pre className="h-[calc(100%_-_56px)] overflow-auto rounded-xl border border-slate-200 bg-white p-3 text-xs leading-6 text-black">
               {JSON.stringify(detailSat, null, 2)}
             </pre>
           </div>

@@ -492,13 +492,13 @@ export default function ConstellationControlPanel() {
   const progressPercent = useMemo(() => Math.round(progress.percent * 100), [progress.percent])
 
   return (
-    <div className="h-full border border-blue-100 bg-white p-4">
+    <div className="constellation-panel flex h-full min-h-0 flex-col p-4">
       <div className="mb-3 flex items-center gap-2">
         <h3 className="text-base font-semibold text-[#0b1220]">卫星构型生成与导入</h3>
         <span className="bg-blue-50 px-2 py-0.5 text-xs text-blue-700">节点模板 + 第三方拓扑</span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-auto pr-1">
         <div className="space-y-3 border border-blue-100 bg-white p-3">
           <div>
             <label className="mb-1 block text-xs font-medium text-blue-700">星座模板</label>

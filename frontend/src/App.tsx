@@ -125,6 +125,8 @@ export default function App() {
     <div className="w-screen h-screen overflow-hidden"
       style={{
         ['--ui-scale' as any]: uiScale,
+        width: '100vw',
+        height: '100dvh',
         background:
           'radial-gradient(1200px 520px at 50% 110%, rgba(24,72,115,0.32) 0%, rgba(3,8,16,0.8) 42%, #010206 76%, #000000 100%)',
         fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif',

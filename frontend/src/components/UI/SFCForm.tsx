@@ -448,27 +448,17 @@ export default function SFCForm() {
   const selectedTpl = sfcTemplates[selectedTemplate]
 
   return (
-    <div className="sfc-form-modern h-full min-h-0 overflow-y-auto pr-1 pb-2">
+    <div className="sfc-form-modern strategy-form-shell h-full min-h-0 overflow-y-auto pr-1 pb-2">
       <div className="flex gap-2">
         <button
           onClick={() => setMode('template')}
-          className="flex-1 py-2 rounded-lg text-xs font-bold transition"
-          style={
-            mode === 'template'
-              ? { background: 'linear-gradient(135deg, #14385f, #10263e)', color: '#fff' }
-              : { background: 'rgba(16,27,43,0.6)', color: '#94a3b8', border: '1px solid rgba(102,132,160,0.18)' }
-          }
+          className={`mode-switch-btn ${mode === 'template' ? 'is-active' : ''}`}
         >
           模板
         </button>
         <button
           onClick={() => setMode('custom')}
-          className="flex-1 py-2 rounded-lg text-xs font-bold transition"
-          style={
-            mode === 'custom'
-              ? { background: 'linear-gradient(135deg, #14385f, #10263e)', color: '#fff' }
-              : { background: 'rgba(16,27,43,0.6)', color: '#94a3b8', border: '1px solid rgba(102,132,160,0.18)' }
-          }
+          className={`mode-switch-btn ${mode === 'custom' ? 'is-active' : ''}`}
         >
           自定义
         </button>

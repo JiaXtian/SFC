@@ -39,17 +39,19 @@ export default function ControlPage() {
   ]), [])
 
   return (
-    <div className="control-monochrome absolute inset-0 z-[92] overflow-hidden bg-white">
-      <div className="h-full w-full">
-        <div className="h-16 border-b border-slate-200 bg-white px-8 text-black">
+    <div className="control-modern absolute inset-0 z-[92] overflow-hidden">
+      <div className="control-bg-glow control-bg-glow-a" />
+      <div className="control-bg-glow control-bg-glow-b" />
+      <div className="relative h-full w-full">
+        <header className="control-topbar h-16 px-8">
           <div className="flex h-full items-center">
-            <div className="text-2xl font-semibold tracking-wide">系统控制中心</div>
+            <div className="control-title">系统控制中心</div>
           </div>
-        </div>
+        </header>
 
-        <div className="flex h-[calc(100%-64px)]">
-          <aside className="w-[250px] border-r border-slate-200 bg-white px-4 py-6">
-            <div className="space-y-2">
+        <div className="flex h-[calc(100%_-_64px)] min-h-0">
+          <aside className="control-sidebar w-[250px] px-4 py-5">
+            <div className="space-y-1.5">
               {tabs.map((item) => {
                 const Icon = item.icon
                 const active = activeTab === item.key
@@ -57,15 +59,11 @@ export default function ControlPage() {
                   <button
                     key={item.key}
                     onClick={() => setActiveTab(item.key)}
-                    className={`w-full rounded-xl border border-transparent px-3 py-3 text-left transition ${
-                      active
-                        ? 'border-slate-300 text-black'
-                        : 'bg-transparent text-black hover:border-slate-200'
-                    }`}
+                    className={`control-nav-btn ${active ? 'is-active' : ''}`}
                   >
                     <div className="flex items-center gap-2">
-                      <Icon className="h-5 w-5 text-black" />
-                      <div className={`text-lg ${active ? 'font-semibold' : 'font-medium'}`}>{item.label}</div>
+                      <Icon className="h-5 w-5" />
+                      <div className="text-[17px] font-medium">{item.label}</div>
                     </div>
                   </button>
                 )
@@ -73,8 +71,8 @@ export default function ControlPage() {
             </div>
           </aside>
 
-          <main className="flex-1 overflow-hidden bg-white px-6 py-5">
-            <div className="h-full w-full">
+          <main className="control-main flex-1 overflow-hidden p-4 xl:p-5">
+            <div className="control-content-surface h-full min-h-0 w-full">
               {activeTab === 'fault' && <FaultControlPage />}
               {activeTab === 'satellite' && <SatelliteControlPage />}
               {activeTab === 'strategy' && <StrategyControlPage />}

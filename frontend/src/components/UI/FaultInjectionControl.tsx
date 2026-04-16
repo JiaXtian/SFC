@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, Clock3, ListChecks, Plus, RotateCw, X, Trash2 } from 'lucide-react'
+import { AlertTriangle, Clock3, ListChecks, Plus, RotateCw, X, Trash2 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 
@@ -256,12 +256,8 @@ export default function FaultInjectionControl() {
   }, [activeFaults, nowMs])
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-2xl bg-white p-3">
-      <div className="mb-3 flex items-center gap-2 text-2xl font-semibold text-black">
-        <Activity className="h-6 w-6" />故障控制中心
-      </div>
-
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-12">
+    <div className="fault-control-panel flex h-full min-h-0 flex-col p-4">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden xl:grid-cols-12">
         <section className="xl:col-span-5 min-h-0 overflow-auto space-y-3 pr-1">
           <div className="text-lg font-semibold">手动注入</div>
 
