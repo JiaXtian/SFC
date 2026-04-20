@@ -134,6 +134,31 @@ void TopologyController::generateTopology(
                     0.0, std::min(1.0, (cpu_ratio + mem_ratio + disk_ratio) / 3.0)
                 );
                 sat.core_network_load = n.get("core_network_load", 1.0 - resource_health).asDouble();
+                if (n.isMember("core_business_load") && n["core_business_load"].isObject()) {
+                    const auto& cbl = n["core_business_load"];
+                    sat.core_business_load.signaling_load =
+                        cbl.get("signaling_load", sat.core_network_load).asDouble();
+                    sat.core_business_load.session_load =
+                        cbl.get("session_load", sat.core_network_load).asDouble();
+                    sat.core_business_load.user_plane_load =
+                        cbl.get("user_plane_load", sat.core_network_load).asDouble();
+                    sat.core_business_load.mobility_load =
+                        cbl.get("mobility_load", sat.core_network_load).asDouble();
+                    sat.core_business_load.policy_load =
+                        cbl.get("policy_load", sat.core_network_load).asDouble();
+                    sat.core_business_load.auth_load =
+                        cbl.get("auth_load", sat.core_network_load).asDouble();
+                } else {
+                    const double base_load = std::max(0.0, std::min(1.0, sat.core_network_load));
+                    sat.core_business_load.signaling_load = n.get("signaling_load", base_load).asDouble();
+                    sat.core_business_load.session_load = n.get("session_load", base_load).asDouble();
+                    sat.core_business_load.user_plane_load = n.get("user_plane_load", base_load).asDouble();
+                    sat.core_business_load.mobility_load = n.get("mobility_load", base_load).asDouble();
+                    sat.core_business_load.policy_load = n.get("policy_load", base_load).asDouble();
+                    sat.core_business_load.auth_load = n.get("auth_load", base_load).asDouble();
+                }
+                sat.core_business_load.normalize_inplace();
+                sat.core_network_load = sat.core_business_load.load_index();
                 sat.node_reliability = n.get("node_reliability", 0.985 + 0.014 * resource_health).asDouble();
                 sat.status = n.get("status", "active").asString();
                 sat.fault_tag = n.get("fault_tag", "").asString();

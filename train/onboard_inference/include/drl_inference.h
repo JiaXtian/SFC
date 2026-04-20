@@ -27,6 +27,11 @@ public:
     );
     
 private:
+    static constexpr int64_t kExpectedNodeFeatureDim = 14;
+    static constexpr int64_t kExpectedEmbeddingDim = 192;
+    static constexpr int64_t kExpectedVnfFeatureDim = 8;
+    static constexpr int64_t kExpectedContextFeatureDim = 48;
+
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> gnn_session_;
     std::unique_ptr<Ort::Session> actor_session_;

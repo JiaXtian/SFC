@@ -56,6 +56,12 @@ Topology TopologyManager::generate_walker_delta(
     std::uniform_real_distribution<double> cpu_dist(12.0, 24.0);
     std::uniform_real_distribution<double> mem_dist(24.0, 48.0);
     std::uniform_real_distribution<double> disk_dist(120.0, 360.0);
+    std::uniform_real_distribution<double> signaling_load_dist(0.18, 0.72);
+    std::uniform_real_distribution<double> session_load_dist(0.20, 0.76);
+    std::uniform_real_distribution<double> user_plane_load_dist(0.22, 0.82);
+    std::uniform_real_distribution<double> mobility_load_dist(0.15, 0.70);
+    std::uniform_real_distribution<double> policy_load_dist(0.16, 0.68);
+    std::uniform_real_distribution<double> auth_load_dist(0.14, 0.66);
     
     // 生成卫星
     for (int plane = 0; plane < num_planes; ++plane) {
@@ -81,7 +87,14 @@ Topology TopologyManager::generate_walker_delta(
             sat.mem_available = sat.mem_total;
             sat.disk_total = disk_dist(rng);
             sat.disk_available = sat.disk_total;
-            sat.core_network_load = 0.5;
+            sat.core_business_load.signaling_load = signaling_load_dist(rng);
+            sat.core_business_load.session_load = session_load_dist(rng);
+            sat.core_business_load.user_plane_load = user_plane_load_dist(rng);
+            sat.core_business_load.mobility_load = mobility_load_dist(rng);
+            sat.core_business_load.policy_load = policy_load_dist(rng);
+            sat.core_business_load.auth_load = auth_load_dist(rng);
+            sat.core_business_load.normalize_inplace();
+            sat.core_network_load = sat.core_business_load.load_index();
             sat.node_reliability = 0.98;
             sat.status = "active";
             sat.fault_tag.clear();

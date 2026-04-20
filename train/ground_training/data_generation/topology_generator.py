@@ -77,6 +77,12 @@ class SatelliteConstellationGenerator:
                         "disk_total",
                         "disk_available",
                         "core_network_load",
+                        "core_business_load.signaling_load",
+                        "core_business_load.session_load",
+                        "core_business_load.user_plane_load",
+                        "core_business_load.mobility_load",
+                        "core_business_load.policy_load",
+                        "core_business_load.auth_load",
                         "node_reliability",
                     ],
                     "link": [
@@ -222,13 +228,34 @@ class SatelliteConstellationGenerator:
                     "mem_available": round(float(mem_available), 2),
                     "disk_total": round(float(disk_total), 2),
                     "disk_available": round(float(disk_available), 2),
-                    "core_network_load": round(
-                        float(np.random.uniform(*self.node_load_range)), 4
-                    ),
+                    "core_business_load": {
+                        "signaling_load": round(float(np.random.uniform(0.18, 0.78)), 4),
+                        "session_load": round(float(np.random.uniform(0.20, 0.80)), 4),
+                        "user_plane_load": round(float(np.random.uniform(0.24, 0.86)), 4),
+                        "mobility_load": round(float(np.random.uniform(0.16, 0.74)), 4),
+                        "policy_load": round(float(np.random.uniform(0.16, 0.72)), 4),
+                        "auth_load": round(float(np.random.uniform(0.14, 0.70)), 4),
+                    },
                     "node_reliability": round(
                         float(np.random.uniform(*self.node_reliability_range)), 5
                     ),
                 }
+            )
+
+            business = nodes[-1]["core_business_load"]
+            nodes[-1]["core_network_load"] = round(
+                float(
+                    (
+                        business["signaling_load"]
+                        + business["session_load"]
+                        + business["user_plane_load"]
+                        + business["mobility_load"]
+                        + business["policy_load"]
+                        + business["auth_load"]
+                    )
+                    / 6.0
+                ),
+                4,
             )
 
         return nodes
@@ -237,6 +264,7 @@ class SatelliteConstellationGenerator:
         graph = nx.DiGraph()
 
         for node in nodes:
+            business_load = node.get("core_business_load", {})
             graph.add_node(
                 node["id"],
                 cpu_total=node["cpu_total"],
@@ -246,6 +274,13 @@ class SatelliteConstellationGenerator:
                 disk_total=node["disk_total"],
                 disk_available=node["disk_available"],
                 core_network_load=node["core_network_load"],
+                core_business_load=business_load,
+                signaling_load=float(business_load.get("signaling_load", node["core_network_load"])),
+                session_load=float(business_load.get("session_load", node["core_network_load"])),
+                user_plane_load=float(business_load.get("user_plane_load", node["core_network_load"])),
+                mobility_load=float(business_load.get("mobility_load", node["core_network_load"])),
+                policy_load=float(business_load.get("policy_load", node["core_network_load"])),
+                auth_load=float(business_load.get("auth_load", node["core_network_load"])),
                 node_reliability=node["node_reliability"],
                 type=node["type"],
             )

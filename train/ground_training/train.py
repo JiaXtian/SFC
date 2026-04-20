@@ -533,7 +533,7 @@ def main():
             args.device = "cpu"
 
     start_time = time.time()
-    gnn = GNNEncoder(input_dim=8, hidden_dim=192, num_layers=4)
+    gnn = GNNEncoder(input_dim=14, hidden_dim=192, num_layers=4)
     agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=48, device=args.device)
     if args.init_model_checkpoint and os.path.exists(args.init_model_checkpoint):
         print(f"加载初始化策略模型: {args.init_model_checkpoint}")

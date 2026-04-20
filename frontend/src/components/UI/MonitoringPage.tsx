@@ -651,7 +651,7 @@ export default function MonitoringPage() {
             <div className="text-[10px] text-slate-500 mb-2">
               说明：用于观察全局节点/链路可用性及资源负载走势，判断是否接近容量瓶颈。
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] mb-2">
+            <div className="grid grid-cols-2 md:grid-cols-7 gap-2 text-[11px] mb-2">
               <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">节点活跃</div>
                 <div className="text-cyan-200 font-semibold">{metrics?.active_nodes ?? 0}/{metrics?.total_nodes ?? 0}</div>
@@ -671,6 +671,14 @@ export default function MonitoringPage() {
               <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
                 <div className="text-slate-400">平均带宽利用率</div>
                 <div className="text-violet-200 font-semibold">{((metrics?.avg_bandwidth_utilization ?? 0) * 100).toFixed(1)}%</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">核心网综合负载</div>
+                <div className="text-fuchsia-200 font-semibold">{((metrics?.avg_core_network_load ?? 0) * 100).toFixed(1)}%</div>
+              </div>
+              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
+                <div className="text-slate-400">用户面负载</div>
+                <div className="text-sky-200 font-semibold">{((metrics?.avg_user_plane_load ?? 0) * 100).toFixed(1)}%</div>
               </div>
             </div>
             <div className="mt-2">

@@ -133,6 +133,13 @@ export interface DynamicMetrics {
   congested_links: number
   avg_latency_ms: number
   avg_bandwidth_utilization: number
+  avg_core_network_load?: number
+  avg_signaling_load?: number
+  avg_session_load?: number
+  avg_user_plane_load?: number
+  avg_mobility_load?: number
+  avg_policy_load?: number
+  avg_auth_load?: number
 }
 
 export interface OrchestrationMetrics {
@@ -728,6 +735,14 @@ function mergeNodesForContinuousMotion(current: SatelliteData[], incoming: any[]
       disk_total: Number(src.disk_total ?? sat.disk_total),
       disk_available: Number(src.disk_available ?? sat.disk_available),
       core_network_load: Number(src.core_network_load ?? sat.core_network_load ?? 0),
+      core_business_load: {
+        signaling_load: Number(src.core_business_load?.signaling_load ?? sat.core_business_load?.signaling_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+        session_load: Number(src.core_business_load?.session_load ?? sat.core_business_load?.session_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+        user_plane_load: Number(src.core_business_load?.user_plane_load ?? sat.core_business_load?.user_plane_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+        mobility_load: Number(src.core_business_load?.mobility_load ?? sat.core_business_load?.mobility_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+        policy_load: Number(src.core_business_load?.policy_load ?? sat.core_business_load?.policy_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+        auth_load: Number(src.core_business_load?.auth_load ?? sat.core_business_load?.auth_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+      },
       node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
       status: String(src.status ?? 'active'),
       fault_tag: String(src.fault_tag ?? ''),

@@ -16,12 +16,9 @@ namespace {
 
 double clamp01(double x);
 bool link_is_down(const Link& link);
-
-double load_level_to_value(const std::string& load_level) {
-    if (load_level == "low") return 0.2;
-    if (load_level == "high") return 1.0;
-    return 0.6;
-}
+constexpr int kNodeFeatureDim = 14;
+constexpr int kVnfFeatureDim = 8;
+constexpr int kContextFeatureDim = 48;
 
 std::string normalize_nf_type(const std::string& raw) {
     std::string out;
@@ -31,6 +28,28 @@ std::string normalize_nf_type(const std::string& raw) {
         else out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
     }
     return out;
+}
+
+double weighted_business_pressure(
+    const CoreBusinessLoad& node_load,
+    const CoreBusinessLoad& demand
+) {
+    const double w_sig = std::max(0.05, demand.signaling_load);
+    const double w_ses = std::max(0.05, demand.session_load);
+    const double w_up = std::max(0.05, demand.user_plane_load);
+    const double w_mob = std::max(0.05, demand.mobility_load);
+    const double w_pol = std::max(0.05, demand.policy_load);
+    const double w_auth = std::max(0.05, demand.auth_load);
+    const double denom = w_sig + w_ses + w_up + w_mob + w_pol + w_auth;
+    if (denom <= 1e-9) return 0.5;
+    return clamp01(
+        (w_sig * clamp01(node_load.signaling_load) +
+         w_ses * clamp01(node_load.session_load) +
+         w_up * clamp01(node_load.user_plane_load) +
+         w_mob * clamp01(node_load.mobility_load) +
+         w_pol * clamp01(node_load.policy_load) +
+         w_auth * clamp01(node_load.auth_load)) / denom
+    );
 }
 
 std::vector<float> build_vnf_features(const VNF& vnf) {
@@ -67,15 +86,18 @@ std::vector<float> build_context_features(
     const double total_vnfs = std::max<size_t>(1, request.vnfs.size());
     const double reliability_req = request.constraints.min_reliability;
     const double bandwidth_demand = request.constraints.min_bandwidth_gbps;
+    const double request_business_index = request.core_business_load.load_index();
 
     ctx[0] = static_cast<float>(remaining_delay / 300.0);
     ctx[1] = static_cast<float>(static_cast<double>(current_vnf_idx) / total_vnfs);
-    ctx[2] = static_cast<float>(request.core_network_load);
+    // Deprecated: request-level core_network_load removed, keep slot for model compatibility.
+    ctx[2] = static_cast<float>(request_business_index);
     ctx[3] = static_cast<float>(bandwidth_demand / 10.0);
     ctx[4] = static_cast<float>(reliability_req);
     ctx[5] = static_cast<float>(accumulated_reliability);
-    ctx[6] = static_cast<float>(request.priority_weight);
-    ctx[7] = static_cast<float>(load_level_to_value(request.load_level));
+    // Deprecated: priority_weight/load_level removed, keep zero placeholders for compatibility.
+    ctx[6] = 0.0f;
+    ctx[7] = 0.0f;
     ctx[8] = static_cast<float>(accumulated_delay / 300.0);
     ctx[9] = static_cast<float>(accumulated_reliability - reliability_req);
     ctx[10] = static_cast<float>(std::max(0, request.topology_version) / 10000.0);
@@ -84,6 +106,12 @@ std::vector<float> build_context_features(
     ctx[13] = static_cast<float>(clamp01(active_link_ratio));
     ctx[14] = static_cast<float>(std::max(0.0, avg_latency_ms) / 80.0);
     ctx[15] = static_cast<float>(clamp01(avg_bandwidth_utilization));
+    ctx[16] = static_cast<float>(clamp01(request.core_business_load.signaling_load));
+    ctx[17] = static_cast<float>(clamp01(request.core_business_load.session_load));
+    ctx[18] = static_cast<float>(clamp01(request.core_business_load.user_plane_load));
+    ctx[19] = static_cast<float>(clamp01(request.core_business_load.mobility_load));
+    ctx[20] = static_cast<float>(clamp01(request.core_business_load.policy_load));
+    ctx[21] = static_cast<float>(clamp01(request.core_business_load.auth_load));
     return ctx;
 }
 
@@ -1736,7 +1764,11 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const double cpu = node.cpu_total > 0.0 ? node.cpu_available / node.cpu_total : 0.0;
             const double mem = node.mem_total > 0.0 ? node.mem_available / node.mem_total : 0.0;
             const double disk = node.disk_total > 0.0 ? node.disk_available / node.disk_total : 0.0;
-            resource_score += (cpu + mem + disk) / 3.0;
+            const double business_headroom = 1.0 - weighted_business_pressure(
+                node.core_business_load,
+                request.core_business_load
+            );
+            resource_score += (cpu + mem + disk + business_headroom) / 4.0;
         }
         resource_score /= static_cast<double>(candidate.deployed_nodes.size());
     } else {
@@ -1856,6 +1888,18 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 node.disk_available < vnf.disk) {
                 continue;
             }
+            const double business_pressure = weighted_business_pressure(
+                node.core_business_load,
+                vnf.business_load_demand
+            );
+            const double business_headroom = 1.0 - business_pressure;
+            const double min_business_headroom = std::max(
+                0.04,
+                0.22 * clamp01(vnf.business_load_demand.load_index()) * reliability_relax_factor
+            );
+            if (business_headroom + 1e-9 < min_business_headroom) {
+                continue;
+            }
 
             const double delay_budget = remaining_latency * delay_relax_factor;
             if (prev_distances && idx < prev_distances->size()) {
@@ -1969,6 +2013,13 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 node.disk_available < vnf.disk) {
                 continue;
             }
+            const double business_pressure = weighted_business_pressure(
+                node.core_business_load,
+                vnf.business_load_demand
+            );
+            if (business_pressure > 0.96) {
+                continue;
+            }
 
             double path_delay = 0.0;
             double path_reliability = 1.0;
@@ -2048,10 +2099,11 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
     const double ALPHA_CPU = 0.5;
     const double ALPHA_MEM = 0.35;
     const double ALPHA_DISK = 0.15;
-    const double BETA_RESOURCE = 0.45;
-    const double BETA_LATENCY = 0.30;
+    const double BETA_RESOURCE = 0.36;
+    const double BETA_LATENCY = 0.24;
     const double BETA_HOPS = 0.10;
-    const double BETA_RELIABILITY = 0.15;
+    const double BETA_RELIABILITY = 0.14;
+    const double BETA_BUSINESS = 0.16;
     
     std::vector<std::pair<std::string, double>> ranked;
     auto& cache = get_topology_cache(topology);
@@ -2082,6 +2134,10 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
         double latency_cost = 0.0;
         double hop_cost = 0.0;
         double reliability_cost = 0.0;
+        const double business_cost = weighted_business_pressure(
+            node->core_business_load,
+            vnf.business_load_demand
+        );
         if (!prev_node.empty() && prev_node != node_id) {
             if (prev_distances && it->second < prev_distances->size()) {
                 const double d = (*prev_distances)[it->second];
@@ -2103,7 +2159,8 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
             BETA_RESOURCE * resource_cost +
             BETA_LATENCY * latency_cost +
             BETA_HOPS * hop_cost +
-            BETA_RELIABILITY * reliability_cost;
+            BETA_RELIABILITY * reliability_cost +
+            BETA_BUSINESS * business_cost;
         ranked.emplace_back(node_id, total_cost);
     }
     
@@ -2117,7 +2174,7 @@ std::pair<std::vector<float>, std::vector<int64_t>>
 InferenceEngine::prepare_graph_inputs(const Topology& topology) {
     std::vector<float> node_features;
     std::vector<int64_t> edge_index;
-    node_features.reserve(topology.nodes.size() * 8);
+    node_features.reserve(topology.nodes.size() * kNodeFeatureDim);
     edge_index.reserve(topology.links.size() * 2);
 
     auto& cache = get_topology_cache(topology);
@@ -2170,6 +2227,12 @@ InferenceEngine::prepare_graph_inputs(const Topology& topology) {
         node_features.push_back(static_cast<float>(active_ratio));
         node_features.push_back(static_cast<float>(bw_ratio));
         node_features.push_back(static_cast<float>(std::min(5.0, std::max(0.0, latency_norm))));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.signaling_load)));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.session_load)));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.user_plane_load)));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.mobility_load)));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.policy_load)));
+        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.auth_load)));
     }
 
     return {node_features, edge_index};
@@ -2182,7 +2245,7 @@ std::vector<float> InferenceEngine::run_gnn_encoder(
 ) {
     if (num_nodes == 0) return {};
 
-    std::vector<int64_t> node_shape = {static_cast<int64_t>(num_nodes), 8};
+    std::vector<int64_t> node_shape = {static_cast<int64_t>(num_nodes), kNodeFeatureDim};
     std::vector<int64_t> edge_shape = {2, static_cast<int64_t>(edge_index.size() / 2)};
 
     try {
@@ -2231,8 +2294,8 @@ std::vector<float> InferenceEngine::run_actor_policy(
 
     std::vector<int64_t> emb_shape = {static_cast<int64_t>(num_nodes), 192};
     std::vector<int64_t> cand_shape = {static_cast<int64_t>(candidate_indices.size())};
-    std::vector<int64_t> vnf_shape = {8};
-    std::vector<int64_t> ctx_shape = {48};
+    std::vector<int64_t> vnf_shape = {kVnfFeatureDim};
+    std::vector<int64_t> ctx_shape = {kContextFeatureDim};
 
     try {
         std::vector<Ort::Value> input_tensors;

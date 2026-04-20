@@ -230,7 +230,17 @@ class SFCEnvironment:
             "accumulated_reliability": self.accumulated_reliability,
             "accumulated_hops": int(self.accumulated_hops),
             "remaining_reliability_margin": remaining_reliability_margin,
-            "core_network_load": float(self.sfc_request.get("core_network_load", 0.5)),
+            "core_business_load": self.sfc_request.get(
+                "core_business_load",
+                {
+                    "signaling_load": 0.5,
+                    "session_load": 0.5,
+                    "user_plane_load": 0.5,
+                    "mobility_load": 0.5,
+                    "policy_load": 0.5,
+                    "auth_load": 0.5,
+                },
+            ),
             "bandwidth_demand_gbps": sla["bandwidth_demand_gbps"],
             "reliability_requirement": sla["reliability_requirement"],
             "base_reliability_requirement": sla["base_reliability_requirement"],
@@ -238,8 +248,6 @@ class SFCEnvironment:
             "strict_reliability": sla["strict_reliability"],
             "max_total_hops": int(sla["max_total_hops"]),
             "hard_max_total_hops": int(sla["hard_max_total_hops"]),
-            "priority_weight": float(self.sfc_request.get("priority_weight", 1.0)),
-            "load_level": self.sfc_request.get("load_level", "medium"),
         }
 
     def _save_resource_snapshot(self, selected_node: str, path_to_node: List[str]):

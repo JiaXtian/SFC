@@ -44,8 +44,6 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
 
     if gnn_path is None:
         gnn_path = _resolve_checkpoint(
-            "models/checkpoints/gnn_dynamic_best.pth",
-            "models/checkpoints/gnn_dynamic_final.pth",
             "models/checkpoints/gnn_best.pth",
             "models/checkpoints/gnn_final.pth",
             "../../models/checkpoints/gnn_best.pth",
@@ -53,8 +51,6 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
         )
     if agent_path is None:
         agent_path = _resolve_checkpoint(
-            "models/checkpoints/model_dynamic_best.pth",
-            "models/checkpoints/model_dynamic_final.pth",
             "models/checkpoints/model_best.pth",
             "models/checkpoints/model_final.pth",
             "../../models/checkpoints/model_best.pth",
@@ -66,11 +62,11 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
         sys.exit(1)
 
     print("\n[1/2] 导出GNN编码器...")
-    gnn = GNNEncoder(input_dim=8, hidden_dim=192, num_layers=4)
+    gnn = GNNEncoder(input_dim=14, hidden_dim=192, num_layers=4)
     gnn.load_state_dict(torch.load(gnn_path, map_location="cpu"))
     gnn.eval()
 
-    dummy_x = torch.randn(120, 8)
+    dummy_x = torch.randn(120, 14)
     dummy_edge = torch.randint(0, 120, (2, 320), dtype=torch.long)
 
     torch.onnx.export(
@@ -121,7 +117,7 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print("\n" + "=" * 60)
     print("   ONNX导出完成")
     print("=" * 60)
-    print("节点输入维度: 8")
+    print("节点输入维度: 14")
     print("核心网网元输入维度: 8")
     print(f"上下文输入维度: {context_dim}")
     if int(context_dim) != 48:
@@ -130,7 +126,7 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     with open(os.path.join(output_dir, "model_io_meta.json"), "w") as f:
         f.write(
             "{\n"
-            '  "node_feature_dim": 8,\n'
+            '  "node_feature_dim": 14,\n'
             '  "vnf_feature_dim": 8,\n'
             f'  "context_feature_dim": {int(context_dim)},\n'
             '  "gnn_output_dim": 192\n'

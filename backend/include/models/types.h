@@ -8,6 +8,53 @@ using json = nlohmann::json;
 
 namespace sfc {
 
+struct CoreBusinessLoad {
+    double signaling_load = 0.5;     // 信令交互负载
+    double session_load = 0.5;       // 会话建立/维护负载
+    double user_plane_load = 0.5;    // 用户面吞吐负载
+    double mobility_load = 0.5;      // 移动性/切换负载
+    double policy_load = 0.5;        // 策略与QoS控制负载
+    double auth_load = 0.5;          // 鉴权与安全负载
+
+    static double clamp01(double x) {
+        if (x < 0.0) return 0.0;
+        if (x > 1.0) return 1.0;
+        return x;
+    }
+
+    void normalize_inplace() {
+        signaling_load = clamp01(signaling_load);
+        session_load = clamp01(session_load);
+        user_plane_load = clamp01(user_plane_load);
+        mobility_load = clamp01(mobility_load);
+        policy_load = clamp01(policy_load);
+        auth_load = clamp01(auth_load);
+    }
+
+    double load_index() const {
+        return (
+            clamp01(signaling_load) +
+            clamp01(session_load) +
+            clamp01(user_plane_load) +
+            clamp01(mobility_load) +
+            clamp01(policy_load) +
+            clamp01(auth_load)
+        ) / 6.0;
+    }
+
+    json to_json() const {
+        return {
+            {"signaling_load", clamp01(signaling_load)},
+            {"session_load", clamp01(session_load)},
+            {"user_plane_load", clamp01(user_plane_load)},
+            {"mobility_load", clamp01(mobility_load)},
+            {"policy_load", clamp01(policy_load)},
+            {"auth_load", clamp01(auth_load)},
+            {"load_index", load_index()}
+        };
+    }
+};
+
 // 轨道参数
 struct OrbitalParams {
     int plane;
@@ -88,6 +135,7 @@ struct Satellite {
     double disk_total;
     double disk_available;
     double core_network_load = 0.5;
+    CoreBusinessLoad core_business_load;
     double node_reliability = 0.98;
     std::string status = "active";  // active, down
     std::string fault_tag = "";
@@ -111,6 +159,7 @@ struct Satellite {
             {"disk_total", disk_total},
             {"disk_available", disk_available},
             {"core_network_load", core_network_load},
+            {"core_business_load", core_business_load.to_json()},
             {"node_reliability", node_reliability},
             {"status", status},
             {"fault_tag", fault_tag},
@@ -216,6 +265,13 @@ struct TopologySnapshot {
         int congested_links = 0;
         double avg_latency_ms = 0.0;
         double avg_bandwidth_utilization = 0.0;
+        double avg_core_network_load = 0.0;
+        double avg_signaling_load = 0.0;
+        double avg_session_load = 0.0;
+        double avg_user_plane_load = 0.0;
+        double avg_mobility_load = 0.0;
+        double avg_policy_load = 0.0;
+        double avg_auth_load = 0.0;
     } metrics;
 
     json to_json() const {
@@ -234,7 +290,14 @@ struct TopologySnapshot {
                 {"down_links", metrics.down_links},
                 {"congested_links", metrics.congested_links},
                 {"avg_latency_ms", metrics.avg_latency_ms},
-                {"avg_bandwidth_utilization", metrics.avg_bandwidth_utilization}
+                {"avg_bandwidth_utilization", metrics.avg_bandwidth_utilization},
+                {"avg_core_network_load", metrics.avg_core_network_load},
+                {"avg_signaling_load", metrics.avg_signaling_load},
+                {"avg_session_load", metrics.avg_session_load},
+                {"avg_user_plane_load", metrics.avg_user_plane_load},
+                {"avg_mobility_load", metrics.avg_mobility_load},
+                {"avg_policy_load", metrics.avg_policy_load},
+                {"avg_auth_load", metrics.avg_auth_load}
             }}
         };
     }
@@ -253,6 +316,7 @@ struct VNF {
     double disk;
     double bw_in;
     double bw_out;
+    CoreBusinessLoad business_load_demand;
 };
 
 // SFC请求
@@ -273,9 +337,7 @@ struct SFCRequest {
     int topk;
     int topology_version = -1;
     std::string sim_time = "";
-    double core_network_load = 0.5;
-    double priority_weight = 1.0;
-    std::string load_level = "medium"; // low, medium, high
+    CoreBusinessLoad core_business_load;
     bool realtime_mode = false;
     int max_planning_attempts = 0;
     double planning_time_budget_ms = 0.0;

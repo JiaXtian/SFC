@@ -264,13 +264,30 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
 
         std::vector<float> vnf_features = build_core_nf_features(vnf);
         std::vector<float> context_features(48, 0.0f);
+        const float request_business_index = (
+            request.core_business_load.signaling_load +
+            request.core_business_load.session_load +
+            request.core_business_load.user_plane_load +
+            request.core_business_load.mobility_load +
+            request.core_business_load.policy_load +
+            request.core_business_load.auth_load
+        ) / 6.0f;
         context_features[0] = remaining_delay / 300.0f;
         context_features[1] = static_cast<float>(vnf_idx) / std::max<size_t>(1, request.vnf_sequence.size());
-        context_features[2] = request.core_network_load;
+        context_features[2] = request_business_index;
         context_features[3] = request.bandwidth_demand_gbps / 10.0f;
         context_features[4] = request.reliability_requirement;
         context_features[5] = accumulated_reliability;
-        context_features[6] = request.priority_weight;
+        context_features[6] = 0.0f;
+        context_features[7] = 0.0f;
+        context_features[8] = accumulated_delay / 300.0f;
+        context_features[9] = accumulated_reliability - request.reliability_requirement;
+        context_features[16] = request.core_business_load.signaling_load;
+        context_features[17] = request.core_business_load.session_load;
+        context_features[18] = request.core_business_load.user_plane_load;
+        context_features[19] = request.core_business_load.mobility_load;
+        context_features[20] = request.core_business_load.policy_load;
+        context_features[21] = request.core_business_load.auth_load;
 
         int action_idx = drl_->select_action(node_embeddings, candidate_indices, vnf_features, context_features);
         if (action_idx < 0 || action_idx >= static_cast<int>(candidates.size())) {
@@ -325,7 +342,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
             attempt.bandwidth_ok = true;
 
             float path_delay = calculate_path_delay(graph, path);
-            float processing_delay = 0.25f + 2.5f * request.core_network_load;
+            float processing_delay = 0.25f + 2.5f * request_business_index;
             float total_delay = path_delay + processing_delay;
             float next_delay = accumulated_delay + total_delay;
             attempt.path_delay_ms = path_delay;

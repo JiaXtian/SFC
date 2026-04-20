@@ -1,9 +1,9 @@
-#推理流程：./start.sh --skip-train   --skip-val-eval --skip-export --skip-build
+#!/usr/bin/env bash
+#推理流程：./start.sh --skip-train --skip-export --skip-build
 set -euo pipefail
 
 SKIP_DATA=0
 SKIP_TRAIN=0
-SKIP_VAL_EVAL=0
 SKIP_EXPORT=0
 SKIP_BUILD=0
 SKIP_INFER=0
@@ -33,9 +33,6 @@ SCALE_DISTRIBUTION="6,5"
 VAL_TOPOLOGIES=10
 VAL_REQUESTS_PER_TOPOLOGY=500
 
-VAL_EVAL_TOP_M=110
-VAL_EVAL_MAX_REQUESTS=160
-
 TOP_M=120
 ONNXRUNTIME_DIR_ARG=""
 TEST_TOPOLOGY_DIR="data/val/topologies"
@@ -53,7 +50,6 @@ usage() {
 阶段跳过选项:
   --skip-data
   --skip-train
-  --skip-val-eval
   --skip-export
   --skip-build
   --skip-infer
@@ -74,8 +70,6 @@ usage() {
   --scale-distribution CSV
   --val-topologies N
   --val-requests-per-topology N
-  --val-eval-top-m N
-  --val-eval-max-requests N
   --rel-curr-start-epoch N
   --rel-curr-end-epoch N
   --rel-curr-min-scale N
@@ -94,7 +88,7 @@ usage() {
 EOF
 }
 
-log() { echo -e "\n[$1] $2"; }
+log() { printf '\n[%s] %s\n' "$1" "$2"; }
 die() { echo "错误: $1" >&2; exit 1; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -112,7 +106,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-data) SKIP_DATA=1; shift ;;
     --skip-train) SKIP_TRAIN=1; shift ;;
-    --skip-val-eval) SKIP_VAL_EVAL=1; shift ;;
     --skip-export) SKIP_EXPORT=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-infer) SKIP_INFER=1; shift ;;
@@ -138,8 +131,6 @@ while [[ $# -gt 0 ]]; do
     --scale-distribution) SCALE_DISTRIBUTION="$2"; shift 2 ;;
     --val-topologies) VAL_TOPOLOGIES="$2"; shift 2 ;;
     --val-requests-per-topology) VAL_REQUESTS_PER_TOPOLOGY="$2"; shift 2 ;;
-    --val-eval-top-m) VAL_EVAL_TOP_M="$2"; shift 2 ;;
-    --val-eval-max-requests) VAL_EVAL_MAX_REQUESTS="$2"; shift 2 ;;
     --top-m) TOP_M="$2"; shift 2 ;;
     --onnxruntime-dir) ONNXRUNTIME_DIR_ARG="$2"; shift 2 ;;
     --test-topology-dir) TEST_TOPOLOGY_DIR="$2"; shift 2 ;;
@@ -162,11 +153,11 @@ echo "=========================================="
 echo "  SFC智能编排系统 训练与推理流程"
 echo "=========================================="
 echo "项目目录: $SCRIPT_DIR"
-echo "跳过阶段: data=$SKIP_DATA train=$SKIP_TRAIN val_eval=$SKIP_VAL_EVAL export=$SKIP_EXPORT build=$SKIP_BUILD infer=$SKIP_INFER"
+echo "跳过阶段: data=$SKIP_DATA train=$SKIP_TRAIN export=$SKIP_EXPORT build=$SKIP_BUILD infer=$SKIP_INFER"
 
 # 1) Data generation
 if [[ "$SKIP_DATA" -eq 0 ]]; then
-  log "1/6" "生成扩展训练集..."
+  log "1/5" "生成扩展训练集..."
   cd ground_training/data_generation
   python augment_data.py \
     --train_topologies "$TRAIN_TOPOLOGIES" \
@@ -178,14 +169,14 @@ if [[ "$SKIP_DATA" -eq 0 ]]; then
     --val_requests_per_topology "$VAL_REQUESTS_PER_TOPOLOGY"
   cd "$SCRIPT_DIR"
 else
-  log "1/6" "跳过数据生成"
+  log "1/5" "跳过数据生成"
 fi
 
 # 2) Train once (long run)
 if [[ "$SKIP_TRAIN" -eq 0 ]]; then
   require_dir_nonempty "data/train/topologies"
   require_dir_nonempty "data/train/requests"
-  log "2/6" "执行单次长训练..."
+  log "2/5" "执行单次长训练..."
   python -m ground_training.train \
     --device "$DEVICE" \
     --epochs "$EPOCHS" \
@@ -203,40 +194,23 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
     --shared_resources_prob_min "$SHARED_RESOURCES_PROB_MIN" \
     --shared_resources_prob_max "$SHARED_RESOURCES_PROB_MAX"
 else
-  log "2/6" "跳过训练"
+  log "2/5" "跳过训练"
 fi
 
-# 3) Validation evaluation
-if [[ "$SKIP_VAL_EVAL" -eq 0 ]]; then
-  require_file "models/checkpoints/gnn_best.pth"
-  require_file "models/checkpoints/model_best.pth"
-  log "3/6" "验证集评估..."
-  python -m ground_training.evaluate \
-    --model_checkpoint "models/checkpoints/model_best.pth" \
-    --gnn_checkpoint "models/checkpoints/gnn_best.pth" \
-    --val_topology_dir "data/val/topologies" \
-    --val_requests_dir "data/val/requests" \
-    --top_m "$VAL_EVAL_TOP_M" \
-    --max_requests_per_file "$VAL_EVAL_MAX_REQUESTS" \
-    --output_json "logs/val_eval.json"
-else
-  log "3/6" "跳过验证评估"
-fi
-
-# 4) Export ONNX
+# 3) Export ONNX
 if [[ "$SKIP_EXPORT" -eq 0 ]]; then
   require_file "models/checkpoints/gnn_best.pth"
   require_file "models/checkpoints/model_best.pth"
-  log "4/6" "导出ONNX模型..."
+  log "3/5" "导出ONNX模型..."
   python -m ground_training.models.model_export
 else
-  log "4/6" "跳过ONNX导出"
+  log "3/5" "跳过ONNX导出"
 fi
 
-# 5) Build C++ inference
+# 4) Build C++ benchmark
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   have_cmd cmake || die "未找到 cmake，请先安装"
-  log "5/6" "编译星上推理引擎..."
+  log "4/5" "编译C++模型验证程序..."
   cd onboard_inference
   mkdir -p build
   cd build
@@ -256,19 +230,19 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   make -j"$(jobs_for_make)"
   cd "$SCRIPT_DIR"
 else
-  log "5/6" "跳过推理引擎编译"
+  log "4/5" "跳过C++模型验证程序编译"
 fi
 
-# 6) Inference test 
-#仅测试： ./start.sh   \--skip-data --skip-train  --skip-val-eval --skip-export
+# 5) Inference benchmark test
+#仅测试： ./start.sh --skip-data --skip-train --skip-export
 if [[ "$SKIP_INFER" -eq 0 ]]; then
   require_file "models/exported/gnn_encoder.onnx"
   require_file "models/exported/actor.onnx"
-  require_file "onboard_inference/build/sfc_inference"
+  require_file "onboard_inference/build/model_benchmark"
   mkdir -p results
-  log "6/6" "执行星上推理测试..."
+  log "5/5" "执行C++模型有效性与速度测试..."
   if [[ -d "$TEST_TOPOLOGY_DIR" && -d "$TEST_REQUESTS_DIR" ]]; then
-    ./onboard_inference/build/sfc_inference \
+    ./onboard_inference/build/model_benchmark \
       --gnn_model models/exported/gnn_encoder.onnx \
       --actor_model models/exported/actor.onnx \
       --topology_dir "$TEST_TOPOLOGY_DIR" \
@@ -278,7 +252,7 @@ if [[ "$SKIP_INFER" -eq 0 ]]; then
   else
     require_file "$TEST_TOPOLOGY_FILE"
     require_file "$TEST_REQUESTS_FILE"
-    ./onboard_inference/build/sfc_inference \
+    ./onboard_inference/build/model_benchmark \
       --gnn_model models/exported/gnn_encoder.onnx \
       --actor_model models/exported/actor.onnx \
       --topology "$TEST_TOPOLOGY_FILE" \
@@ -288,18 +262,18 @@ if [[ "$SKIP_INFER" -eq 0 ]]; then
   fi
 
   if [[ -f "results/final_results.json" ]]; then
-    log "6/6" "生成推理分析图表..."
+    log "5/5" "生成科研风格分析图表..."
     python onboard_inference/plot_results.py \
       --input results/final_results.json \
       --output-dir results/plots
   fi
 else
-  log "6/6" "跳过星上推理测试"
+  log "5/5" "跳过C++模型测试"
 fi
 
 echo -e "\n=========================================="
 echo "  训练指标: logs/training_metrics.json"
-echo "  验证指标: logs/val_eval.json"
-echo "  推理结果: results/final_results.json"
-echo "  推理图表: results/plots"
+echo "  模型导出: models/exported"
+echo "  C++测试结果: results/final_results.json"
+echo "  科研图表: results/plots"
 echo "=========================================="

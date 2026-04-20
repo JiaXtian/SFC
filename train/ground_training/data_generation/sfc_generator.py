@@ -14,8 +14,6 @@ SFC_TEMPLATES = {
     "open5gs_full": {"vnfs": ["nrf", "ausf", "udm", "amf", "smf", "upf", "pcf", "nssf"], "priority": "high", "lat_mult": 1.15},
 }
 
-PRIORITY_WEIGHT = {"low": 0.85, "medium": 1.0, "high": 1.25}
-
 VNF_CONFIGS = {
     "amf": {
         "low": {"cpu": (0.9, 1.4), "mem": (1.8, 2.8), "bw": (0.12, 0.22), "disk": (6.0, 12.0)},
@@ -57,6 +55,21 @@ VNF_CONFIGS = {
         "medium": {"cpu": (0.9, 1.4), "mem": (1.6, 2.6), "bw": (0.08, 0.15), "disk": (7.0, 14.0)},
         "high": {"cpu": (1.2, 1.9), "mem": (2.2, 3.4), "bw": (0.12, 0.22), "disk": (10.0, 20.0)},
     },
+}
+
+VNF_BUSINESS_WEIGHTS = {
+    "amf": {"signaling": 0.82, "session": 0.74, "user_plane": 0.22, "mobility": 0.86, "policy": 0.52, "auth": 0.58},
+    "smf": {"signaling": 0.70, "session": 0.88, "user_plane": 0.42, "mobility": 0.58, "policy": 0.86, "auth": 0.54},
+    "upf": {"signaling": 0.36, "session": 0.62, "user_plane": 0.94, "mobility": 0.48, "policy": 0.44, "auth": 0.30},
+    "nrf": {"signaling": 0.92, "session": 0.54, "user_plane": 0.14, "mobility": 0.46, "policy": 0.58, "auth": 0.42},
+    "ausf": {"signaling": 0.68, "session": 0.46, "user_plane": 0.10, "mobility": 0.52, "policy": 0.50, "auth": 0.94},
+    "udm": {"signaling": 0.56, "session": 0.72, "user_plane": 0.18, "mobility": 0.58, "policy": 0.70, "auth": 0.82},
+    "udr": {"signaling": 0.56, "session": 0.72, "user_plane": 0.18, "mobility": 0.58, "policy": 0.70, "auth": 0.82},
+    "pcf": {"signaling": 0.62, "session": 0.78, "user_plane": 0.16, "mobility": 0.48, "policy": 0.94, "auth": 0.56},
+    "nssf": {"signaling": 0.64, "session": 0.58, "user_plane": 0.18, "mobility": 0.72, "policy": 0.76, "auth": 0.42},
+    "scp": {"signaling": 0.88, "session": 0.62, "user_plane": 0.20, "mobility": 0.40, "policy": 0.62, "auth": 0.40},
+    "sepp": {"signaling": 0.86, "session": 0.56, "user_plane": 0.16, "mobility": 0.36, "policy": 0.72, "auth": 0.88},
+    "bsf": {"signaling": 0.60, "session": 0.70, "user_plane": 0.12, "mobility": 0.46, "policy": 0.84, "auth": 0.48},
 }
 
 TARGET_TOTAL_HOPS = 25
@@ -320,27 +333,41 @@ def _pick_src_dst_with_sla(
     return src, dst, max(latency_budget, 120.0), min(bandwidth_demand, 0.12), min(reliability_requirement, 0.72)
 
 
-def _sample_load_level(load_profile):
+def _sample_traffic_tier(load_profile):
     if load_profile == "mixed":
         return random.choices(["low", "medium", "high"], weights=[0.25, 0.5, 0.25])[0]
     return load_profile
 
 
-def _sample_core_network_load(load_level):
+def _sample_core_business_load(traffic_tier):
     ranges = {
-        "low": (0.12, 0.38),
-        "medium": (0.28, 0.62),
-        "high": (0.48, 0.86),
+        "low": (0.14, 0.42),
+        "medium": (0.30, 0.68),
+        "high": (0.50, 0.88),
     }
-    low, high = ranges.get(load_level, (0.2, 0.9))
-    return float(np.random.uniform(low, high))
+    low, high = ranges.get(traffic_tier, (0.2, 0.9))
+    base = float(np.random.uniform(low, high))
+    if traffic_tier == "high":
+        offset = 0.12
+    elif traffic_tier == "low":
+        offset = -0.08
+    else:
+        offset = 0.03
+    return {
+        "signaling_load": float(max(0.0, min(1.0, base * 0.74 + np.random.uniform(0.03, 0.22) + offset))),
+        "session_load": float(max(0.0, min(1.0, base * 0.76 + np.random.uniform(0.04, 0.24) + offset))),
+        "user_plane_load": float(max(0.0, min(1.0, base * 0.82 + np.random.uniform(0.05, 0.24) + offset))),
+        "mobility_load": float(max(0.0, min(1.0, base * 0.70 + np.random.uniform(0.03, 0.22) + offset))),
+        "policy_load": float(max(0.0, min(1.0, base * 0.68 + np.random.uniform(0.03, 0.22) + offset))),
+        "auth_load": float(max(0.0, min(1.0, base * 0.66 + np.random.uniform(0.03, 0.22) + offset))),
+    }
 
 
-def _sample_reliability_requirement(priority, load_level):
+def _sample_reliability_requirement(priority, traffic_tier):
     # 端到端路径在多跳卫星网络中会产生乘法衰减，训练阶段把目标设在可达范围，
     # 否则策略几乎永远无法成功。
     base = {"low": 0.68, "medium": 0.75, "high": 0.82}.get(priority, 0.75)
-    if load_level == "high":
+    if traffic_tier == "high":
         base += 0.015
     return float(min(0.90, max(0.58, base + np.random.uniform(-0.035, 0.035))))
 
@@ -368,15 +395,32 @@ def build_sfc_requests_payload(
         service_type = random.choice(service_types)
         template = SFC_TEMPLATES[service_type]
         vnf_types = template["vnfs"]
-        load_level = _sample_load_level(load_profile)
-        core_network_load = _sample_core_network_load(load_level)
+        traffic_tier = _sample_traffic_tier(load_profile)
 
         vnf_sequence = []
         total_vnf_bw = 0.0
+        core_business_load = _sample_core_business_load(traffic_tier)
+        business_index = (
+            core_business_load["signaling_load"]
+            + core_business_load["session_load"]
+            + core_business_load["user_plane_load"]
+            + core_business_load["mobility_load"]
+            + core_business_load["policy_load"]
+            + core_business_load["auth_load"]
+        ) / 6.0
         for j, vnf_type in enumerate(vnf_types):
-            config = VNF_CONFIGS.get(vnf_type, VNF_CONFIGS["amf"])[load_level]
+            config = VNF_CONFIGS.get(vnf_type, VNF_CONFIGS["amf"])[traffic_tier]
             bw_req = float(np.random.uniform(*config["bw"]))
             nf_role = "user_plane" if vnf_type == "upf" else "control_plane"
+            weights = VNF_BUSINESS_WEIGHTS.get(vnf_type, VNF_BUSINESS_WEIGHTS["amf"])
+            business_demand = {
+                "signaling_load": round(float(core_business_load["signaling_load"] * weights["signaling"]), 4),
+                "session_load": round(float(core_business_load["session_load"] * weights["session"]), 4),
+                "user_plane_load": round(float(core_business_load["user_plane_load"] * weights["user_plane"]), 4),
+                "mobility_load": round(float(core_business_load["mobility_load"] * weights["mobility"]), 4),
+                "policy_load": round(float(core_business_load["policy_load"] * weights["policy"]), 4),
+                "auth_load": round(float(core_business_load["auth_load"] * weights["auth"]), 4),
+            }
 
             vnf = {
                 "vnf_id": f"core_nf_{i}_{j}",
@@ -391,12 +435,21 @@ def build_sfc_requests_payload(
                 "mem_required": round(float(np.random.uniform(*config["mem"])), 2),
                 "disk_required_gb": round(float(np.random.uniform(*config["disk"])), 2),
                 "bandwidth_required_gbps": round(bw_req, 3),
+                "business_load_weights": {
+                    "signaling_load": round(float(weights["signaling"]), 4),
+                    "session_load": round(float(weights["session"]), 4),
+                    "user_plane_load": round(float(weights["user_plane"]), 4),
+                    "mobility_load": round(float(weights["mobility"]), 4),
+                    "policy_load": round(float(weights["policy"]), 4),
+                    "auth_load": round(float(weights["auth"]), 4),
+                },
+                "business_load_demand": business_demand,
             }
             total_vnf_bw += bw_req
             vnf_sequence.append(vnf)
 
         base_latency = len(vnf_types) * 14.0
-        load_penalty = 1.0 + 0.5 * core_network_load
+        load_penalty = 1.0 + 0.5 * business_index
         latency_budget = (
             base_latency
             * template["lat_mult"]
@@ -405,7 +458,7 @@ def build_sfc_requests_payload(
         )
 
         bandwidth_demand = max(0.04, total_vnf_bw * float(np.random.uniform(0.22, 0.45)))
-        reliability_requirement = _sample_reliability_requirement(template["priority"], load_level)
+        reliability_requirement = _sample_reliability_requirement(template["priority"], traffic_tier)
         reserved_chain_hops = int(np.clip(np.round(len(vnf_types) * np.random.uniform(2.0, 2.8)), 6, 16))
         src_dst_hop_cap = max(4, min(TARGET_TOTAL_HOPS - 2, TARGET_TOTAL_HOPS - reserved_chain_hops))
         picked = _pick_src_dst_with_sla(
@@ -443,6 +496,8 @@ def build_sfc_requests_payload(
                     "disk": nf["disk_required_gb"],
                     "bw_in": nf["bandwidth_required_gbps"],
                     "bw_out": nf["bandwidth_required_gbps"],
+                    "business_load_weights": nf["business_load_weights"],
+                    "business_load_demand": nf["business_load_demand"],
                 }
                 for nf in vnf_sequence
             ],
@@ -456,6 +511,8 @@ def build_sfc_requests_payload(
                     "bw_out": nf["bandwidth_required_gbps"],
                     "nf_type": nf["nf_type"],
                     "nf_role": nf["nf_role"],
+                    "business_load_weights": nf["business_load_weights"],
+                    "business_load_demand": nf["business_load_demand"],
                 }
                 for nf in vnf_sequence
             ],
@@ -463,9 +520,14 @@ def build_sfc_requests_payload(
             "destination_node": dst,
             "max_latency_ms": round(latency_budget, 2),
             "priority": template["priority"],
-            "priority_weight": PRIORITY_WEIGHT[template["priority"]],
-            "load_level": load_level,
-            "core_network_load": round(core_network_load, 4),
+            "core_business_load": {
+                "signaling_load": round(float(core_business_load["signaling_load"]), 4),
+                "session_load": round(float(core_business_load["session_load"]), 4),
+                "user_plane_load": round(float(core_business_load["user_plane_load"]), 4),
+                "mobility_load": round(float(core_business_load["mobility_load"]), 4),
+                "policy_load": round(float(core_business_load["policy_load"]), 4),
+                "auth_load": round(float(core_business_load["auth_load"]), 4),
+            },
             "bandwidth_demand_gbps": round(float(bandwidth_demand), 3),
             "reliability_requirement": round(reliability_requirement, 5),
             "max_total_hops": 25,
@@ -491,7 +553,7 @@ def build_sfc_requests_payload(
                 "vnf_extra_fields": ["disk_required_gb"],
                 "core_nf_extra_fields": ["nf_role", "processing_weight", "stateful", "core_nf_type"],
                 "request_extra_fields": [
-                    "core_network_load",
+                    "core_business_load",
                     "bandwidth_demand_gbps",
                     "reliability_requirement",
                     "sla",

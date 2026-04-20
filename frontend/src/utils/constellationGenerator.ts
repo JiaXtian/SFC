@@ -117,6 +117,17 @@ export interface SatelliteData {
   cpu_total: number; cpu_available: number
   mem_total: number; mem_available: number
   disk_total: number; disk_available: number
+  core_network_load?: number
+  core_business_load?: {
+    signaling_load: number
+    session_load: number
+    user_plane_load: number
+    mobility_load: number
+    policy_load: number
+    auth_load: number
+    load_index?: number
+  }
+  node_reliability?: number
   status?: 'active' | 'down'
   fault_tag?: string
   vnfs: any[]
@@ -139,6 +150,33 @@ const C = 299792.458
 function seeded(n: number) {
   const x = Math.sin(n * 127.1 + 311.7) * 43758.5453
   return x - Math.floor(x)
+}
+
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0
+  if (v < 0) return 0
+  if (v > 1) return 1
+  return v
+}
+
+function buildCoreBusinessLoad(seedBase: number, avgResourceLoad: number) {
+  const base = clamp01(avgResourceLoad)
+  const signaling = clamp01(base * 0.72 + seeded(seedBase + 401) * 0.32)
+  const session = clamp01(base * 0.70 + seeded(seedBase + 487) * 0.34)
+  const userPlane = clamp01(base * 0.76 + seeded(seedBase + 521) * 0.30)
+  const mobility = clamp01(base * 0.66 + seeded(seedBase + 569) * 0.36)
+  const policy = clamp01(base * 0.64 + seeded(seedBase + 613) * 0.34)
+  const auth = clamp01(base * 0.62 + seeded(seedBase + 659) * 0.32)
+  const loadIndex = (signaling + session + userPlane + mobility + policy + auth) / 6
+  return {
+    signaling_load: signaling,
+    session_load: session,
+    user_plane_load: userPlane,
+    mobility_load: mobility,
+    policy_load: policy,
+    auth_load: auth,
+    load_index: loadIndex,
+  }
 }
 
 function walkerCoord(
@@ -211,6 +249,8 @@ export function generateConstellation(
       const cpuLoad = seeded(seed + 100) * 0.65
       const memLoad = seeded(seed + 200) * 0.65
       const diskLoad = seeded(seed + 300) * 0.65
+      const avgResourceLoad = (cpuLoad + memLoad + diskLoad) / 3
+      const businessLoad = buildCoreBusinessLoad(seed, avgResourceLoad)
 
       satellites.push({
         id: generateSatelliteID(plane, pos, numPlanes, satsInThisPlane),
@@ -223,6 +263,9 @@ export function generateConstellation(
         cpu_total: cpuT, cpu_available: cpuT * (1 - cpuLoad),
         mem_total: memT, mem_available: memT * (1 - memLoad),
         disk_total: diskT, disk_available: diskT * (1 - diskLoad),
+        core_network_load: businessLoad.load_index,
+        core_business_load: businessLoad,
+        node_reliability: 0.985 + (1 - businessLoad.load_index) * 0.012,
         status: 'active',
         fault_tag: '',
         vnfs: [],
@@ -369,6 +412,16 @@ export function prepareTopologyForBackend(
       mem_available: s.mem_available,
       disk_total: s.disk_total,
       disk_available: s.disk_available,
+      core_network_load: Number(s.core_network_load ?? 0.5),
+      core_business_load: s.core_business_load ?? {
+        signaling_load: Number(s.core_network_load ?? 0.5),
+        session_load: Number(s.core_network_load ?? 0.5),
+        user_plane_load: Number(s.core_network_load ?? 0.5),
+        mobility_load: Number(s.core_network_load ?? 0.5),
+        policy_load: Number(s.core_network_load ?? 0.5),
+        auth_load: Number(s.core_network_load ?? 0.5),
+      },
+      node_reliability: Number(s.node_reliability ?? 0.985),
       status: s.status ?? 'active',
       fault_tag: s.fault_tag ?? '',
       vnfs: [],
@@ -404,6 +457,8 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
     const memAvail = Number(n.mem_available ?? n.memory_available ?? n.mem?.available ?? memTotal)
     const diskTotal = Number(n.disk_total ?? n.storage_total ?? n.disk?.total ?? 200)
     const diskAvail = Number(n.disk_available ?? n.storage_available ?? n.disk?.available ?? diskTotal)
+    const coreBusiness = n.core_business_load ?? {}
+    const fallbackLoad = Number(n.core_network_load ?? 0.5)
 
     return {
       id,
@@ -428,6 +483,16 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
       mem_available: memAvail,
       disk_total: diskTotal,
       disk_available: diskAvail,
+      core_network_load: Number(n.core_network_load ?? n.load ?? 0.5),
+      core_business_load: {
+        signaling_load: Number(coreBusiness.signaling_load ?? coreBusiness.signaling ?? fallbackLoad),
+        session_load: Number(coreBusiness.session_load ?? coreBusiness.session ?? fallbackLoad),
+        user_plane_load: Number(coreBusiness.user_plane_load ?? coreBusiness.user_plane ?? fallbackLoad),
+        mobility_load: Number(coreBusiness.mobility_load ?? coreBusiness.mobility ?? fallbackLoad),
+        policy_load: Number(coreBusiness.policy_load ?? coreBusiness.policy ?? fallbackLoad),
+        auth_load: Number(coreBusiness.auth_load ?? coreBusiness.auth ?? fallbackLoad),
+      },
+      node_reliability: Number(n.node_reliability ?? 0.985),
       status: String(n.status ?? 'active') as 'active' | 'down',
       fault_tag: String(n.fault_tag ?? ''),
       vnfs: Array.isArray(n.core_nfs) ? n.core_nfs : (Array.isArray(n.vnfs) ? n.vnfs : []),

@@ -124,9 +124,14 @@ export default function SFCForm() {
   })
 
   const [runtimeContext, setRuntimeContext] = useState({
-    core_network_load: 0.5,
-    priority_weight: 1.0,
-    load_level: 'medium',
+    core_business_load: {
+      signaling_load: 0.52,
+      session_load: 0.5,
+      user_plane_load: 0.56,
+      mobility_load: 0.48,
+      policy_load: 0.46,
+      auth_load: 0.44,
+    },
   })
   const sessionRealtimeConfig = {
     max_planning_attempts: 20,
@@ -282,6 +287,7 @@ export default function SFCForm() {
 
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
+      const coreBusinessLoad = runtimeContext.core_business_load
       const coreNfs = sfc.vnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
@@ -311,9 +317,7 @@ export default function SFCForm() {
         constraints: sfc.constraints,
         optimize: optimizeMode,
         topk: sfc.topk || 1,
-        core_network_load: runtimeContext.core_network_load,
-        priority_weight: runtimeContext.priority_weight,
-        load_level: runtimeContext.load_level,
+        core_business_load: coreBusinessLoad,
         max_planning_attempts: sessionRealtimeConfig.max_planning_attempts,
         planning_time_budget_ms: sessionRealtimeConfig.planning_time_budget_ms,
         ...(enableCustomWeights
@@ -848,53 +852,41 @@ export default function SFCForm() {
         />
 
         {showRuntimeContext && (
-          <div className="grid grid-cols-3 gap-2 text-[10px] mt-2">
-            <div>
-              <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-                网络负载 (0-1)
-                <InfoHint text="数值越高表示越拥塞，调度会更保守。" />
-              </div>
-              <input
-                type="number"
-                min="0"
-                max="1"
-                step="0.05"
-                value={runtimeContext.core_network_load}
-                onChange={e => setRuntimeContext(prev => ({ ...prev, core_network_load: parseFloat(e.target.value) || 0 }))}
-                className="w-full px-2 py-1 rounded"
-                style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-              />
-            </div>
-            <div>
-              <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-                优先级权重
-                <InfoHint text="值越高，该请求排序权重越高。" />
-              </div>
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={runtimeContext.priority_weight}
-                onChange={e => setRuntimeContext(prev => ({ ...prev, priority_weight: parseFloat(e.target.value) || 0 }))}
-                className="w-full px-2 py-1 rounded"
-                style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-              />
-            </div>
-            <div>
-              <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-                负载等级
-                <InfoHint text="低/中/高为离散网络负载标签。" />
-              </div>
-              <select
-                value={runtimeContext.load_level}
-                onChange={e => setRuntimeContext(prev => ({ ...prev, load_level: e.target.value }))}
-                className="w-full px-2 py-1 rounded"
-                style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-              >
-                <option value="low">低</option>
-                <option value="medium">中</option>
-                <option value="high">高</option>
-              </select>
+          <div className="space-y-2 text-[10px] mt-2">
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                ['signaling_load', '信令负载', '用于表征接入/注册/鉴权消息风暴压力，越高越偏向选择控制面余量更大的节点。'],
+                ['session_load', '会话负载', '用于表征PDU会话建立与维护频度，越高越要求会话处理链路稳定且低时延。'],
+                ['user_plane_load', '用户面负载', '用于表征数据面吞吐压力，越高越偏向高带宽、低拥塞链路与节点。'],
+                ['mobility_load', '移动性负载', '用于表征切换与移动性管理频度，越高越偏向拓扑连通与路径冗余更强区域。'],
+                ['policy_load', '策略控制负载', '用于表征QoS/策略决策压力，越高越偏向策略面资源充足的控制节点。'],
+                ['auth_load', '鉴权负载', '用于表征认证与安全上下文处理压力，越高越偏向安全相关能力余量较高节点。'],
+              ].map(([key, label, hint]) => (
+                <div key={key}>
+                  <div className="text-slate-500 mb-0.5 flex items-center gap-1">
+                    {label}
+                    <InfoHint text={hint as string} />
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={(runtimeContext.core_business_load as any)[key]}
+                    onChange={e =>
+                      setRuntimeContext(prev => ({
+                        ...prev,
+                        core_business_load: {
+                          ...prev.core_business_load,
+                          [key]: Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)),
+                        },
+                      }))
+                    }
+                    className="w-full px-2 py-1 rounded"
+                    style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
+                  />
+                </div>
+              ))}
             </div>
           </div>
         )}

@@ -83,11 +83,16 @@ include_directories(
 
 # 可执行文件
 add_executable(sfc_inference ${SOURCES})
+add_executable(model_benchmark ${SOURCES})
 
 # Ensure macOS can find libonnxruntime at runtime without DYLD_LIBRARY_PATH.
 if(APPLE)
     get_filename_component(ONNXRUNTIME_LIB_DIR ${ONNXRUNTIME_LIB} DIRECTORY)
     set_target_properties(sfc_inference PROPERTIES
+        BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
+        INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
+    )
+    set_target_properties(model_benchmark PROPERTIES
         BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
         INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
     )
@@ -100,9 +105,15 @@ target_link_libraries(sfc_inference
         ${ONNXRUNTIME_LIB}
         nlohmann_json::nlohmann_json
 )
+target_link_libraries(model_benchmark
+    PRIVATE
+        Threads::Threads
+        ${ONNXRUNTIME_LIB}
+        nlohmann_json::nlohmann_json
+)
 
 # 安装
-install(TARGETS sfc_inference DESTINATION bin)
+install(TARGETS sfc_inference model_benchmark DESTINATION bin)
 
 # 打印配置信息
 message(STATUS "")

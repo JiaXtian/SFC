@@ -30,6 +30,7 @@ struct CoreNFProfile {
     double min_mem;
     double min_disk;
     double min_bw;
+    CoreBusinessLoad business_weights;
 };
 
 static std::string normalize_nf_type(const std::string& raw) {
@@ -45,33 +46,84 @@ static std::string normalize_nf_type(const std::string& raw) {
 static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw) {
     const std::string nf_type = normalize_nf_type(nf_type_raw);
     if (nf_type == "amf") {
-        return {"control_plane", "session-heavy", 1.35, 1.30, 1.20, 1.15, 1.2, 2.2, 8.0, 0.2};
+        return {"control_plane", "session-heavy", 1.35, 1.30, 1.20, 1.15, 1.2, 2.2, 8.0, 0.2, {0.82, 0.74, 0.22, 0.86, 0.52, 0.58}};
     }
     if (nf_type == "smf") {
-        return {"control_plane", "policy-heavy", 1.45, 1.35, 1.30, 1.20, 1.5, 2.6, 10.0, 0.25};
+        return {"control_plane", "policy-heavy", 1.45, 1.35, 1.30, 1.20, 1.5, 2.6, 10.0, 0.25, {0.70, 0.88, 0.42, 0.58, 0.86, 0.54}};
     }
     if (nf_type == "upf") {
-        return {"user_plane", "throughput-heavy", 1.80, 1.55, 1.60, 1.80, 2.0, 3.0, 16.0, 0.45};
+        return {"user_plane", "throughput-heavy", 1.80, 1.55, 1.60, 1.80, 2.0, 3.0, 16.0, 0.45, {0.36, 0.62, 0.94, 0.48, 0.44, 0.30}};
     }
     if (nf_type == "nrf") {
-        return {"control_plane", "registry", 1.15, 1.25, 1.20, 1.05, 0.9, 1.8, 6.0, 0.12};
+        return {"control_plane", "registry", 1.15, 1.25, 1.20, 1.05, 0.9, 1.8, 6.0, 0.12, {0.92, 0.54, 0.14, 0.46, 0.58, 0.42}};
     }
     if (nf_type == "ausf") {
-        return {"control_plane", "auth", 1.20, 1.20, 1.15, 1.10, 0.8, 1.6, 5.0, 0.1};
+        return {"control_plane", "auth", 1.20, 1.20, 1.15, 1.10, 0.8, 1.6, 5.0, 0.1, {0.68, 0.46, 0.10, 0.52, 0.50, 0.94}};
     }
     if (nf_type == "udm" || nf_type == "udr") {
-        return {"control_plane", "data-plane-db", 1.25, 1.35, 1.65, 1.10, 1.0, 2.0, 20.0, 0.1};
+        return {"control_plane", "data-plane-db", 1.25, 1.35, 1.65, 1.10, 1.0, 2.0, 20.0, 0.1, {0.56, 0.72, 0.18, 0.58, 0.70, 0.82}};
     }
     if (nf_type == "pcf") {
-        return {"control_plane", "policy", 1.30, 1.30, 1.20, 1.10, 1.0, 2.0, 8.0, 0.1};
+        return {"control_plane", "policy", 1.30, 1.30, 1.20, 1.10, 1.0, 2.0, 8.0, 0.1, {0.62, 0.78, 0.16, 0.48, 0.94, 0.56}};
     }
     if (nf_type == "nssf") {
-        return {"control_plane", "slice-selection", 1.15, 1.15, 1.15, 1.05, 0.8, 1.5, 5.0, 0.08};
+        return {"control_plane", "slice-selection", 1.15, 1.15, 1.15, 1.05, 0.8, 1.5, 5.0, 0.08, {0.64, 0.58, 0.18, 0.72, 0.76, 0.42}};
     }
-    return {"control_plane", "standard", 1.25, 1.20, 1.20, 1.15, 0.8, 1.5, 6.0, 0.1};
+    if (nf_type == "scp") {
+        return {"control_plane", "service-communication", 1.24, 1.22, 1.16, 1.18, 0.9, 1.6, 6.0, 0.12, {0.88, 0.62, 0.20, 0.40, 0.62, 0.40}};
+    }
+    if (nf_type == "sepp") {
+        return {"control_plane", "inter-plmn-security", 1.28, 1.25, 1.20, 1.16, 1.0, 1.8, 7.0, 0.12, {0.86, 0.56, 0.16, 0.36, 0.72, 0.88}};
+    }
+    if (nf_type == "bsf") {
+        return {"control_plane", "binding-support", 1.18, 1.18, 1.14, 1.08, 0.8, 1.4, 5.0, 0.08, {0.60, 0.70, 0.12, 0.46, 0.84, 0.48}};
+    }
+    return {"control_plane", "standard", 1.25, 1.20, 1.20, 1.15, 0.8, 1.5, 6.0, 0.1, {0.56, 0.56, 0.32, 0.52, 0.54, 0.52}};
 }
 
-static VNF parse_nf_spec_from_json(const Json::Value& nf_json, size_t index) {
+static double clamp01(double x) {
+    return std::max(0.0, std::min(1.0, x));
+}
+
+static CoreBusinessLoad parse_core_business_load_object(
+    const Json::Value& obj,
+    const CoreBusinessLoad& fallback
+) {
+    CoreBusinessLoad load = fallback;
+    if (!obj.isObject()) {
+        load.normalize_inplace();
+        return load;
+    }
+    load.signaling_load = obj.get("signaling_load", obj.get("signaling", load.signaling_load)).asDouble();
+    load.session_load = obj.get("session_load", obj.get("session", load.session_load)).asDouble();
+    load.user_plane_load = obj.get("user_plane_load", obj.get("user_plane", obj.get("throughput", load.user_plane_load))).asDouble();
+    load.mobility_load = obj.get("mobility_load", obj.get("mobility", load.mobility_load)).asDouble();
+    load.policy_load = obj.get("policy_load", obj.get("policy", load.policy_load)).asDouble();
+    load.auth_load = obj.get("auth_load", obj.get("auth", load.auth_load)).asDouble();
+    load.normalize_inplace();
+    return load;
+}
+
+static CoreBusinessLoad apply_nf_business_weights(
+    const CoreBusinessLoad& request_load,
+    const CoreBusinessLoad& nf_weights
+) {
+    CoreBusinessLoad out;
+    out.signaling_load = clamp01(request_load.signaling_load * nf_weights.signaling_load);
+    out.session_load = clamp01(request_load.session_load * nf_weights.session_load);
+    out.user_plane_load = clamp01(request_load.user_plane_load * nf_weights.user_plane_load);
+    out.mobility_load = clamp01(request_load.mobility_load * nf_weights.mobility_load);
+    out.policy_load = clamp01(request_load.policy_load * nf_weights.policy_load);
+    out.auth_load = clamp01(request_load.auth_load * nf_weights.auth_load);
+    out.normalize_inplace();
+    return out;
+}
+
+static VNF parse_nf_spec_from_json(
+    const Json::Value& nf_json,
+    size_t index,
+    const CoreBusinessLoad& request_business_load
+) {
     VNF vnf;
     vnf.name = nf_json.get("core_nf_id", nf_json.get("nf_id", nf_json.get("vnf_id", nf_json.get("name", "")))).asString();
     if (vnf.name.empty()) {
@@ -106,6 +158,21 @@ static VNF parse_nf_spec_from_json(const Json::Value& nf_json, size_t index) {
     const double bw = std::max(profile.min_bw, bw_raw * profile.bw_multiplier);
     vnf.bw_in = nf_json.isMember("bw_in") ? nf_json["bw_in"].asDouble() : bw;
     vnf.bw_out = nf_json.isMember("bw_out") ? nf_json["bw_out"].asDouble() : bw;
+
+    if (nf_json.isMember("business_load_demand")) {
+        vnf.business_load_demand = parse_core_business_load_object(
+            nf_json["business_load_demand"],
+            request_business_load
+        );
+    } else if (nf_json.isMember("business_load_weights")) {
+        const CoreBusinessLoad weights = parse_core_business_load_object(
+            nf_json["business_load_weights"],
+            profile.business_weights
+        );
+        vnf.business_load_demand = apply_nf_business_weights(request_business_load, weights);
+    } else {
+        vnf.business_load_demand = apply_nf_business_weights(request_business_load, profile.business_weights);
+    }
     return vnf;
 }
 
@@ -236,9 +303,13 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.topk = json.get("topk", 3).asInt();
     request.topology_version = json.get("topology_version", -1).asInt();
     request.sim_time = json.get("sim_time", "").asString();
-    request.core_network_load = json.get("core_network_load", 0.5).asDouble();
-    request.priority_weight = json.get("priority_weight", 1.0).asDouble();
-    request.load_level = json.get("load_level", "medium").asString();
+    request.core_business_load = CoreBusinessLoad{};
+    if (json.isMember("core_business_load")) {
+        request.core_business_load = parse_core_business_load_object(
+            json["core_business_load"],
+            request.core_business_load
+        );
+    }
     request.realtime_mode = json.get("realtime_mode", false).asBool();
     request.max_planning_attempts = json.get("max_planning_attempts", 0).asInt();
     request.planning_time_budget_ms = json.get("planning_time_budget_ms", 0.0).asDouble();
@@ -287,14 +358,13 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     if (nf_array && nf_array->isArray()) {
         size_t idx = 0;
         for (const auto& nf_json : *nf_array) {
-            request.vnfs.push_back(parse_nf_spec_from_json(nf_json, idx));
+            request.vnfs.push_back(parse_nf_spec_from_json(nf_json, idx, request.core_business_load));
             ++idx;
         }
     }
 
     request.topk = std::max(1, std::min(32, request.topk));
-    request.core_network_load = std::max(0.0, std::min(1.0, request.core_network_load));
-    request.priority_weight = std::max(0.1, request.priority_weight);
+    request.core_business_load.normalize_inplace();
     request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
     request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
@@ -432,6 +502,7 @@ void SFCController::plan(
             response["candidates"] = Json::Value(Json::arrayValue);
             response["error"] = "No feasible deployment found";
             response["details"] = "All generated candidates violate constraints";
+            response["core_business_load"] = nlohmann_to_jsoncpp(sfc_request.core_business_load.to_json());
             
             response["failure_reasons"] = "No SLA-feasible candidate returned by inference engine.";
             response["topology_version"] = topology.metadata.topology_version;
@@ -468,6 +539,7 @@ void SFCController::plan(
         response["deployable_count"] = static_cast<int>(feasible_candidates.size());
         response["fallback_only"] = feasible_candidates.empty();
         response["decision_process"] = nlohmann_to_jsoncpp(decision_process);
+        response["core_business_load"] = nlohmann_to_jsoncpp(sfc_request.core_business_load.to_json());
 
         std::vector<DeploymentCandidate> response_candidates;
         if (!feasible_candidates.empty()) {
@@ -554,7 +626,8 @@ void SFCController::plan(
                 {"mem", vnf.mem},
                 {"disk", vnf.disk},
                 {"bw_in", vnf.bw_in},
-                {"bw_out", vnf.bw_out}
+                {"bw_out", vnf.bw_out},
+                {"business_load_demand", vnf.business_load_demand.to_json()}
             });
         }
         response["request_core_nfs"] = nlohmann_to_jsoncpp(trace_request_vnfs);
@@ -567,6 +640,7 @@ void SFCController::plan(
             {"sim_time", topology.metadata.sim_time},
             {"source_node", sfc_request.source_node},
             {"destination_node", sfc_request.destination_node},
+            {"core_business_load", sfc_request.core_business_load.to_json()},
             {"inference_time_ms", static_cast<double>(duration.count())},
             {"requested_topk", sfc_request.topk},
             {"returned_topk", static_cast<int>(response_candidates.size())},

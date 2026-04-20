@@ -7,6 +7,13 @@
 
 namespace sfc {
 
+static float clamp01(float x) {
+    if (!std::isfinite(x)) return 0.0f;
+    if (x < 0.0f) return 0.0f;
+    if (x > 1.0f) return 1.0f;
+    return x;
+}
+
 bool NetworkGraph::load_from_json(const std::string& filepath) {
     std::ifstream file(filepath);
     if (!file.is_open()) {
@@ -43,6 +50,36 @@ bool NetworkGraph::load_from_json(const std::string& filepath) {
             node.resources.disk_available = node_json.value("disk_available", node.resources.disk_total * 0.8f);
 
             node.core_network_load = node_json.value("core_network_load", 0.5f);
+            if (node_json.contains("core_business_load")) {
+                const auto& cbl = node_json["core_business_load"];
+                node.core_business_load.signaling_load = cbl.value("signaling_load", node.core_network_load);
+                node.core_business_load.session_load = cbl.value("session_load", node.core_network_load);
+                node.core_business_load.user_plane_load = cbl.value("user_plane_load", node.core_network_load);
+                node.core_business_load.mobility_load = cbl.value("mobility_load", node.core_network_load);
+                node.core_business_load.policy_load = cbl.value("policy_load", node.core_network_load);
+                node.core_business_load.auth_load = cbl.value("auth_load", node.core_network_load);
+            } else {
+                node.core_business_load.signaling_load = node_json.value("signaling_load", node.core_network_load);
+                node.core_business_load.session_load = node_json.value("session_load", node.core_network_load);
+                node.core_business_load.user_plane_load = node_json.value("user_plane_load", node.core_network_load);
+                node.core_business_load.mobility_load = node_json.value("mobility_load", node.core_network_load);
+                node.core_business_load.policy_load = node_json.value("policy_load", node.core_network_load);
+                node.core_business_load.auth_load = node_json.value("auth_load", node.core_network_load);
+            }
+            node.core_business_load.signaling_load = clamp01(node.core_business_load.signaling_load);
+            node.core_business_load.session_load = clamp01(node.core_business_load.session_load);
+            node.core_business_load.user_plane_load = clamp01(node.core_business_load.user_plane_load);
+            node.core_business_load.mobility_load = clamp01(node.core_business_load.mobility_load);
+            node.core_business_load.policy_load = clamp01(node.core_business_load.policy_load);
+            node.core_business_load.auth_load = clamp01(node.core_business_load.auth_load);
+            node.core_network_load = (
+                node.core_business_load.signaling_load +
+                node.core_business_load.session_load +
+                node.core_business_load.user_plane_load +
+                node.core_business_load.mobility_load +
+                node.core_business_load.policy_load +
+                node.core_business_load.auth_load
+            ) / 6.0f;
             node.node_reliability = node_json.value("node_reliability", 0.98f);
 
             node_id_to_idx_[node.id] = i;
@@ -107,7 +144,7 @@ const Link* NetworkGraph::get_link(const std::string& source, const std::string&
 
 std::vector<float> NetworkGraph::get_node_features() const {
     std::vector<float> features;
-    features.reserve(nodes_.size() * 8);
+    features.reserve(nodes_.size() * 14);
 
     for (const auto& node : nodes_) {
         float cpu_ratio = node.resources.cpu_total > 1e-6f ? node.resources.cpu_available / node.resources.cpu_total : 0.0f;
@@ -147,6 +184,12 @@ std::vector<float> NetworkGraph::get_node_features() const {
         features.push_back(active_ratio);
         features.push_back(bw_ratio);
         features.push_back(std::min(5.0f, std::max(0.0f, latency_norm)));
+        features.push_back(node.core_business_load.signaling_load);
+        features.push_back(node.core_business_load.session_load);
+        features.push_back(node.core_business_load.user_plane_load);
+        features.push_back(node.core_business_load.mobility_load);
+        features.push_back(node.core_business_load.policy_load);
+        features.push_back(node.core_business_load.auth_load);
     }
 
     return features;
@@ -219,10 +262,24 @@ std::vector<SFCRequest> load_sfc_requests(const std::string& filepath) {
             req.destination_node = req_json["destination_node"].get<std::string>();
             req.max_latency_ms = req_json.value("max_latency_ms", 100.0f);
             req.priority = req_json.value("priority", "medium");
-            req.priority_weight = req_json.value("priority_weight", 1.0f);
-            req.core_network_load = req_json.value("core_network_load", 0.5f);
             req.bandwidth_demand_gbps = req_json.value("bandwidth_demand_gbps", 0.1f);
             req.reliability_requirement = req_json.value("reliability_requirement", 0.97f);
+            if (req_json.contains("core_business_load")) {
+                const auto& cbl = req_json["core_business_load"];
+                req.core_business_load.signaling_load = cbl.value("signaling_load", 0.5f);
+                req.core_business_load.session_load = cbl.value("session_load", 0.5f);
+                req.core_business_load.user_plane_load = cbl.value("user_plane_load", 0.5f);
+                req.core_business_load.mobility_load = cbl.value("mobility_load", 0.5f);
+                req.core_business_load.policy_load = cbl.value("policy_load", 0.5f);
+                req.core_business_load.auth_load = cbl.value("auth_load", 0.5f);
+            } else {
+                req.core_business_load.signaling_load = 0.5f;
+                req.core_business_load.session_load = 0.5f;
+                req.core_business_load.user_plane_load = 0.5f;
+                req.core_business_load.mobility_load = 0.5f;
+                req.core_business_load.policy_load = 0.5f;
+                req.core_business_load.auth_load = 0.5f;
+            }
 
             if (req_json.contains("sla")) {
                 auto sla = req_json["sla"];
@@ -267,6 +324,17 @@ std::vector<SFCRequest> load_sfc_requests(const std::string& filepath) {
                 vnf.mem_required = vnf_json.value("mem_required", 0.0f);
                 vnf.bandwidth_required_gbps = vnf_json.value("bandwidth_required_gbps", 0.0f);
                 vnf.disk_required_gb = vnf_json.value("disk_required_gb", 0.0f);
+                if (vnf_json.contains("business_load_demand")) {
+                    const auto& bld = vnf_json["business_load_demand"];
+                    vnf.business_load_demand.signaling_load = bld.value("signaling_load", req.core_business_load.signaling_load);
+                    vnf.business_load_demand.session_load = bld.value("session_load", req.core_business_load.session_load);
+                    vnf.business_load_demand.user_plane_load = bld.value("user_plane_load", req.core_business_load.user_plane_load);
+                    vnf.business_load_demand.mobility_load = bld.value("mobility_load", req.core_business_load.mobility_load);
+                    vnf.business_load_demand.policy_load = bld.value("policy_load", req.core_business_load.policy_load);
+                    vnf.business_load_demand.auth_load = bld.value("auth_load", req.core_business_load.auth_load);
+                } else {
+                    vnf.business_load_demand = req.core_business_load;
+                }
                 if (vnf.vnf_id.empty()) {
                     vnf.vnf_id = "core_nf_" + std::to_string(req.vnf_sequence.size());
                 }

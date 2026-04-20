@@ -505,7 +505,21 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const double mem_util = sat.mem_total > 1e-9 ? 1.0 - sat.mem_available / sat.mem_total : 1.0;
         const double disk_util = sat.disk_total > 1e-9 ? 1.0 - sat.disk_available / sat.disk_total : 1.0;
         const double avg_util = clamp((cpu_util + mem_util + disk_util) / 3.0, 0.0, 1.0);
-        sat.core_network_load = avg_util;
+        const double rolling_base = clamp(0.62 * avg_util + 0.38 * sat.core_network_load, 0.0, 1.0);
+        sat.core_business_load.signaling_load =
+            clamp(0.52 * rolling_base + 0.16 * cpu_util + 0.12 * std::sin(phase * 1.51 + 0.2) + 0.22, 0.0, 1.0);
+        sat.core_business_load.session_load =
+            clamp(0.56 * rolling_base + 0.18 * mem_util + 0.10 * std::cos(phase * 1.33 + 1.4) + 0.20, 0.0, 1.0);
+        sat.core_business_load.user_plane_load =
+            clamp(0.60 * rolling_base + 0.14 * cpu_util + 0.14 * std::sin(phase * 1.17 + 2.2) + 0.18, 0.0, 1.0);
+        sat.core_business_load.mobility_load =
+            clamp(0.48 * rolling_base + 0.16 * mem_util + 0.14 * std::cos(phase * 1.79 + 0.7) + 0.18, 0.0, 1.0);
+        sat.core_business_load.policy_load =
+            clamp(0.50 * rolling_base + 0.14 * disk_util + 0.13 * std::sin(phase * 1.43 + 1.1) + 0.17, 0.0, 1.0);
+        sat.core_business_load.auth_load =
+            clamp(0.46 * rolling_base + 0.18 * cpu_util + 0.13 * std::cos(phase * 1.61 + 2.0) + 0.16, 0.0, 1.0);
+        sat.core_business_load.normalize_inplace();
+        sat.core_network_load = sat.core_business_load.load_index();
         sat.node_reliability = clamp(0.997 - 0.045 * avg_util, 0.93, 0.9995);
     }
 
@@ -550,6 +564,12 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
             sat.cpu_available = 0.0;
             sat.mem_available = 0.0;
             sat.disk_available = 0.0;
+            sat.core_business_load.signaling_load = 1.0;
+            sat.core_business_load.session_load = 1.0;
+            sat.core_business_load.user_plane_load = 1.0;
+            sat.core_business_load.mobility_load = 1.0;
+            sat.core_business_load.policy_load = 1.0;
+            sat.core_business_load.auth_load = 1.0;
             sat.core_network_load = 1.0;
             sat.node_reliability = 0.0;
         }
@@ -631,10 +651,32 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     snapshot.topology.metadata.timestamp = snapshot.sim_time;
 
     snapshot.metrics.total_nodes = static_cast<int>(snapshot.topology.nodes.size());
+    double core_load_sum = 0.0;
+    double signaling_sum = 0.0;
+    double session_sum = 0.0;
+    double user_plane_sum = 0.0;
+    double mobility_sum = 0.0;
+    double policy_sum = 0.0;
+    double auth_sum = 0.0;
     for (const auto& sat : snapshot.topology.nodes) {
         if (sat.status == "down") snapshot.metrics.down_nodes += 1;
         else snapshot.metrics.active_nodes += 1;
+        core_load_sum += sat.core_network_load;
+        signaling_sum += sat.core_business_load.signaling_load;
+        session_sum += sat.core_business_load.session_load;
+        user_plane_sum += sat.core_business_load.user_plane_load;
+        mobility_sum += sat.core_business_load.mobility_load;
+        policy_sum += sat.core_business_load.policy_load;
+        auth_sum += sat.core_business_load.auth_load;
     }
+    const double node_count = std::max(1.0, static_cast<double>(snapshot.metrics.total_nodes));
+    snapshot.metrics.avg_core_network_load = core_load_sum / node_count;
+    snapshot.metrics.avg_signaling_load = signaling_sum / node_count;
+    snapshot.metrics.avg_session_load = session_sum / node_count;
+    snapshot.metrics.avg_user_plane_load = user_plane_sum / node_count;
+    snapshot.metrics.avg_mobility_load = mobility_sum / node_count;
+    snapshot.metrics.avg_policy_load = policy_sum / node_count;
+    snapshot.metrics.avg_auth_load = auth_sum / node_count;
 
     snapshot.metrics.total_links = static_cast<int>(snapshot.topology.links.size());
     double latency_sum = 0.0;

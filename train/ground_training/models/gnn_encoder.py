@@ -1,4 +1,4 @@
-"""GNN编码器（增强架构，支持8维节点输入）"""
+"""GNN编码器（增强架构，支持14维节点输入）"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +6,7 @@ from torch_geometric.nn import GCNConv
 
 
 class GNNEncoder(nn.Module):
-    def __init__(self, input_dim=8, hidden_dim=192, num_layers=4, dropout=0.15):
+    def __init__(self, input_dim=14, hidden_dim=192, num_layers=4, dropout=0.15):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.convs = nn.ModuleList([GCNConv(hidden_dim, hidden_dim) for _ in range(num_layers)])

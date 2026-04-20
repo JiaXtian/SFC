@@ -19,11 +19,21 @@ struct NodeResources {
     }
 };
 
+struct CoreBusinessLoad {
+    float signaling_load = 0.5f;
+    float session_load = 0.5f;
+    float user_plane_load = 0.5f;
+    float mobility_load = 0.5f;
+    float policy_load = 0.5f;
+    float auth_load = 0.5f;
+};
+
 struct Node {
     std::string id;
     std::string type;
     NodeResources resources;
     float core_network_load = 0.5f;
+    CoreBusinessLoad core_business_load;
     float node_reliability = 0.98f;
     std::vector<size_t> neighbors;
     std::vector<size_t> predecessors;
@@ -52,6 +62,7 @@ struct VNFRequirement {
     float mem_required = 0.0f;
     float bandwidth_required_gbps = 0.0f;
     float disk_required_gb = 0.0f;
+    CoreBusinessLoad business_load_demand;
 };
 
 struct SFCRequest {
@@ -64,8 +75,7 @@ struct SFCRequest {
     float max_latency_ms = 0.0f;
     float bandwidth_demand_gbps = 0.0f;
     float reliability_requirement = 0.97f;
-    float core_network_load = 0.5f;
-    float priority_weight = 1.0f;
+    CoreBusinessLoad core_business_load;
     std::string priority;
 };
 

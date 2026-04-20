@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <cmath>
 #include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <string>
@@ -194,6 +195,19 @@ void print_top_failure_reasons(const std::unordered_map<std::string, int>& count
     }
 }
 
+double percentile_ms(std::vector<double> values, double p) {
+    if (values.empty()) return 0.0;
+    if (p <= 0.0) return *std::min_element(values.begin(), values.end());
+    if (p >= 100.0) return *std::max_element(values.begin(), values.end());
+    std::sort(values.begin(), values.end());
+    const double pos = (p / 100.0) * static_cast<double>(values.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    if (lo == hi) return values[lo];
+    const double w = pos - static_cast<double>(lo);
+    return values[lo] * (1.0 - w) + values[hi] * w;
+}
+
 struct ScaleAggregate {
     int topology_count = 0;
     int total_requests = 0;
@@ -201,11 +215,12 @@ struct ScaleAggregate {
     float success_delay_sum = 0.0f;
     long long total_time_ms = 0;
     std::unordered_map<std::string, int> failure_reason_counts;
+    std::vector<double> request_times_ms;
 };
 
 int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
-    std::cout << "  SFC智能编排系统 - 星上推理" << std::endl;
+    std::cout << "  SFC智能编排系统 - C++模型性能验证" << std::endl;
     std::cout << "========================================" << std::endl;
 
     Config config = parse_args(argc, argv);
@@ -263,6 +278,7 @@ int main(int argc, char* argv[]) {
     int overall_total_requests = 0;
     int overall_success_count = 0;
     float overall_success_delay = 0.0f;
+    std::vector<double> overall_request_times_ms;
     nlohmann::json topology_results = nlohmann::json::array();
     std::unordered_map<std::string, int> overall_failure_reason_counts;
     std::map<std::string, ScaleAggregate> scale_aggregates;
@@ -298,6 +314,7 @@ int main(int argc, char* argv[]) {
 
         int topo_success_count = 0;
         float topo_success_delay = 0.0f;
+        std::vector<double> topo_request_times_ms;
         nlohmann::json per_sfc = nlohmann::json::array();
         std::unordered_map<std::string, int> topo_failure_reason_counts;
 
@@ -306,7 +323,14 @@ int main(int argc, char* argv[]) {
 
             NetworkGraph request_graph = graph.clone();
             const bool verbose_sfc_log = (t + 1 == test_pairs.size());
+            auto sfc_start = std::chrono::high_resolution_clock::now();
             auto result = orchestrator.deploy_sfc(request_graph, request, node_embeddings, verbose_sfc_log);
+            auto sfc_end = std::chrono::high_resolution_clock::now();
+            const double sfc_inference_ms = static_cast<double>(
+                std::chrono::duration_cast<std::chrono::microseconds>(sfc_end - sfc_start).count()
+            ) / 1000.0;
+            topo_request_times_ms.push_back(sfc_inference_ms);
+            overall_request_times_ms.push_back(sfc_inference_ms);
 
             nlohmann::json sfc_json;
             sfc_json["request_id"] = result.request_id;
@@ -331,6 +355,7 @@ int main(int argc, char* argv[]) {
             }
             sfc_json["paths"] = paths_json;
             sfc_json["failure_reason"] = result.failure_reason;
+            sfc_json["inference_time_ms"] = sfc_inference_ms;
             sfc_json["vnf_traces"] = vnf_traces_to_json(result.vnf_traces);
             per_sfc.push_back(sfc_json);
 
@@ -351,11 +376,15 @@ int main(int argc, char* argv[]) {
         int topo_total_requests = static_cast<int>(requests.size());
         float topo_success_rate = topo_total_requests > 0 ? 100.0f * topo_success_count / topo_total_requests : 0.0f;
         float topo_avg_delay = topo_success_count > 0 ? topo_success_delay / topo_success_count : 0.0f;
+        const double topo_p50_ms = percentile_ms(topo_request_times_ms, 50.0);
+        const double topo_p95_ms = percentile_ms(topo_request_times_ms, 95.0);
 
         std::cout << "  拓扑统计: req=" << topo_total_requests
                   << " succ=" << topo_success_count
                   << " rate=" << topo_success_rate << "%"
                   << " avg_delay=" << topo_avg_delay << "ms"
+                  << " p50=" << topo_p50_ms << "ms"
+                  << " p95=" << topo_p95_ms << "ms"
                   << " time=" << topo_time_ms << "ms" << std::endl;
         print_top_failure_reasons(topo_failure_reason_counts, "  失败原因Top:");
 
@@ -369,6 +398,9 @@ int main(int argc, char* argv[]) {
         topo_json["success_rate"] = topo_total_requests > 0 ? static_cast<float>(topo_success_count) / topo_total_requests : 0.0f;
         topo_json["average_delay_ms"] = topo_avg_delay;
         topo_json["total_time_ms"] = topo_time_ms;
+        topo_json["inference_time_p50_ms"] = topo_p50_ms;
+        topo_json["inference_time_p95_ms"] = topo_p95_ms;
+        topo_json["inference_time_samples_ms"] = topo_request_times_ms;
         topo_json["failure_reason_counts"] = topo_failure_reason_counts;
         topo_json["sfc_results"] = per_sfc;
         topology_results.push_back(topo_json);
@@ -379,6 +411,11 @@ int main(int argc, char* argv[]) {
         scale_stats.success_count += topo_success_count;
         scale_stats.success_delay_sum += topo_success_delay;
         scale_stats.total_time_ms += topo_time_ms;
+        scale_stats.request_times_ms.insert(
+            scale_stats.request_times_ms.end(),
+            topo_request_times_ms.begin(),
+            topo_request_times_ms.end()
+        );
         for (const auto& [reason, count] : topo_failure_reason_counts) {
             scale_stats.failure_reason_counts[reason] += count;
         }
@@ -390,6 +427,8 @@ int main(int argc, char* argv[]) {
     float overall_success_rate = overall_total_requests > 0 ? 100.0f * overall_success_count / overall_total_requests : 0.0f;
     float overall_avg_delay = overall_success_count > 0 ? overall_success_delay / overall_success_count : 0.0f;
     float avg_time_per_sfc = overall_total_requests > 0 ? static_cast<float>(total_time_ms) / overall_total_requests : 0.0f;
+    const double overall_p50_ms = percentile_ms(overall_request_times_ms, 50.0);
+    const double overall_p95_ms = percentile_ms(overall_request_times_ms, 95.0);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "  总体统计" << std::endl;
@@ -400,6 +439,7 @@ int main(int argc, char* argv[]) {
     std::cout << "平均成功时延: " << overall_avg_delay << " ms" << std::endl;
     std::cout << "总耗时: " << total_time_ms << " ms" << std::endl;
     std::cout << "平均每SFC处理时延: " << avg_time_per_sfc << " ms" << std::endl;
+    std::cout << "P50 / P95 单请求推理时延: " << overall_p50_ms << " / " << overall_p95_ms << " ms" << std::endl;
     std::cout << "========================================" << std::endl;
     print_top_failure_reasons(overall_failure_reason_counts, "总体失败原因Top:");
 
@@ -412,6 +452,8 @@ int main(int argc, char* argv[]) {
         const float bucket_rate = stats.total_requests > 0 ? 100.0f * stats.success_count / stats.total_requests : 0.0f;
         const float bucket_delay = stats.success_count > 0 ? stats.success_delay_sum / stats.success_count : 0.0f;
         const float bucket_time_per_sfc = stats.total_requests > 0 ? static_cast<float>(stats.total_time_ms) / stats.total_requests : 0.0f;
+        const double bucket_p50_ms = percentile_ms(stats.request_times_ms, 50.0);
+        const double bucket_p95_ms = percentile_ms(stats.request_times_ms, 95.0);
 
         std::cout << bucket
                   << ": topo=" << stats.topology_count
@@ -419,7 +461,9 @@ int main(int argc, char* argv[]) {
                   << " succ=" << stats.success_count
                   << " rate=" << bucket_rate << "%"
                   << " avg_delay=" << bucket_delay << "ms"
-                  << " avg_time_per_sfc=" << bucket_time_per_sfc << "ms" << std::endl;
+                  << " avg_time_per_sfc=" << bucket_time_per_sfc << "ms"
+                  << " p50=" << bucket_p50_ms << "ms"
+                  << " p95=" << bucket_p95_ms << "ms" << std::endl;
         print_top_failure_reasons(stats.failure_reason_counts, "  该规模失败原因Top:");
 
         scale_analysis.push_back({
@@ -430,6 +474,8 @@ int main(int argc, char* argv[]) {
             {"success_rate", stats.total_requests > 0 ? static_cast<float>(stats.success_count) / stats.total_requests : 0.0f},
             {"average_delay_ms", bucket_delay},
             {"avg_time_per_sfc_ms", bucket_time_per_sfc},
+            {"inference_time_p50_ms", bucket_p50_ms},
+            {"inference_time_p95_ms", bucket_p95_ms},
             {"failure_reason_counts", stats.failure_reason_counts},
         });
     }
@@ -444,6 +490,8 @@ int main(int argc, char* argv[]) {
         {"average_delay_ms", overall_avg_delay},
         {"total_time_ms", total_time_ms},
         {"avg_time_per_sfc_ms", avg_time_per_sfc},
+        {"inference_time_p50_ms", overall_p50_ms},
+        {"inference_time_p95_ms", overall_p95_ms},
         {"failure_reason_counts", overall_failure_reason_counts},
     };
     output["scale_analysis"] = scale_analysis;
