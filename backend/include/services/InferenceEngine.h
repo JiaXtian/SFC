@@ -28,6 +28,10 @@ private:
     std::unique_ptr<Ort::Session> gnn_session_;
     std::unique_ptr<Ort::Session> actor_session_;
     Ort::MemoryInfo memory_info_;
+    size_t node_feature_dim_ = 8;
+    size_t vnf_feature_dim_ = 8;
+    size_t context_feature_dim_ = 48;
+    size_t node_embedding_dim_ = 192;
     
     std::pair<std::vector<float>, std::vector<int64_t>> prepare_graph_inputs(const Topology& topology);
     std::vector<float> run_gnn_encoder(

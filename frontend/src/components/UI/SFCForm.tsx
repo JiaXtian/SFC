@@ -123,16 +123,6 @@ export default function SFCForm() {
     optimize: 'latency',
   })
 
-  const [runtimeContext, setRuntimeContext] = useState({
-    core_business_load: {
-      signaling_load: 0.52,
-      session_load: 0.5,
-      user_plane_load: 0.56,
-      mobility_load: 0.48,
-      policy_load: 0.46,
-      auth_load: 0.44,
-    },
-  })
   const sessionRealtimeConfig = {
     max_planning_attempts: 20,
     planning_time_budget_ms: 450,
@@ -143,7 +133,6 @@ export default function SFCForm() {
     destination_node: DEFAULT_DESTINATION_NODE,
   })
 
-  const [showRuntimeContext, setShowRuntimeContext] = useState(false)
   const [templateAdvanced, setTemplateAdvanced] = useState({ topk: 1, optimize: 'latency' })
   const [enableCustomWeights, setEnableCustomWeights] = useState(false)
   const [scoreWeights, setScoreWeights] = useState({
@@ -287,7 +276,6 @@ export default function SFCForm() {
 
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
-      const coreBusinessLoad = runtimeContext.core_business_load
       const coreNfs = sfc.vnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
@@ -317,7 +305,6 @@ export default function SFCForm() {
         constraints: sfc.constraints,
         optimize: optimizeMode,
         topk: sfc.topk || 1,
-        core_business_load: coreBusinessLoad,
         max_planning_attempts: sessionRealtimeConfig.max_planning_attempts,
         planning_time_budget_ms: sessionRealtimeConfig.planning_time_budget_ms,
         ...(enableCustomWeights
@@ -841,55 +828,6 @@ export default function SFCForm() {
             <option key={id} value={id} />
           ))}
         </datalist>
-      </div>
-
-      <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
-        <FoldHeader
-          icon={<Radar className="w-3.5 h-3.5 text-cyan-300" />}
-          title="模型上下文参数"
-          open={showRuntimeContext}
-          onToggle={() => setShowRuntimeContext(v => !v)}
-        />
-
-        {showRuntimeContext && (
-          <div className="space-y-2 text-[10px] mt-2">
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                ['signaling_load', '信令负载', '用于表征接入/注册/鉴权消息风暴压力，越高越偏向选择控制面余量更大的节点。'],
-                ['session_load', '会话负载', '用于表征PDU会话建立与维护频度，越高越要求会话处理链路稳定且低时延。'],
-                ['user_plane_load', '用户面负载', '用于表征数据面吞吐压力，越高越偏向高带宽、低拥塞链路与节点。'],
-                ['mobility_load', '移动性负载', '用于表征切换与移动性管理频度，越高越偏向拓扑连通与路径冗余更强区域。'],
-                ['policy_load', '策略控制负载', '用于表征QoS/策略决策压力，越高越偏向策略面资源充足的控制节点。'],
-                ['auth_load', '鉴权负载', '用于表征认证与安全上下文处理压力，越高越偏向安全相关能力余量较高节点。'],
-              ].map(([key, label, hint]) => (
-                <div key={key}>
-                  <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-                    {label}
-                    <InfoHint text={hint as string} />
-                  </div>
-                  <input
-                    type="number"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={(runtimeContext.core_business_load as any)[key]}
-                    onChange={e =>
-                      setRuntimeContext(prev => ({
-                        ...prev,
-                        core_business_load: {
-                          ...prev.core_business_load,
-                          [key]: Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)),
-                        },
-                      }))
-                    }
-                    className="w-full px-2 py-1 rounded"
-                    style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       <button

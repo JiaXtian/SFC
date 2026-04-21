@@ -27,7 +27,11 @@ export default function AuthPage({ portal = 'main' as 'main' | 'control' }) {
     [],
   )
 
-  const redirectToMain = () => {
+  const redirectAfterAuth = () => {
+    if (portal === 'control') {
+      window.location.href = '/'
+      return
+    }
     if (window.location.origin === mainUrl) {
       window.location.href = '/'
       return
@@ -59,7 +63,7 @@ export default function AuthPage({ portal = 'main' as 'main' | 'control' }) {
       } else {
         await register(username.trim(), password, confirmPassword)
       }
-      redirectToMain()
+      redirectAfterAuth()
     } catch (err: any) {
       setError(toErrorText(err))
     } finally {
@@ -69,10 +73,9 @@ export default function AuthPage({ portal = 'main' as 'main' | 'control' }) {
 
   return (
     <div className="auth-shell w-screen h-screen overflow-hidden flex items-center justify-center px-4">
-      <div className="auth-bg-orb auth-bg-orb-a" />
-      <div className="auth-bg-orb auth-bg-orb-b" />
-      <div className="auth-bg-orb auth-bg-orb-c" />
-      <div className="auth-grid-pattern" />
+      <div className="auth-starfield auth-starfield-a" />
+      <div className="auth-starfield auth-starfield-b" />
+      <div className="auth-starfield auth-starfield-c" />
       <div className="auth-card w-full max-w-[450px] p-7 sm:p-8 relative z-10">
         <div className="flex items-center gap-2.5 mb-5">
           <div className="h-10 w-10 rounded-xl flex items-center justify-center auth-logo-wrap">

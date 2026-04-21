@@ -47,7 +47,7 @@ export default function BottomHub() {
   }
 
   return (
-    <div className="absolute bottom-[86px] left-1/2 -translate-x-1/2 z-[1001] pointer-events-auto select-none">
+    <div className="absolute bottom-[10px] left-1/2 -translate-x-1/2 z-[1001] pointer-events-auto select-none">
       <div className="flex items-center gap-2">
         <IconButton
           active={display.showTexture}

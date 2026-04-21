@@ -60,55 +60,43 @@ input[type='number'] {
 .auth-shell {
   position: relative;
   background:
-    radial-gradient(1300px 760px at 8% -18%, rgba(35, 83, 130, 0.5) 0%, rgba(6, 12, 26, 0.16) 50%, rgba(2, 6, 16, 0) 70%),
-    radial-gradient(1100px 700px at 105% 122%, rgba(24, 96, 120, 0.36) 0%, rgba(4, 11, 26, 0.14) 54%, rgba(2, 6, 16, 0) 74%),
-    linear-gradient(140deg, #020712 0%, #061225 33%, #081a31 66%, #061021 100%);
+    radial-gradient(1200px 620px at 18% -15%, rgba(255, 255, 255, 0.07) 0%, rgba(6, 10, 20, 0.05) 48%, rgba(2, 4, 10, 0) 75%),
+    radial-gradient(1000px 700px at 92% 112%, rgba(180, 210, 255, 0.08) 0%, rgba(8, 14, 26, 0.05) 56%, rgba(2, 4, 10, 0) 80%),
+    linear-gradient(145deg, #000107 0%, #02050d 42%, #03070f 68%, #010208 100%);
 }
 
-.auth-grid-pattern {
+.auth-starfield {
   position: absolute;
-  inset: 0;
-  opacity: 0.25;
-  background-image:
-    linear-gradient(rgba(125, 211, 252, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(125, 211, 252, 0.05) 1px, transparent 1px);
-  background-size: 42px 42px;
-  mask-image: radial-gradient(circle at center, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.15));
-}
-
-.auth-bg-orb {
-  position: absolute;
-  border-radius: 999px;
-  filter: blur(0px);
-  opacity: 0.55;
+  inset: -30%;
   pointer-events: none;
+  background-repeat: repeat;
+  opacity: 0.6;
 }
 
-.auth-bg-orb-a {
-  width: 380px;
-  height: 380px;
-  left: -60px;
-  top: 8%;
-  background: radial-gradient(circle at 30% 30%, rgba(73, 174, 255, 0.58), rgba(11, 43, 86, 0.1) 70%);
-  animation: auth-float-a 15s ease-in-out infinite;
+.auth-starfield-a {
+  background-image:
+    radial-gradient(1px 1px at 12px 18px, rgba(255, 255, 255, 0.86), transparent 65%),
+    radial-gradient(1px 1px at 90px 66px, rgba(234, 241, 255, 0.74), transparent 65%),
+    radial-gradient(1px 1px at 42px 102px, rgba(222, 234, 255, 0.72), transparent 65%);
+  background-size: 120px 120px;
+  animation: auth-stars-drift-a 80s linear infinite;
 }
 
-.auth-bg-orb-b {
-  width: 310px;
-  height: 310px;
-  right: -80px;
-  bottom: 6%;
-  background: radial-gradient(circle at 50% 50%, rgba(45, 212, 191, 0.38), rgba(6, 32, 53, 0.06) 70%);
-  animation: auth-float-b 17s ease-in-out infinite;
+.auth-starfield-b {
+  background-image:
+    radial-gradient(1.2px 1.2px at 30px 44px, rgba(255, 255, 255, 0.9), transparent 68%),
+    radial-gradient(1px 1px at 74px 18px, rgba(226, 238, 255, 0.78), transparent 65%),
+    radial-gradient(1px 1px at 106px 94px, rgba(214, 228, 255, 0.7), transparent 65%);
+  background-size: 140px 140px;
+  animation: auth-stars-drift-b 110s linear infinite;
 }
 
-.auth-bg-orb-c {
-  width: 200px;
-  height: 200px;
-  right: 24%;
-  top: 16%;
-  background: radial-gradient(circle at 50% 50%, rgba(56, 189, 248, 0.28), rgba(4, 26, 47, 0.03) 72%);
-  animation: auth-float-c 12s ease-in-out infinite;
+.auth-starfield-c {
+  background-image:
+    radial-gradient(1px 1px at 22px 18px, rgba(255, 255, 255, 0.65), transparent 65%),
+    radial-gradient(1px 1px at 84px 74px, rgba(199, 236, 255, 0.58), transparent 65%);
+  background-size: 190px 190px;
+  animation: auth-stars-twinkle 6s ease-in-out infinite;
 }
 
 .auth-card {
@@ -193,17 +181,17 @@ input[type='number'] {
     0 0 42px rgba(34, 211, 238, 0.32);
 }
 
-@keyframes auth-float-a {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(24px, -16px, 0) scale(1.06); }
+@keyframes auth-stars-drift-a {
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(-320px, -260px, 0); }
 }
 
-@keyframes auth-float-b {
-  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
-  50% { transform: translate3d(-20px, 12px, 0) scale(1.08); }
+@keyframes auth-stars-drift-b {
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(260px, -220px, 0); }
 }
 
-@keyframes auth-float-c {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  50% { transform: translate3d(14px, 20px, 0); }
+@keyframes auth-stars-twinkle {
+  0%, 100% { opacity: 0.26; }
+  50% { opacity: 0.58; }
 }

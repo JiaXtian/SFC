@@ -44,7 +44,13 @@ function validateImportedTopology(parsed: ReturnType<typeof parseThirdPartyTopol
   return errors
 }
 
-export default function ConstellationControlPanel() {
+export default function ConstellationControlPanel({
+  readonly = false,
+  onUnauthorized,
+}: {
+  readonly?: boolean
+  onUnauthorized?: () => void
+}) {
   const [loading, setLoading] = useState(false)
   const [type, setType] = useState<ConstellationType>('starlink_v1')
   const [total, setTotal] = useState(72)
@@ -54,6 +60,8 @@ export default function ConstellationControlPanel() {
   const {
     setSatellites,
     setLinks,
+    satellites,
+    deployments,
     clearDeployments,
     clearHighlightedDeployments,
     setCandidateResult,
@@ -84,8 +92,14 @@ export default function ConstellationControlPanel() {
     } catch {}
   }
 
-  const syncAndStartDynamic = async (sats: any[], links: any[]) => {
-    const topologyData = prepareTopologyForBackend(sats, links, type, planes)
+  const syncAndStartDynamic = async (sats: any[], links: any[], templateId: string) => {
+    const topologyData: any = prepareTopologyForBackend(sats, links, type, planes)
+    topologyData.force_replace = true
+    topologyData.metadata = {
+      ...(topologyData.metadata ?? {}),
+      constellation_template: templateId,
+      force_replace: true,
+    }
     await apiClient.generateTopology(topologyData)
     const ad = useStore.getState().autoDynamics
     await apiClient.startDynamicSimulation({
@@ -100,6 +114,14 @@ export default function ConstellationControlPanel() {
   }
 
   const doGenerate = async () => {
+    if (readonly) {
+      onUnauthorized?.()
+      return
+    }
+    if ((satellites.length > 0 || deployments.length > 0) &&
+      !window.confirm('再次生成星座将清除所有已有卫星节点和已部署策略，是否继续？')) {
+      return
+    }
     setLoading(true)
     try {
       await clearExistingOrchestrationState()
@@ -110,7 +132,7 @@ export default function ConstellationControlPanel() {
       setSatellites(sats as any)
       setLinks(links as any)
       setAutoDynamics({ enabled: true, playing: true, elapsed_sec: 0 })
-      await syncAndStartDynamic(sats, links)
+      await syncAndStartDynamic(sats, links, type)
       setBackendTopologySynced(true)
       addToast(`星座已更新：${sats.length} 节点 / ${links.length} 链路`, 'success')
     } catch (e: any) {
@@ -123,6 +145,14 @@ export default function ConstellationControlPanel() {
 
   const onImportThirdParty = async (file?: File) => {
     if (!file) return
+    if (readonly) {
+      onUnauthorized?.()
+      return
+    }
+    if ((satellites.length > 0 || deployments.length > 0) &&
+      !window.confirm('导入新星座将清除所有已有卫星节点和已部署策略，是否继续？')) {
+      return
+    }
     setLoading(true)
     try {
       await clearExistingOrchestrationState()
@@ -140,7 +170,7 @@ export default function ConstellationControlPanel() {
       setAutoDynamics({ enabled: true, playing: true, elapsed_sec: 0 })
       bumpTopologyVersion()
       setBackendTopologySynced(false)
-      await syncAndStartDynamic(parsed.satellites as any[], parsed.links as any[])
+      await syncAndStartDynamic(parsed.satellites as any[], parsed.links as any[], 'imported_topology')
       setBackendTopologySynced(true)
       addToast(`导入成功：${parsed.satellites.length} 节点 / ${parsed.links.length} 链路`, 'success')
     } catch (e: any) {

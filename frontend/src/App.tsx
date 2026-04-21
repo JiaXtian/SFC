@@ -10,17 +10,18 @@ import SystemMessagePanel from './components/UI/SystemMessagePanel'
 import SatelliteDetail from './components/UI/SatelliteDetail'
 import LinkDetailPanel from './components/UI/LinkDetailPanel'
 import BottomHub from './components/UI/BottomHub'
-import TimeAxis from './components/UI/TimeAxis'
 import SystemPopup from './components/UI/SystemPopup'
 import { useStore } from './store/useStore'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useAutoDynamics } from './hooks/useAutoDynamics'
+import { useBootstrapRuntime } from './hooks/useBootstrapRuntime'
 import { shallow } from 'zustand/shallow'
 
 const CandidateModal = lazy(() => import('./components/UI/CandidateModal'))
 const MonitoringPage = lazy(() => import('./components/UI/MonitoringPage'))
 
 export default function App() {
+  useBootstrapRuntime()
   useWebSocket()
   useAutoDynamics()
   const {
@@ -140,13 +141,13 @@ export default function App() {
           style={{ position: 'absolute', inset: 0, zIndex: 0 }}
         >
           <color attach="background" args={['#010206']} />
-          <ambientLight intensity={0.24} />
-          <hemisphereLight args={['#b5e7ff', '#030913', 0.3]} />
-          <directionalLight position={[18, 16, 24]} intensity={1.65} color="#e2f3ff" />
-          <directionalLight position={[-18, -9, -24]} intensity={0.58} color="#60a5fa" />
-          <pointLight position={[-14, -10, -10]} intensity={0.36} color="#2563eb" />
-          <pointLight position={[14, 8, 10]} intensity={0.32} color="#7dd3fc" />
-          <pointLight position={[0, 20, 0]} intensity={0.16} color="#bfdbfe" />
+          <ambientLight intensity={0.34} />
+          <hemisphereLight args={['#c8ecff', '#04101b', 0.42]} />
+          <directionalLight position={[18, 16, 24]} intensity={2.05} color="#ecf8ff" />
+          <directionalLight position={[-18, -9, -24]} intensity={0.72} color="#6cb7ff" />
+          <pointLight position={[-14, -10, -10]} intensity={0.44} color="#2b6db8" />
+          <pointLight position={[14, 8, 10]} intensity={0.4} color="#90ddff" />
+          <pointLight position={[0, 20, 0]} intensity={0.22} color="#d5ebff" />
           {display.showSky && <Stars radius={240} depth={75} count={qualityConfig.starCount} factor={3.2} saturation={0} fade speed={0.3} />}
           <Suspense fallback={null}>
             <Earth />
@@ -182,7 +183,6 @@ export default function App() {
             <div className="pointer-events-auto"><SatelliteDetail /></div>
             <div className="pointer-events-auto"><LinkDetailPanel /></div>
             <div className="pointer-events-auto"><BottomHub /></div>
-            <div className="pointer-events-auto"><TimeAxis /></div>
           </div>
 
           <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 11 }}>

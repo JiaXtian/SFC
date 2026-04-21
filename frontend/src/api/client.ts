@@ -55,8 +55,14 @@ class APIClient {
   }
   
   async getSatellites() { return (await http.get('/satellites')).data }
+  async deleteSatellite(nodeId: string) { return (await http.delete(`/satellite/${encodeURIComponent(nodeId)}`)).data }
 
   async getDynamicStatus() { return (await http.get('/topology/dynamic/status')).data }
+  async getRuntimeEvents(limit = 120) { return (await http.get('/runtime/events', { params: { limit } })).data }
+  async getControlConfig() { return (await http.get('/runtime/config')).data }
+  async updateControlConfig(p: { resource_sampling_interval_sec?: number; simulation_speed?: number; apply_now?: boolean }) {
+    return (await http.put('/runtime/config', p)).data
+  }
 
   async startDynamicSimulation(p: {
     sampling_interval_sec?: number

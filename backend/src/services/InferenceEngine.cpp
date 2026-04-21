@@ -10,15 +10,91 @@
 #include <cstdint>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <optional>
 
 namespace sfc {
 namespace {
 
 double clamp01(double x);
 bool link_is_down(const Link& link);
-constexpr int kNodeFeatureDim = 14;
-constexpr int kVnfFeatureDim = 8;
-constexpr int kContextFeatureDim = 48;
+constexpr size_t kBaseNodeFeatureDim = 8;
+constexpr size_t kBaseVnfFeatureDim = 8;
+constexpr size_t kBaseContextFeatureDim = 48;
+constexpr size_t kDefaultNodeEmbeddingDim = 192;
+
+std::optional<size_t> parse_expected_dim_from_error(
+    const std::string& err,
+    const std::string& tensor_name
+) {
+    const size_t tensor_pos = err.find(tensor_name);
+    if (tensor_pos == std::string::npos) return std::nullopt;
+    const size_t expected_pos = err.find("Expected:", tensor_pos);
+    if (expected_pos == std::string::npos) return std::nullopt;
+    size_t pos = expected_pos + 9;
+    while (pos < err.size() && std::isspace(static_cast<unsigned char>(err[pos]))) ++pos;
+    size_t end = pos;
+    while (end < err.size() && std::isdigit(static_cast<unsigned char>(err[end]))) ++end;
+    if (end <= pos) return std::nullopt;
+    try {
+        return static_cast<size_t>(std::stoul(err.substr(pos, end - pos)));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+size_t positive_last_dim_or(const std::vector<int64_t>& shape, size_t fallback) {
+    for (auto it = shape.rbegin(); it != shape.rend(); ++it) {
+        if (*it > 0) return static_cast<size_t>(*it);
+    }
+    return fallback;
+}
+
+std::vector<float> fit_feature_dim(const std::vector<float>& base, size_t target_dim) {
+    if (target_dim == 0) return {};
+    if (target_dim == base.size()) return base;
+    std::vector<float> out(target_dim, 0.0f);
+    const size_t copy_n = std::min(target_dim, base.size());
+    if (copy_n > 0) {
+        std::copy_n(base.data(), copy_n, out.data());
+    }
+    return out;
+}
+
+void maybe_load_model_io_meta(
+    const std::string& actor_model_path,
+    size_t* node_feature_dim,
+    size_t* vnf_feature_dim,
+    size_t* context_feature_dim,
+    size_t* node_embedding_dim
+) {
+    if (!node_feature_dim || !vnf_feature_dim || !context_feature_dim || !node_embedding_dim) return;
+    try {
+        const std::filesystem::path actor_path(actor_model_path);
+        const std::filesystem::path meta_path = actor_path.parent_path() / "model_io_meta.json";
+        if (!std::filesystem::exists(meta_path)) return;
+        std::ifstream ifs(meta_path);
+        if (!ifs.is_open()) return;
+        nlohmann::json meta;
+        ifs >> meta;
+        if (!meta.is_object()) return;
+        if (meta.contains("node_feature_dim")) {
+            *node_feature_dim = std::max<size_t>(1, static_cast<size_t>(meta.value("node_feature_dim", *node_feature_dim)));
+        }
+        if (meta.contains("vnf_feature_dim")) {
+            *vnf_feature_dim = std::max<size_t>(1, static_cast<size_t>(meta.value("vnf_feature_dim", *vnf_feature_dim)));
+        }
+        if (meta.contains("context_feature_dim")) {
+            *context_feature_dim = std::max<size_t>(1, static_cast<size_t>(meta.value("context_feature_dim", *context_feature_dim)));
+        }
+        if (meta.contains("gnn_output_dim")) {
+            *node_embedding_dim = std::max<size_t>(1, static_cast<size_t>(meta.value("gnn_output_dim", *node_embedding_dim)));
+        }
+    } catch (...) {
+        // Ignore malformed metadata and rely on model introspection / defaults.
+    }
+}
 
 std::string normalize_nf_type(const std::string& raw) {
     std::string out;
@@ -30,36 +106,14 @@ std::string normalize_nf_type(const std::string& raw) {
     return out;
 }
 
-double weighted_business_pressure(
-    const CoreBusinessLoad& node_load,
-    const CoreBusinessLoad& demand
-) {
-    const double w_sig = std::max(0.05, demand.signaling_load);
-    const double w_ses = std::max(0.05, demand.session_load);
-    const double w_up = std::max(0.05, demand.user_plane_load);
-    const double w_mob = std::max(0.05, demand.mobility_load);
-    const double w_pol = std::max(0.05, demand.policy_load);
-    const double w_auth = std::max(0.05, demand.auth_load);
-    const double denom = w_sig + w_ses + w_up + w_mob + w_pol + w_auth;
-    if (denom <= 1e-9) return 0.5;
-    return clamp01(
-        (w_sig * clamp01(node_load.signaling_load) +
-         w_ses * clamp01(node_load.session_load) +
-         w_up * clamp01(node_load.user_plane_load) +
-         w_mob * clamp01(node_load.mobility_load) +
-         w_pol * clamp01(node_load.policy_load) +
-         w_auth * clamp01(node_load.auth_load)) / denom
-    );
-}
-
-std::vector<float> build_vnf_features(const VNF& vnf) {
+std::vector<float> build_vnf_features(const VNF& vnf, size_t vnf_feature_dim) {
     const double bw_required = std::max(vnf.bw_in, vnf.bw_out);
     const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
     const bool is_user_plane = (nf_type == "upf");
     const bool is_control_plane = !is_user_plane;
     const double stateful = vnf.stateful ? 1.0 : 0.0;
     const double processing_weight = std::max(0.3, std::min(3.0, vnf.processing_weight));
-    return {
+    const std::vector<float> base = {
         static_cast<float>(vnf.cpu),
         static_cast<float>(vnf.mem),
         static_cast<float>(bw_required),
@@ -69,6 +123,7 @@ std::vector<float> build_vnf_features(const VNF& vnf) {
         static_cast<float>(stateful),
         static_cast<float>(processing_weight),
     };
+    return fit_feature_dim(base, vnf_feature_dim);
 }
 
 std::vector<float> build_context_features(
@@ -80,13 +135,14 @@ std::vector<float> build_context_features(
     double active_node_ratio,
     double active_link_ratio,
     double avg_latency_ms,
-    double avg_bandwidth_utilization
+    double avg_bandwidth_utilization,
+    size_t context_feature_dim
 ) {
-    std::vector<float> ctx(48, 0.0f);
+    std::vector<float> ctx(kBaseContextFeatureDim, 0.0f);
     const double total_vnfs = std::max<size_t>(1, request.vnfs.size());
     const double reliability_req = request.constraints.min_reliability;
     const double bandwidth_demand = request.constraints.min_bandwidth_gbps;
-    const double request_business_index = request.core_business_load.load_index();
+    const double request_business_index = 0.0;
 
     ctx[0] = static_cast<float>(remaining_delay / 300.0);
     ctx[1] = static_cast<float>(static_cast<double>(current_vnf_idx) / total_vnfs);
@@ -106,13 +162,13 @@ std::vector<float> build_context_features(
     ctx[13] = static_cast<float>(clamp01(active_link_ratio));
     ctx[14] = static_cast<float>(std::max(0.0, avg_latency_ms) / 80.0);
     ctx[15] = static_cast<float>(clamp01(avg_bandwidth_utilization));
-    ctx[16] = static_cast<float>(clamp01(request.core_business_load.signaling_load));
-    ctx[17] = static_cast<float>(clamp01(request.core_business_load.session_load));
-    ctx[18] = static_cast<float>(clamp01(request.core_business_load.user_plane_load));
-    ctx[19] = static_cast<float>(clamp01(request.core_business_load.mobility_load));
-    ctx[20] = static_cast<float>(clamp01(request.core_business_load.policy_load));
-    ctx[21] = static_cast<float>(clamp01(request.core_business_load.auth_load));
-    return ctx;
+    ctx[16] = 0.0f;
+    ctx[17] = 0.0f;
+    ctx[18] = 0.0f;
+    ctx[19] = 0.0f;
+    ctx[20] = 0.0f;
+    ctx[21] = 0.0f;
+    return fit_feature_dim(ctx, context_feature_dim);
 }
 
 struct DynamicTopologyFeatures {
@@ -554,6 +610,47 @@ InferenceEngine::InferenceEngine(
     try {
         gnn_session_ = std::make_unique<Ort::Session>(env_, gnn_model_path.c_str(), session_options_);
         actor_session_ = std::make_unique<Ort::Session>(env_, actor_model_path.c_str(), session_options_);
+
+        node_feature_dim_ = kBaseNodeFeatureDim;
+        vnf_feature_dim_ = kBaseVnfFeatureDim;
+        context_feature_dim_ = kBaseContextFeatureDim;
+        node_embedding_dim_ = kDefaultNodeEmbeddingDim;
+        maybe_load_model_io_meta(
+            actor_model_path,
+            &node_feature_dim_,
+            &vnf_feature_dim_,
+            &context_feature_dim_,
+            &node_embedding_dim_
+        );
+
+        Ort::AllocatorWithDefaultOptions allocator;
+        for (size_t i = 0; i < gnn_session_->GetInputCount(); ++i) {
+            const auto name_alloc = gnn_session_->GetInputNameAllocated(i, allocator);
+            const std::string name = name_alloc ? name_alloc.get() : "";
+            if (name != "node_features") continue;
+            const auto shape = gnn_session_->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
+            node_feature_dim_ = positive_last_dim_or(shape, node_feature_dim_);
+        }
+        for (size_t i = 0; i < actor_session_->GetInputCount(); ++i) {
+            const auto name_alloc = actor_session_->GetInputNameAllocated(i, allocator);
+            const std::string name = name_alloc ? name_alloc.get() : "";
+            const auto shape = actor_session_->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape();
+            if (name == "node_embeddings") {
+                node_embedding_dim_ = positive_last_dim_or(shape, node_embedding_dim_);
+            } else if (name == "vnf_features") {
+                vnf_feature_dim_ = positive_last_dim_or(shape, vnf_feature_dim_);
+            } else if (name == "context_features") {
+                context_feature_dim_ = positive_last_dim_or(shape, context_feature_dim_);
+            }
+        }
+
+        spdlog::info(
+            "ONNX model dims: node_features={} vnf_features={} context_features={} node_embedding={}",
+            node_feature_dim_,
+            vnf_feature_dim_,
+            context_feature_dim_,
+            node_embedding_dim_
+        );
         spdlog::info("ONNX models loaded successfully");
     } catch (const Ort::Exception& e) {
         spdlog::error("Failed to load ONNX models: {}", e.what());
@@ -1258,7 +1355,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             return finalize_failure("Candidate nodes are not indexed in embeddings");
         }
 
-        auto vnf_features = build_vnf_features(vnf);
+        auto vnf_features = build_vnf_features(vnf, vnf_feature_dim_);
         auto context_features = build_context_features(
             request,
             i,
@@ -1268,7 +1365,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             topo_features.active_node_ratio,
             topo_features.active_link_ratio,
             topo_features.avg_latency_ms,
-            topo_features.avg_bandwidth_utilization
+            topo_features.avg_bandwidth_utilization,
+            context_feature_dim_
         );
 
         auto probs = run_actor_policy(node_embeddings, actor_candidate_indices, vnf_features, context_features);
@@ -1764,11 +1862,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const double cpu = node.cpu_total > 0.0 ? node.cpu_available / node.cpu_total : 0.0;
             const double mem = node.mem_total > 0.0 ? node.mem_available / node.mem_total : 0.0;
             const double disk = node.disk_total > 0.0 ? node.disk_available / node.disk_total : 0.0;
-            const double business_headroom = 1.0 - weighted_business_pressure(
-                node.core_business_load,
-                request.core_business_load
-            );
-            resource_score += (cpu + mem + disk + business_headroom) / 4.0;
+            resource_score += (cpu + mem + disk) / 3.0;
         }
         resource_score /= static_cast<double>(candidate.deployed_nodes.size());
     } else {
@@ -1878,9 +1972,10 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
         }
     }
 
-    auto pass = [&](bool enforce_dest_budget, double delay_relax_factor, double reliability_relax_factor) {
+    auto pass = [&](bool enforce_dest_budget, double delay_relax_factor) {
         std::vector<std::string> pass_candidates;
         pass_candidates.reserve(topology.nodes.size());
+        const double reliability_threshold_factor = enforce_dest_budget ? 0.72 : 0.52;
         for (size_t idx = 0; idx < topology.nodes.size(); ++idx) {
             const auto& node = topology.nodes[idx];
             if (node.cpu_available < vnf.cpu ||
@@ -1888,19 +1983,6 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 node.disk_available < vnf.disk) {
                 continue;
             }
-            const double business_pressure = weighted_business_pressure(
-                node.core_business_load,
-                vnf.business_load_demand
-            );
-            const double business_headroom = 1.0 - business_pressure;
-            const double min_business_headroom = std::max(
-                0.04,
-                0.22 * clamp01(vnf.business_load_demand.load_index()) * reliability_relax_factor
-            );
-            if (business_headroom + 1e-9 < min_business_headroom) {
-                continue;
-            }
-
             const double delay_budget = remaining_latency * delay_relax_factor;
             if (prev_distances && idx < prev_distances->size()) {
                 double path_delay = (*prev_distances)[idx];
@@ -1960,7 +2042,7 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 );
                 optimistic_rel *= std::pow(dest_path_rel, 0.20);
             }
-            if (optimistic_rel < request.constraints.min_reliability * reliability_relax_factor) {
+            if (optimistic_rel < request.constraints.min_reliability * reliability_threshold_factor) {
                 continue;
             }
 
@@ -1970,10 +2052,10 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
     };
 
     // 第一阶段：严格执行入口+出口可达性与可靠性预筛选
-    candidates = pass(true, 1.0, 0.72);
+    candidates = pass(true, 1.0);
     // 第二阶段（兜底）：放宽剪枝，避免可行解在前置过滤阶段被全部剪空
     if (candidates.empty()) {
-        candidates = pass(false, 1.45, 0.52);
+        candidates = pass(false, 1.45);
         if (!candidates.empty()) {
             spdlog::warn(
                 "Relaxed candidate filtering at core NF index {} (prev={}, remaining_latency={:.2f}ms), recovered {} candidates",
@@ -2013,14 +2095,6 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
                 node.disk_available < vnf.disk) {
                 continue;
             }
-            const double business_pressure = weighted_business_pressure(
-                node.core_business_load,
-                vnf.business_load_demand
-            );
-            if (business_pressure > 0.96) {
-                continue;
-            }
-
             double path_delay = 0.0;
             double path_reliability = 1.0;
             if (!prev_node.empty() && prev_node != node.id) {
@@ -2103,7 +2177,7 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
     const double BETA_LATENCY = 0.24;
     const double BETA_HOPS = 0.10;
     const double BETA_RELIABILITY = 0.14;
-    const double BETA_BUSINESS = 0.16;
+    
     
     std::vector<std::pair<std::string, double>> ranked;
     auto& cache = get_topology_cache(topology);
@@ -2134,10 +2208,6 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
         double latency_cost = 0.0;
         double hop_cost = 0.0;
         double reliability_cost = 0.0;
-        const double business_cost = weighted_business_pressure(
-            node->core_business_load,
-            vnf.business_load_demand
-        );
         if (!prev_node.empty() && prev_node != node_id) {
             if (prev_distances && it->second < prev_distances->size()) {
                 const double d = (*prev_distances)[it->second];
@@ -2159,8 +2229,7 @@ std::vector<std::pair<std::string, double>> InferenceEngine::rank_nodes_by_cost(
             BETA_RESOURCE * resource_cost +
             BETA_LATENCY * latency_cost +
             BETA_HOPS * hop_cost +
-            BETA_RELIABILITY * reliability_cost +
-            BETA_BUSINESS * business_cost;
+            BETA_RELIABILITY * reliability_cost;
         ranked.emplace_back(node_id, total_cost);
     }
     
@@ -2174,7 +2243,7 @@ std::pair<std::vector<float>, std::vector<int64_t>>
 InferenceEngine::prepare_graph_inputs(const Topology& topology) {
     std::vector<float> node_features;
     std::vector<int64_t> edge_index;
-    node_features.reserve(topology.nodes.size() * kNodeFeatureDim);
+    node_features.reserve(topology.nodes.size() * std::max<size_t>(1, node_feature_dim_));
     edge_index.reserve(topology.links.size() * 2);
 
     auto& cache = get_topology_cache(topology);
@@ -2219,20 +2288,18 @@ InferenceEngine::prepare_graph_inputs(const Topology& topology) {
             latency_norm = latency_sum[i] / out_count[i];
         }
 
-        node_features.push_back(static_cast<float>(cpu_ratio));
-        node_features.push_back(static_cast<float>(mem_ratio));
-        node_features.push_back(static_cast<float>(disk_ratio));
-        node_features.push_back(static_cast<float>(clamp01(node.core_network_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.node_reliability)));
-        node_features.push_back(static_cast<float>(active_ratio));
-        node_features.push_back(static_cast<float>(bw_ratio));
-        node_features.push_back(static_cast<float>(std::min(5.0, std::max(0.0, latency_norm))));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.signaling_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.session_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.user_plane_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.mobility_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.policy_load)));
-        node_features.push_back(static_cast<float>(clamp01(node.core_business_load.auth_load)));
+        const std::vector<float> base = {
+            static_cast<float>(cpu_ratio),
+            static_cast<float>(mem_ratio),
+            static_cast<float>(disk_ratio),
+            0.0f,
+            static_cast<float>(clamp01(node.node_reliability)),
+            static_cast<float>(active_ratio),
+            static_cast<float>(bw_ratio),
+            static_cast<float>(std::min(5.0, std::max(0.0, latency_norm))),
+        };
+        const auto fitted = fit_feature_dim(base, node_feature_dim_);
+        node_features.insert(node_features.end(), fitted.begin(), fitted.end());
     }
 
     return {node_features, edge_index};
@@ -2245,7 +2312,10 @@ std::vector<float> InferenceEngine::run_gnn_encoder(
 ) {
     if (num_nodes == 0) return {};
 
-    std::vector<int64_t> node_shape = {static_cast<int64_t>(num_nodes), kNodeFeatureDim};
+    std::vector<int64_t> node_shape = {
+        static_cast<int64_t>(num_nodes),
+        static_cast<int64_t>(std::max<size_t>(1, node_feature_dim_))
+    };
     std::vector<int64_t> edge_shape = {2, static_cast<int64_t>(edge_index.size() / 2)};
 
     try {
@@ -2271,6 +2341,7 @@ std::vector<float> InferenceEngine::run_gnn_encoder(
 
         const float* output_data = output_tensors[0].GetTensorData<float>();
         const auto output_shape = output_tensors[0].GetTensorTypeAndShapeInfo().GetShape();
+        node_embedding_dim_ = positive_last_dim_or(output_shape, node_embedding_dim_);
         size_t output_size = std::accumulate(
             output_shape.begin(), output_shape.end(), static_cast<size_t>(1), std::multiplies<size_t>());
         return std::vector<float>(output_data, output_data + output_size);
@@ -2289,15 +2360,25 @@ std::vector<float> InferenceEngine::run_actor_policy(
     if (candidate_indices.empty()) return {};
     if (node_embeddings.empty()) return {};
 
-    const size_t num_nodes = node_embeddings.size() / 192;
+    const size_t emb_dim = std::max<size_t>(1, node_embedding_dim_);
+    if (node_embeddings.size() % emb_dim != 0) {
+        spdlog::warn(
+            "Actor input node_embeddings size mismatch: total={} not divisible by emb_dim={}",
+            node_embeddings.size(),
+            emb_dim
+        );
+        return {};
+    }
+    const size_t num_nodes = node_embeddings.size() / emb_dim;
     if (num_nodes == 0) return {};
 
-    std::vector<int64_t> emb_shape = {static_cast<int64_t>(num_nodes), 192};
-    std::vector<int64_t> cand_shape = {static_cast<int64_t>(candidate_indices.size())};
-    std::vector<int64_t> vnf_shape = {kVnfFeatureDim};
-    std::vector<int64_t> ctx_shape = {kContextFeatureDim};
+    const std::vector<float> fitted_vnf = fit_feature_dim(vnf_features, std::max<size_t>(1, vnf_feature_dim_));
+    const std::vector<float> fitted_ctx = fit_feature_dim(context_features, std::max<size_t>(1, context_feature_dim_));
 
-    try {
+    std::vector<int64_t> emb_shape = {static_cast<int64_t>(num_nodes), static_cast<int64_t>(emb_dim)};
+    std::vector<int64_t> cand_shape = {static_cast<int64_t>(candidate_indices.size())};
+
+    auto run_once = [&](const std::vector<float>& vnf_in, const std::vector<float>& ctx_in) -> std::vector<float> {
         std::vector<Ort::Value> input_tensors;
         input_tensors.push_back(Ort::Value::CreateTensor<float>(
             memory_info_,
@@ -2311,18 +2392,20 @@ std::vector<float> InferenceEngine::run_actor_policy(
             candidate_indices.size(),
             cand_shape.data(),
             cand_shape.size()));
+        std::vector<int64_t> local_vnf_shape = {static_cast<int64_t>(vnf_in.size())};
+        std::vector<int64_t> local_ctx_shape = {static_cast<int64_t>(ctx_in.size())};
         input_tensors.push_back(Ort::Value::CreateTensor<float>(
             memory_info_,
-            const_cast<float*>(vnf_features.data()),
-            vnf_features.size(),
-            vnf_shape.data(),
-            vnf_shape.size()));
+            const_cast<float*>(vnf_in.data()),
+            vnf_in.size(),
+            local_vnf_shape.data(),
+            local_vnf_shape.size()));
         input_tensors.push_back(Ort::Value::CreateTensor<float>(
             memory_info_,
-            const_cast<float*>(context_features.data()),
-            context_features.size(),
-            ctx_shape.data(),
-            ctx_shape.size()));
+            const_cast<float*>(ctx_in.data()),
+            ctx_in.size(),
+            local_ctx_shape.data(),
+            local_ctx_shape.size()));
 
         const char* input_names[] = {"node_embeddings", "candidate_indices", "vnf_features", "context_features"};
         const char* output_names[] = {"probs", "logits"};
@@ -2331,8 +2414,41 @@ std::vector<float> InferenceEngine::run_actor_policy(
 
         const float* probs = output_tensors[0].GetTensorData<float>();
         return std::vector<float>(probs, probs + candidate_indices.size());
+    };
+
+    try {
+        return run_once(fitted_vnf, fitted_ctx);
     } catch (const Ort::Exception& e) {
-        spdlog::error("Actor inference failed: {}", e.what());
+        const std::string err = e.what();
+        auto expected_vnf = parse_expected_dim_from_error(err, "vnf_features");
+        auto expected_ctx = parse_expected_dim_from_error(err, "context_features");
+        bool can_retry = false;
+        std::vector<float> retry_vnf = fitted_vnf;
+        std::vector<float> retry_ctx = fitted_ctx;
+        if (expected_vnf && *expected_vnf > 0 && *expected_vnf != retry_vnf.size()) {
+            retry_vnf = fit_feature_dim(vnf_features, *expected_vnf);
+            can_retry = true;
+        }
+        if (expected_ctx && *expected_ctx > 0 && *expected_ctx != retry_ctx.size()) {
+            retry_ctx = fit_feature_dim(context_features, *expected_ctx);
+            can_retry = true;
+        }
+        if (can_retry) {
+            try {
+                const auto probs = run_once(retry_vnf, retry_ctx);
+                if (expected_vnf && *expected_vnf > 0) vnf_feature_dim_ = *expected_vnf;
+                if (expected_ctx && *expected_ctx > 0) context_feature_dim_ = *expected_ctx;
+                spdlog::warn(
+                    "Actor inference recovered by dynamic dim fallback: vnf={} context={}",
+                    retry_vnf.size(),
+                    retry_ctx.size()
+                );
+                return probs;
+            } catch (const Ort::Exception& retry_err) {
+                spdlog::error("Actor inference retry failed: {}", retry_err.what());
+            }
+        }
+        spdlog::error("Actor inference failed: {}", err);
         return {};
     }
 }

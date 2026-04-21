@@ -20,11 +20,15 @@ public:
     ADD_METHOD_TO(TopologyController::generateTopology, "/api/v1/topology/generate", Post);
     ADD_METHOD_TO(TopologyController::getSatellites, "/api/v1/satellites", Get);
     ADD_METHOD_TO(TopologyController::getSatellite, "/api/v1/satellite/{id}", Get);
+    ADD_METHOD_TO(TopologyController::deleteSatellite, "/api/v1/satellite/{id}", Delete);
     ADD_METHOD_TO(TopologyController::startDynamicSimulation, "/api/v1/topology/dynamic/start", Post);
     ADD_METHOD_TO(TopologyController::stopDynamicSimulation, "/api/v1/topology/dynamic/stop", Post);
     ADD_METHOD_TO(TopologyController::stepDynamicSimulation, "/api/v1/topology/dynamic/step", Post);
     ADD_METHOD_TO(TopologyController::injectDynamicFaults, "/api/v1/topology/dynamic/faults/inject", Post);
     ADD_METHOD_TO(TopologyController::getDynamicSimulationStatus, "/api/v1/topology/dynamic/status", Get);
+    ADD_METHOD_TO(TopologyController::getRuntimeEvents, "/api/v1/runtime/events", Get);
+    ADD_METHOD_TO(TopologyController::getControlConfig, "/api/v1/runtime/config", Get);
+    ADD_METHOD_TO(TopologyController::updateControlConfig, "/api/v1/runtime/config", Put);
     METHOD_LIST_END
     
     void getTopology(const HttpRequestPtr& req,
@@ -40,6 +44,10 @@ public:
                      std::function<void(const HttpResponsePtr&)>&& callback,
                      const std::string& id);
 
+    void deleteSatellite(const HttpRequestPtr& req,
+                         std::function<void(const HttpResponsePtr&)>&& callback,
+                         const std::string& id);
+
     void startDynamicSimulation(const HttpRequestPtr& req,
                                 std::function<void(const HttpResponsePtr&)>&& callback);
 
@@ -54,6 +62,15 @@ public:
 
     void getDynamicSimulationStatus(const HttpRequestPtr& req,
                                     std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void getRuntimeEvents(const HttpRequestPtr& req,
+                          std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void getControlConfig(const HttpRequestPtr& req,
+                          std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void updateControlConfig(const HttpRequestPtr& req,
+                             std::function<void(const HttpResponsePtr&)>&& callback);
 };
 
 } // namespace sfc

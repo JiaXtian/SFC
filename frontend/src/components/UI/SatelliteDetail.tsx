@@ -70,15 +70,6 @@ export default function SatelliteDetail() {
   const memAvail = Number(sat?.mem_available ?? 0)
   const diskTotal = Number((sat as any)?.disk_total ?? 0)
   const diskAvail = Number((sat as any)?.disk_available ?? 0)
-  const fallbackBusinessLoad = Number((sat as any)?.core_network_load ?? 0.5)
-  const businessLoad = (sat as any)?.core_business_load ?? {
-    signaling_load: fallbackBusinessLoad,
-    session_load: fallbackBusinessLoad,
-    user_plane_load: fallbackBusinessLoad,
-    mobility_load: fallbackBusinessLoad,
-    policy_load: fallbackBusinessLoad,
-    auth_load: fallbackBusinessLoad,
-  }
 
   const cpuUsed = Math.max(0, cpuTotal - cpuAvail)
   const memUsed = Math.max(0, memTotal - memAvail)
@@ -266,30 +257,6 @@ export default function SatelliteDetail() {
               </div>
               <Bar val={diskUsed} max={diskTotal} />
             </div>
-          </div>
-        </div>
-
-        <div>
-          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
-            <Zap className="w-3 h-3" />核心网业务负载
-          </div>
-          <div className="space-y-1.5">
-            {[
-              ['信令', Number(businessLoad.signaling_load ?? fallbackBusinessLoad)],
-              ['会话', Number(businessLoad.session_load ?? fallbackBusinessLoad)],
-              ['用户面', Number(businessLoad.user_plane_load ?? fallbackBusinessLoad)],
-              ['移动性', Number(businessLoad.mobility_load ?? fallbackBusinessLoad)],
-              ['策略', Number(businessLoad.policy_load ?? fallbackBusinessLoad)],
-              ['鉴权', Number(businessLoad.auth_load ?? fallbackBusinessLoad)],
-            ].map(([label, value]) => (
-              <div key={String(label)}>
-                <div className="flex justify-between text-[10px] mb-1">
-                  <span className="text-gray-500">{label}</span>
-                  <span className="text-gray-300 font-mono">{(Number(value) * 100).toFixed(0)}%</span>
-                </div>
-                <Bar val={Number(value)} max={1} />
-              </div>
-            ))}
           </div>
         </div>
 

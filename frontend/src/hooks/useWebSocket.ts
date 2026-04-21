@@ -191,6 +191,14 @@ export function useWebSocket() {
               )
               return
             }
+            if (type) {
+              pushRuntimeEvent({
+                type,
+                sim_time: data.sim_time,
+                message: String(data.message ?? `系统事件: ${type}`),
+                raw: data,
+              })
+            }
           } catch {
             // ignore
           }

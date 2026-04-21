@@ -145,13 +145,13 @@ function EarthContent({
           <meshStandardMaterial
             map={useMap}
             color="#ffffff"
-            roughness={1}
+            roughness={0.94}
             metalness={0}
-            emissive="#042138"
-            emissiveIntensity={0.1}
+            emissive="#0a385f"
+            emissiveIntensity={0.22}
           />
         ) : (
-          <meshPhongMaterial color="#042b4d" shininess={14} specular={new THREE.Color(0x1f4260)} />
+          <meshPhongMaterial color="#0b4774" shininess={20} specular={new THREE.Color(0x2d678f)} />
         )}
       </Sphere>
 

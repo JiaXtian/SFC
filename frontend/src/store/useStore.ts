@@ -299,6 +299,7 @@ interface Store {
   bumpTopologyVersion: () => void
   setTopologyVersion: (v: number) => void
   setBackendTopologySynced: (synced: boolean) => void
+  setDeployments: (deployments: Deployment[]) => void
   addDeployment: (d: Deployment) => void
   updateDeployment: (id: string, p: Partial<Deployment>) => void
   removeDeployment: (id: string) => void
@@ -318,6 +319,7 @@ interface Store {
   applyTopologySnapshot: (snapshot: any) => void
   pushDecisionTrace: (trace: DecisionTrace) => void
   pushRuntimeEvent: (evt: Omit<RuntimeEvent, 'id'>) => void
+  replaceRuntimeEvents: (events: RuntimeEvent[]) => void
   upsertSessionDeploymentFromTrace: (trace: DecisionTrace) => void
   suppressSessionDeployment: (sessionId: string) => void
 }
@@ -850,6 +852,13 @@ export const useStore = create<Store>((set, get) => ({
   bumpTopologyVersion: () => set((s) => ({ topologyVersion: s.topologyVersion + 1 })),
   setTopologyVersion: (v) => set({ topologyVersion: v }),
   setBackendTopologySynced: (synced) => set({ backendTopologySynced: synced }),
+  setDeployments: (deployments) => {
+    set(() => ({
+      deployments: Array.isArray(deployments) ? deployments : [],
+      highlightedDeploymentIds: [],
+    }))
+    get().refreshDeploymentPaths()
+  },
   addDeployment: (d) => set((s) => {
     const idx = s.deployments.findIndex((x) => x.deployment_id === d.deployment_id)
     if (idx >= 0) {
@@ -1040,6 +1049,9 @@ export const useStore = create<Store>((set, get) => ({
   })),
   pushRuntimeEvent: (evt) => set((s) => ({
     runtimeEvents: [{ ...evt, id: `${Date.now()}_${Math.random().toString(16).slice(2, 6)}` }, ...s.runtimeEvents].slice(0, 120),
+  })),
+  replaceRuntimeEvents: (events) => set(() => ({
+    runtimeEvents: Array.isArray(events) ? events.slice(0, 200) : [],
   })),
   upsertSessionDeploymentFromTrace: (trace) => set((s) => {
     if (trace.mode !== 'session_continuous' || !trace.session_id) return {}

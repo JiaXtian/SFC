@@ -1,9 +1,23 @@
 #include "websocket/WSHandler.h"
 #include "services/AuthGlobals.h"
 #include "services/AuthService.h"
+#include "services/RuntimeStateService.h"
 #include <spdlog/spdlog.h>
 
 namespace sfc {
+namespace {
+
+bool should_persist_event(const nlohmann::json& payload) {
+    if (!payload.is_object()) return false;
+    const std::string type = payload.value("type", "");
+    if (type.empty()) return false;
+    if (type == "topology_tick" || type == "metrics_tick" || type == "orchestration_metrics_tick") {
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 std::set<WebSocketConnectionPtr> WSHandler::connections_{};
 std::mutex WSHandler::connections_mutex_{};
@@ -34,18 +48,20 @@ void WSHandler::handleNewConnection(
         }
     }
 
-    if (!g_auth_service || token.empty() || !g_auth_service->verify_token(token)) {
-        spdlog::warn("WebSocket rejected: unauthorized {}", wsConnPtr->peerAddr().toIpPort());
-        wsConnPtr->shutdown();
-        return;
+    bool logged_in = false;
+    if (!token.empty() && g_auth_service && g_auth_service->verify_token(token)) {
+        logged_in = true;
+    } else if (!token.empty()) {
+        spdlog::warn("WebSocket token verification failed, fallback to guest: {}", wsConnPtr->peerAddr().toIpPort());
     }
 
     std::lock_guard<std::mutex> lock(connections_mutex_);
     connections_.insert(wsConnPtr);
     
-    spdlog::info("WebSocket connected: {} (total: {})",
+    spdlog::info("WebSocket connected: {} (total: {}, mode={})",
                 wsConnPtr->peerAddr().toIpPort(),
-                connections_.size());
+                connections_.size(),
+                logged_in ? "auth" : "guest");
 }
 
 void WSHandler::handleConnectionClosed(const WebSocketConnectionPtr& wsConnPtr) {
@@ -68,6 +84,9 @@ void WSHandler::broadcast(const std::string& message) {
 }
 
 void WSHandler::broadcast_json(const nlohmann::json& payload) {
+    if (g_runtime_state_service && should_persist_event(payload)) {
+        g_runtime_state_service->append_runtime_event(payload);
+    }
     broadcast(payload.dump());
 }
 

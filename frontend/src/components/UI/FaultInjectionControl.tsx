@@ -47,19 +47,26 @@ function readNodeFaults(status: any): ActiveFault[] {
 export default function FaultInjectionControl() {
   const {
     simulation,
+    autoDynamics,
     satellites,
     setSimulationStatus,
+    setAutoDynamics,
     addToast,
   } = useStore((s) => ({
     simulation: s.simulation,
+    autoDynamics: s.autoDynamics,
     satellites: s.satellites,
     setSimulationStatus: s.setSimulationStatus,
+    setAutoDynamics: s.setAutoDynamics,
     addToast: s.addToast,
   }))
 
   const [injectingFaults, setInjectingFaults] = useState(false)
   const [managingFaults, setManagingFaults] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [savingControl, setSavingControl] = useState(false)
+  const [resourceSamplingSec, setResourceSamplingSec] = useState<number>(Math.max(1, Number(autoDynamics.resource_update_sec || 5)))
+  const [simulationSpeed, setSimulationSpeed] = useState<number>(Math.max(0.1, Number(autoDynamics.time_scale || 1)))
 
   const [nodeFaultCatalog, setNodeFaultCatalog] = useState<string[]>([])
   const [activeFaults, setActiveFaults] = useState<ActiveFault[]>([])
@@ -96,6 +103,8 @@ export default function FaultInjectionControl() {
         sampling_interval_sec: Number(status?.sampling_interval_sec ?? simulation.sampling_interval_sec ?? 5),
         simulation_speed: Number(status?.simulation_speed ?? simulation.simulation_speed ?? 1),
       })
+      setResourceSamplingSec(Math.max(1, Math.min(60, Number(status?.control_config?.resource_sampling_interval_sec ?? status?.sampling_interval_sec ?? resourceSamplingSec))))
+      setSimulationSpeed(Math.max(0.1, Math.min(20, Number(status?.control_config?.simulation_speed ?? status?.simulation_speed ?? simulationSpeed))))
 
       const nodeFaults = Array.isArray(status?.fault_catalog?.node)
         ? status.fault_catalog.node.map((x: any) => String(x))
@@ -118,6 +127,33 @@ export default function FaultInjectionControl() {
       window.clearInterval(poller)
     }
   }, [])
+
+  const applyControlConfig = async () => {
+    setSavingControl(true)
+    try {
+      const sampling = Math.max(1, Math.min(60, Number(resourceSamplingSec || 5)))
+      const speed = Math.max(0.1, Math.min(20, Number(simulationSpeed || 1)))
+      await apiClient.updateControlConfig({
+        resource_sampling_interval_sec: sampling,
+        simulation_speed: speed,
+        apply_now: true,
+      })
+      setAutoDynamics({
+        resource_update_sec: sampling,
+        time_scale: speed,
+      })
+      setSimulationStatus({
+        sampling_interval_sec: sampling,
+        simulation_speed: speed,
+      })
+      addToast('资源感知采样配置已更新', 'success')
+      await refreshStatus(true)
+    } catch (e: any) {
+      addToast(`采样配置更新失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setSavingControl(false)
+    }
+  }
 
   const addManualIds = (raw: string) => {
     const parsed = splitIds(raw)
@@ -269,6 +305,48 @@ export default function FaultInjectionControl() {
       </div>
 
       <div className="flex-1 overflow-y-auto pr-1.5 space-y-3 text-[12px]">
+        <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2.5">
+          <div className="text-slate-200 inline-flex items-center gap-1.5">
+            <ListChecks className="w-3.5 h-3.5 text-cyan-300" />资源感知采样配置
+          </div>
+          <div className="text-[11px] text-slate-400">
+            该配置决定系统读取数据库中卫星资源状态的频率，同时用于动态链路/节点状态写库节奏。建议 3~10 秒。
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="space-y-1">
+              <div className="text-slate-400">采样间隔（秒）</div>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                step={1}
+                value={resourceSamplingSec}
+                onChange={(e) => setResourceSamplingSec(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
+                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200"
+              />
+            </label>
+            <label className="space-y-1">
+              <div className="text-slate-400">仿真速率（x）</div>
+              <input
+                type="number"
+                min={0.1}
+                max={20}
+                step={0.1}
+                value={simulationSpeed}
+                onChange={(e) => setSimulationSpeed(Math.max(0.1, Math.min(20, Number(e.target.value) || 0.1)))}
+                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200"
+              />
+            </label>
+          </div>
+          <button
+            onClick={applyControlConfig}
+            disabled={savingControl}
+            className="w-full h-9 rounded-lg text-cyan-100 bg-cyan-500/15 border border-cyan-500/35 disabled:opacity-60"
+          >
+            {savingControl ? '保存中...' : '保存并应用采样配置'}
+          </button>
+        </section>
+
         <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2.5">
           <div className="text-slate-200 inline-flex items-center gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />手动注入

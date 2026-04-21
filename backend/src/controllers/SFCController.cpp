@@ -1,4 +1,6 @@
 #include "controllers/SFCController.h"
+#include "services/AuthGlobals.h"
+#include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
 #include "websocket/WSHandler.h"
 #include <spdlog/spdlog.h>
@@ -16,8 +18,25 @@
 namespace sfc {
 
 // 全局部署列表
-static std::vector<Deployment> g_deployments;
+static std::vector<nlohmann::json> g_deployments;
 static std::mutex g_deployments_mutex;
+
+void sync_deployments_from_db_locked() {
+    if (!g_runtime_state_service) return;
+    nlohmann::json stored = g_runtime_state_service->load_deployments_json();
+    if (!stored.is_array()) return;
+    g_deployments.clear();
+    for (const auto& item : stored) {
+        if (item.is_object()) g_deployments.push_back(item);
+    }
+}
+
+void persist_deployments_locked() {
+    if (!g_runtime_state_service) return;
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& dep : g_deployments) arr.push_back(dep);
+    g_runtime_state_service->save_deployments_json(arr);
+}
 
 struct CoreNFProfile {
     std::string nf_role;
@@ -520,6 +539,17 @@ void SFCController::plan(
                 {"message", "No candidate returned by inference engine"},
                 {"decision_process", decision_process}
             });
+            WSHandler::broadcast_json({
+                {"type", "planning_result"},
+                {"request_id", sfc_request.request_id},
+                {"status", "failed"},
+                {"deployable_count", 0},
+                {"returned_topk", 0},
+                {"fallback_only", true},
+                {"sim_time", topology.metadata.sim_time},
+                {"topology_version", topology.metadata.topology_version},
+                {"message", "No SLA-feasible candidate returned by inference engine"}
+            });
             
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k200OK);  // 返回200但标记为无可行方案
@@ -651,6 +681,19 @@ void SFCController::plan(
             {"candidates", trace_candidates},
             {"decision_process", decision_process}
         });
+        WSHandler::broadcast_json({
+            {"type", "planning_result"},
+            {"request_id", sfc_request.request_id},
+            {"status", feasible_candidates.empty() ? "fallback_only" : "success"},
+            {"deployable_count", static_cast<int>(feasible_candidates.size())},
+            {"returned_topk", static_cast<int>(response_candidates.size())},
+            {"fallback_only", feasible_candidates.empty()},
+            {"sim_time", topology.metadata.sim_time},
+            {"topology_version", topology.metadata.topology_version},
+            {"message", feasible_candidates.empty()
+                ? "No fully SLA-feasible plan; fallback candidates returned"
+                : "Planning completed with deployable candidates"}
+        });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);
@@ -770,41 +813,104 @@ void SFCController::deploy(
         // 保存更新后的拓扑
         auto updated_topology = g_res_mgr->export_current_topology();
         g_topo_mgr->save_current_topology(updated_topology);
+        if (g_runtime_state_service) {
+            g_runtime_state_service->save_topology(updated_topology, "");
+        }
         
         spdlog::info("✓ Deployment {} completed: {} core NFs on {} nodes",
                     deployment_id, candidate.per_vnf.size(), candidate.deployed_nodes.size());
 
+        nlohmann::json dep_json = nlohmann::json::object();
+        dep_json["deployment_id"] = deployment_id;
+        dep_json["backend_deployment_id"] = deployment_id;
+        dep_json["request_id"] = request_id;
+        dep_json["candidate_index"] = (*json).get("candidate_index", 0).asInt();
+        dep_json["status"] = "completed";
+        dep_json["progress"] = 100;
+        dep_json["deployed_nodes"] = candidate.deployed_nodes;
+        dep_json["total_latency_ms"] = candidate.total_latency_ms;
+        dep_json["score_total"] = candidate.score;
+        dep_json["satisfies_constraints"] = candidate.satisfies_constraints;
+        dep_json["bottleneck_bandwidth_gbps"] = candidate.bottleneck_bandwidth_gbps;
+        dep_json["estimated_reliability"] = candidate.estimated_reliability;
+        dep_json["strategy_mode"] = "single_request";
+        dep_json["sfc_name"] = (*json).get("sfc_name", request_id).asString();
+        dep_json["source_node"] = (*json).get("source_node", "").asString();
+        dep_json["destination_node"] = (*json).get("destination_node", "").asString();
+
+        auto now_ts = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now_ts);
+        char buf[100];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t));
+        dep_json["deployed_at"] = buf;
+
+        nlohmann::json per_vnf_json = nlohmann::json::array();
+        for (const auto& pv : candidate.per_vnf) {
+            const std::string core_nf = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+            const std::string nf_type = pv.nf_type.empty() ? core_nf : pv.nf_type;
+            per_vnf_json.push_back({
+                {"vnf", pv.vnf},
+                {"core_nf", core_nf},
+                {"nf_type", nf_type},
+                {"nf_role", pv.nf_role.empty() ? "control_plane" : pv.nf_role},
+                {"node", pv.node},
+                {"cpu_used", pv.cpu_used},
+                {"mem_used", pv.mem_used},
+                {"disk_used", pv.disk_used},
+            });
+        }
+        dep_json["per_vnf"] = per_vnf_json;
+        dep_json["per_core_nf"] = per_vnf_json;
+
+        nlohmann::json links_json = nlohmann::json::array();
+        for (const auto& ld : candidate.link_details) {
+            links_json.push_back({
+                {"src", ld.src},
+                {"dst", ld.dst},
+                {"latency_ms", ld.latency_ms},
+                {"bandwidth_gbps", ld.bandwidth_gbps},
+                {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
+                {"bandwidth_required_gbps", ld.bandwidth_required_gbps},
+                {"status", ld.status},
+                {"reliability", ld.reliability},
+            });
+        }
+        dep_json["link_details"] = links_json;
+
+        if (json->isMember("candidate")) {
+            const auto& raw_candidate = (*json)["candidate"];
+            if (raw_candidate.isMember("violation_details")) {
+                try {
+                    dep_json["violation_details"] = nlohmann::json::parse(
+                        raw_candidate["violation_details"].toStyledString()
+                    );
+                } catch (...) {
+                    dep_json["violation_details"] = nlohmann::json::array();
+                }
+            }
+            dep_json["reason"] = raw_candidate.get("reason", "").asString();
+            if (dep_json.value("source_node", "").empty()) {
+                dep_json["source_node"] = raw_candidate.get("source_node", "").asString();
+            }
+            if (dep_json.value("destination_node", "").empty()) {
+                dep_json["destination_node"] = raw_candidate.get("destination_node", "").asString();
+            }
+        }
+
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
-            Deployment dep;
-            dep.deployment_id = deployment_id;
-            dep.request_id = request_id;
-            dep.candidate_index = (*json).get("candidate_index", 0).asInt();
-            dep.status = "completed";
-            dep.deployed_nodes = candidate.deployed_nodes;
-            dep.total_latency_ms = candidate.total_latency_ms;
-            dep.progress = 100;
-            auto now_ts = std::chrono::system_clock::now();
-            auto time_t = std::chrono::system_clock::to_time_t(now_ts);
-            char buf[100];
-            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t));
-            dep.deployed_at = buf;
-            for (const auto& pv : candidate.per_vnf) {
-                VNFDeployment d;
-                d.vnf_id = pv.vnf;
-                d.vnf_type = pv.nf_type.empty() ? pv.vnf : pv.nf_type;
-                d.core_nf_id = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
-                d.core_nf_type = pv.nf_type.empty() ? d.core_nf_id : pv.nf_type;
-                d.nf_role = pv.nf_role.empty() ? "control_plane" : pv.nf_role;
-                d.resource_profile = get_core_nf_profile(d.core_nf_type).resource_profile;
-                d.node = pv.node;
-                d.cpu_used = pv.cpu_used;
-                d.mem_used = pv.mem_used;
-                d.disk_used = pv.disk_used;
-                d.sfc_id = request_id;
-                dep.per_vnf.push_back(std::move(d));
-            }
-            g_deployments.push_back(std::move(dep));
+            sync_deployments_from_db_locked();
+            g_deployments.erase(
+                std::remove_if(
+                    g_deployments.begin(),
+                    g_deployments.end(),
+                    [&](const nlohmann::json& dep) {
+                        return dep.value("deployment_id", "") == deployment_id;
+                    }),
+                g_deployments.end()
+            );
+            g_deployments.push_back(dep_json);
+            persist_deployments_locked();
         }
         
         Json::Value response;
@@ -820,6 +926,17 @@ void SFCController::deploy(
             {"progress", 100},
             {"topology_version", updated_topology.metadata.topology_version},
             {"sim_time", updated_topology.metadata.sim_time}
+        });
+        WSHandler::broadcast_json({
+            {"type", "deployment_action"},
+            {"sim_time", updated_topology.metadata.sim_time},
+            {"level", "success"},
+            {"title", "SFC部署完成"},
+            {"message", "SFC deployment committed"},
+            {"detail", "deployment_id=" + deployment_id + ", request_id=" + request_id},
+            {"deployment_id", deployment_id},
+            {"request_id", request_id},
+            {"topology_version", updated_topology.metadata.topology_version}
         });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
@@ -856,33 +973,59 @@ void SFCController::rollback(
         std::string deployment_id = (*json).get("deployment_id", "").asString();
         
         bool success = g_res_mgr->release_resources(deployment_id);
+        bool removed_record = false;
         
         if (success) {
             auto updated_topology = g_res_mgr->export_current_topology();
             g_topo_mgr->save_current_topology(updated_topology);
+            if (g_runtime_state_service) {
+                g_runtime_state_service->save_topology(updated_topology, "");
+            }
             
             spdlog::info("✓ Deployment {} rolled back", deployment_id);
-
+        }
+        {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
+            sync_deployments_from_db_locked();
+            const auto before = g_deployments.size();
             g_deployments.erase(
                 std::remove_if(
                     g_deployments.begin(),
                     g_deployments.end(),
-                    [&](const Deployment& dep) { return dep.deployment_id == deployment_id; }
-                ),
+                    [&](const nlohmann::json& dep) {
+                        return dep.value("deployment_id", "") == deployment_id ||
+                               dep.value("backend_deployment_id", "") == deployment_id;
+                    }),
                 g_deployments.end()
             );
+            removed_record = g_deployments.size() < before;
+            if (removed_record) {
+                persist_deployments_locked();
+            }
+        }
+        if (!success && removed_record) {
+            success = true;
+            spdlog::info("Deployment {} record removed from persistent store", deployment_id);
         }
         
         Json::Value response;
         response["status"] = success ? "success" : "failed";
         response["message"] = success ? "Deployment rolled back" : "Deployment not found";
+        response["removed_record"] = removed_record;
 
         WSHandler::broadcast_json({
             {"type", "deployment_update"},
             {"deployment_id", deployment_id},
             {"status", success ? "rolled_back" : "rollback_failed"},
             {"progress", success ? 100 : 0}
+        });
+        WSHandler::broadcast_json({
+            {"type", "deployment_action"},
+            {"level", success ? "warning" : "error"},
+            {"title", success ? "SFC回滚完成" : "SFC回滚失败"},
+            {"message", success ? "Deployment rollback completed" : "Deployment rollback failed"},
+            {"detail", "deployment_id=" + deployment_id},
+            {"deployment_id", deployment_id}
         });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
@@ -905,10 +1048,11 @@ void SFCController::getDeployments(
 ) {
     try {
         std::lock_guard<std::mutex> lock(g_deployments_mutex);
+        sync_deployments_from_db_locked();
         
         Json::Value deployments_json(Json::arrayValue);
         for (const auto& deployment : g_deployments) {
-            deployments_json.append(nlohmann_to_jsoncpp(deployment.to_json()));
+            deployments_json.append(nlohmann_to_jsoncpp(deployment));
         }
         
         auto resp = HttpResponse::newHttpJsonResponse(deployments_json);

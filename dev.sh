@@ -59,12 +59,109 @@ build_backend() {
   cmake --build "${BACKEND_BUILD_DIR}" -j
 }
 
+ensure_mysql_ready() {
+  local mysql_container="sfc-mysql"
+  local mysql_network="sfc-net"
+  local mysql_data_dir="${RUNTIME_DIR}/mysql"
+  local start_output=""
+  local start_rc=0
+
+  create_mysql_container() {
+    local data_dir="$1"
+    mkdir -p "${data_dir}"
+    docker network inspect "${mysql_network}" >/dev/null 2>&1 || docker network create "${mysql_network}" >/dev/null
+    docker run -d \
+      --name "${mysql_container}" \
+      --network "${mysql_network}" \
+      -e MYSQL_ROOT_PASSWORD=root123456 \
+      -e MYSQL_DATABASE=sfc_runtime \
+      -e MYSQL_USER=sfc \
+      -e MYSQL_PASSWORD=sfc123456 \
+      -v "${data_dir}:/var/lib/mysql" \
+      mysql:8.0 \
+      --character-set-server=utf8mb4 \
+      --collation-server=utf8mb4_unicode_ci >/dev/null
+  }
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "docker command not found, cannot start backend without MySQL" >&2
+    exit 1
+  fi
+
+  if docker ps -a --format '{{.Names}}' | grep -q "^${mysql_container}$"; then
+    if ! docker ps --format '{{.Names}}' | grep -q "^${mysql_container}$"; then
+      echo "starting MySQL container (${mysql_container})..."
+      start_output="$(docker start "${mysql_container}" 2>&1)" || start_rc=$?
+      if [[ ${start_rc} -ne 0 ]]; then
+        echo "MySQL start failed, recreating container: ${start_output}"
+        local existing_data_dir
+        existing_data_dir="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Source}}{{end}}{{end}}' "${mysql_container}" 2>/dev/null || true)"
+        docker rm "${mysql_container}" >/dev/null 2>&1 || true
+        if [[ -n "${existing_data_dir}" ]]; then
+          mysql_data_dir="${existing_data_dir}"
+        fi
+        create_mysql_container "${mysql_data_dir}"
+      fi
+    fi
+  else
+    echo "MySQL container not found, creating ${mysql_container}..."
+    create_mysql_container "${mysql_data_dir}"
+  fi
+
+  echo "waiting MySQL ready..."
+  for _ in {1..60}; do
+    if docker exec "${mysql_container}" mysql -usfc -psfc123456 -e "SELECT 1;" >/dev/null 2>&1; then
+      echo "MySQL is ready"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "MySQL is not ready after timeout" >&2
+  exit 1
+}
+
+cleanup_stale_backend_listener() {
+  local listening_pids
+  listening_pids="$(lsof -tiTCP:8080 -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -z "${listening_pids}" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    local cmdline
+    cmdline="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+    if [[ "${cmdline}" == *"sfc_server"* ]]; then
+      echo "stopping stale backend listener on port 8080 (pid=${pid})..."
+      kill "${pid}" 2>/dev/null || true
+      for _ in {1..20}; do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+          break
+        fi
+        sleep 0.2
+      done
+      if kill -0 "${pid}" 2>/dev/null; then
+        kill -9 "${pid}" 2>/dev/null || true
+      fi
+    else
+      echo "port 8080 is occupied by a non-backend process (pid=${pid}): ${cmdline}" >&2
+      return 1
+    fi
+  done <<< "${listening_pids}"
+
+  return 0
+}
+
 start_backend() {
+  cleanup_stale_backend_listener
+
   if is_running "${BACKEND_PID_FILE}"; then
     echo "backend already running (pid=$(cat "${BACKEND_PID_FILE}"))"
     return 0
   fi
 
+  ensure_mysql_ready
   build_backend
   if [[ ! -x "${BACKEND_BIN}" ]]; then
     echo "backend binary not found: ${BACKEND_BIN}" >&2

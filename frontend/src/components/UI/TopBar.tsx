@@ -104,16 +104,14 @@ export default function TopBar() {
         </div>
 
         <div className="flex items-center gap-1.5 relative">
-          {user?.role === 'admin' && (
-            <button
-              onClick={gotoControlPage}
-              title="系统控制中心（新窗口）"
-              className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
-              style={iconBtnStyle}
-            >
-              <SlidersHorizontal className="w-4 h-4" />
-            </button>
-          )}
+          <button
+            onClick={gotoControlPage}
+            title="系统控制中心"
+            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+            style={iconBtnStyle}
+          >
+            <SlidersHorizontal className="w-4 h-4" />
+          </button>
           <button
             onClick={gotoMonitorPage}
             title="系统监控中心"
@@ -164,16 +162,18 @@ export default function TopBar() {
           </button>
           <div className="ml-1 px-2.5 h-7 rounded-full text-[11px] inline-flex items-center"
             style={{ background: 'rgba(8,31,52,0.5)', border: '1px solid rgba(125,211,252,0.24)', color: '#bae6fd' }}>
-            {user?.username ?? 'unknown'} · {user?.role === 'admin' ? '管理员' : '普通用户'}
+            {user ? `${user.username} · ${user.role === 'admin' ? '管理员' : '普通用户'}` : '访客模式'}
           </div>
-          <button
-            onClick={logout}
-            title="退出登录"
-            className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
-            style={iconBtnStyle}
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
+          {user && (
+            <button
+              onClick={logout}
+              title="退出登录"
+              className="h-8 w-8 rounded-full text-cyan-100 inline-flex items-center justify-center transition hover:bg-cyan-400/12 hover:text-cyan-200"
+              style={iconBtnStyle}
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </header>
       <SettingsModal isOpen={open} onClose={() => setOpen(false)} />

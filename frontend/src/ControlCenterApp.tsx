@@ -4,10 +4,12 @@ import SystemPopup from '@/components/UI/SystemPopup'
 import { useStore } from '@/store/useStore'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useAutoDynamics } from '@/hooks/useAutoDynamics'
+import { useBootstrapRuntime } from '@/hooks/useBootstrapRuntime'
 
 const CandidateModal = lazy(() => import('@/components/UI/CandidateModal'))
 
 export default function ControlCenterApp() {
+  useBootstrapRuntime()
   useWebSocket()
   useAutoDynamics()
   const candidateResult = useStore((s) => s.candidateResult)

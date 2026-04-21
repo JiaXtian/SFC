@@ -4,7 +4,6 @@ import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
 import { toChineseFailureList } from '@/utils/failureText'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
-import { useAuth } from '@/auth/AuthContext'
 
 function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0
@@ -23,8 +22,7 @@ const StatusLabel: Record<string, [string, string]> = {
 }
 
 export default function DeploymentPanel() {
-  const { user } = useAuth()
-  const canRollback = user?.role === 'admin'
+  const canRollback = false
   const {
     deployments,
     removeDeployment,

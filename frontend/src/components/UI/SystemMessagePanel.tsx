@@ -182,20 +182,64 @@ export default function SystemMessagePanel() {
 
         if (e.type === 'decision_trace') {
           const trig = String((e.raw as any)?.trigger ?? '')
-          if (!trig || ['session_start', 'topology_tick_bootstrap', 'manual_initial_candidate'].includes(trig)) return null
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
           const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
           const deployable = Number((e.raw as any)?.deployable_count ?? 0)
           const returned = Number((e.raw as any)?.returned_topk ?? 0)
+          const isBootstrap = ['session_start', 'topology_tick_bootstrap', 'manual_initial_candidate'].includes(trig)
+          if (!trig && !sid && !rid) {
+            return {
+              id: e.id,
+              time,
+              tone: deployable > 0 ? 'ok' : 'warn',
+              title: deployable > 0 ? '策略生成完成' : '策略生成失败',
+              text: deployable > 0
+                ? short(`已返回 ${returned} 个候选方案，可部署 ${deployable} 个`)
+                : short('未返回可部署方案，请检查资源、链路与约束配置'),
+            }
+          }
           return {
             id: e.id,
             time,
-            tone: deployable > 0 ? 'info' : 'warn',
-            title: deployable > 0 ? '路径重算完成' : '路径重算未通过',
+            tone: deployable > 0 ? (isBootstrap ? 'ok' : 'info') : 'warn',
+            title: deployable > 0
+              ? (isBootstrap ? '初始策略构建完成' : '路径重算完成')
+              : (isBootstrap ? '初始策略构建失败' : '路径重算未通过'),
             text: deployable > 0
               ? short(`${sfcLabel} 已生成可部署方案（${deployable}/${returned}）`)
               : short(`${sfcLabel} 未找到满足约束的可部署方案`),
+          }
+        }
+
+        if (e.type === 'planning_result') {
+          const status = String((e.raw as any)?.status ?? '')
+          const deployable = Number((e.raw as any)?.deployable_count ?? 0)
+          const returned = Number((e.raw as any)?.returned_topk ?? 0)
+          if (status === 'success') {
+            return {
+              id: e.id,
+              time,
+              tone: 'ok',
+              title: '策略规划成功',
+              text: short(`可部署方案 ${deployable} 个，返回候选 ${returned} 个`),
+            }
+          }
+          if (status === 'fallback_only') {
+            return {
+              id: e.id,
+              time,
+              tone: 'warn',
+              title: '策略仅返回回退候选',
+              text: short(`未满足全部SLA约束，返回候选 ${returned} 个用于定位分析`),
+            }
+          }
+          return {
+            id: e.id,
+            time,
+            tone: 'warn',
+            title: '策略规划失败',
+            text: short(String((e.raw as any)?.message ?? e.message)),
           }
         }
 
@@ -241,11 +285,55 @@ export default function SystemMessagePanel() {
               text: short(`${sfcLabel} 暂无可部署方案，系统将持续重算（${trig}）`),
             }
           }
+          if (st === 'stable') {
+            return {
+              id: e.id,
+              time,
+              tone: 'info',
+              title: '会话保持稳定',
+              text: short(`${sfcLabel} 当前路径保持稳定，无需迁移`),
+            }
+          }
           return null
         }
 
         if (e.type === 'deployment_update') {
-          return null
+          const status = String((e.raw as any)?.status ?? '')
+          const did = String((e.raw as any)?.deployment_id ?? '')
+          if (status === 'completed') {
+            return {
+              id: e.id,
+              time,
+              tone: 'ok',
+              title: '部署状态更新',
+              text: short(`部署 ${did} 已完成`),
+            }
+          }
+          if (status === 'rolled_back') {
+            return {
+              id: e.id,
+              time,
+              tone: 'warn',
+              title: '部署已回滚',
+              text: short(`部署 ${did} 已回滚并释放资源`),
+            }
+          }
+          if (status === 'rollback_failed') {
+            return {
+              id: e.id,
+              time,
+              tone: 'warn',
+              title: '回滚失败',
+              text: short(`部署 ${did} 回滚失败，请检查资源状态`),
+            }
+          }
+          return {
+            id: e.id,
+            time,
+            tone: 'info',
+            title: '部署进度更新',
+            text: short(`部署 ${did} 状态: ${status || 'unknown'}`),
+          }
         }
 
         if (e.type === 'deployment_action') {
@@ -255,6 +343,59 @@ export default function SystemMessagePanel() {
             tone: String((e.raw as any)?.level ?? 'info'),
             title: String((e.raw as any)?.title ?? '部署动作'),
             text: short(String((e.raw as any)?.detail ?? e.message)),
+          }
+        }
+
+        if (e.type === 'topology_replaced') {
+          return {
+            id: e.id,
+            time,
+            tone: 'warn',
+            title: '星座已重建',
+            text: short(
+              `模板 ${String((e.raw as any)?.constellation_template ?? 'unknown')} 已生效，` +
+              `当前 ${String((e.raw as any)?.total_nodes ?? '-') } 节点 / ${String((e.raw as any)?.total_links ?? '-') } 链路`
+            ),
+          }
+        }
+
+        if (e.type === 'satellite_deleted') {
+          return {
+            id: e.id,
+            time,
+            tone: 'warn',
+            title: '卫星节点删除',
+            text: short(`节点 ${String((e.raw as any)?.node_id ?? '-') } 已删除，相关部署已清理`),
+          }
+        }
+
+        if (e.type === 'ws') {
+          return {
+            id: e.id,
+            time,
+            tone: 'info',
+            title: '实时通道状态',
+            text: short(e.message),
+          }
+        }
+
+        if (e.type === 'playback_buffered') {
+          return {
+            id: e.id,
+            time,
+            tone: 'info',
+            title: '回放模式缓存',
+            text: short('当前处于回放模式，实时拓扑更新已进入缓冲'),
+          }
+        }
+
+        if (e.message) {
+          return {
+            id: e.id,
+            time,
+            tone: 'info',
+            title: `系统事件 · ${e.type || 'event'}`,
+            text: short(String(e.message)),
           }
         }
 

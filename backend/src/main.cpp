@@ -13,12 +13,15 @@
 #include "services/AuthGlobals.h"
 #include "services/AuthService.h"
 #include "services/UserService.h"
+#include "services/RuntimeStateService.h"
 #include <fstream>
 #include <filesystem>
 #include <vector>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 
 using namespace drogon;
@@ -33,6 +36,7 @@ namespace sfc {
     std::shared_ptr<DynamicInferenceService> g_dynamic_inference;
     std::shared_ptr<AuthService> g_auth_service;
     std::shared_ptr<UserService> g_user_service;
+    std::shared_ptr<RuntimeStateService> g_runtime_state_service;
 }
 
 struct Config {
@@ -139,19 +143,44 @@ std::string extract_bearer_token(const HttpRequestPtr& req) {
     return trim_copy(auth.substr(7));
 }
 
-bool is_public_api_path(const std::string& path) {
-    return path == "/api/v1/health" ||
-           path == "/api/v1/auth/login" ||
-           path == "/api/v1/auth/register";
+bool is_public_api_path(const HttpRequestPtr& req) {
+    const std::string path = req->path();
+    const auto method = req->method();
+    if (path == "/api/v1/health" ||
+        path == "/api/v1/auth/login" ||
+        path == "/api/v1/auth/register") {
+        return true;
+    }
+
+    if (method != Get) {
+        return false;
+    }
+
+    if (path == "/api/v1/topology" ||
+        path == "/api/v1/satellites" ||
+        path == "/api/v1/topology/dynamic/status" ||
+        path == "/api/v1/deployments" ||
+        path == "/api/v1/runtime/events" ||
+        path == "/api/v1/runtime/config") {
+        return true;
+    }
+    if (starts_with(path, "/api/v1/satellite/")) {
+        return true;
+    }
+    return false;
 }
 
-bool is_admin_only_path(const std::string& path) {
+bool is_admin_only_path(const HttpRequestPtr& req) {
+    const std::string path = req->path();
+    const auto method = req->method();
     if (starts_with(path, "/api/v1/users")) return true;
     if (starts_with(path, "/api/v1/sfc")) return true;
     if (path == "/api/v1/topology/generate") return true;
     if (starts_with(path, "/api/v1/topology/dynamic/") && path != "/api/v1/topology/dynamic/status") {
         return true;
     }
+    if (path == "/api/v1/runtime/config" && method != Get) return true;
+    if (starts_with(path, "/api/v1/satellite/") && method == Delete) return true;
     return false;
 }
 
@@ -244,9 +273,6 @@ int main() {
             }
         );
         
-        // 启动时不再加载默认星座，等待前端显式生成/导入拓扑后再进行部署
-        spdlog::info("No default topology loaded at startup; waiting for /api/v1/topology/generate");
-        
         // 配置Drogon
         app()
             .setLogLevel(trantor::Logger::kInfo)
@@ -265,11 +291,83 @@ int main() {
             config.database.user,
             config.database.password,
         });
-        if (!sfc::g_user_service->init_schema()) {
-            throw std::runtime_error("Failed to initialize users table");
+        bool user_schema_ready = false;
+        for (int attempt = 1; attempt <= 45; ++attempt) {
+            if (sfc::g_user_service->init_schema()) {
+                user_schema_ready = true;
+                break;
+            }
+            spdlog::warn(
+                "Database not ready for users schema (attempt {}/45), waiting...",
+                attempt
+            );
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        if (!user_schema_ready) {
+            throw std::runtime_error("Failed to initialize users table: database not ready");
         }
         if (!sfc::g_user_service->seed_default_accounts()) {
             throw std::runtime_error("Failed to seed default users");
+        }
+
+        sfc::g_runtime_state_service = std::make_shared<sfc::RuntimeStateService>(sfc::RuntimeDBConfig{
+            config.database.container_name,
+            config.database.name,
+            config.database.user,
+            config.database.password,
+        });
+        bool runtime_schema_ready = false;
+        for (int attempt = 1; attempt <= 45; ++attempt) {
+            if (sfc::g_runtime_state_service->init_schema()) {
+                runtime_schema_ready = true;
+                break;
+            }
+            spdlog::warn(
+                "Database not ready for runtime schema (attempt {}/45), waiting...",
+                attempt
+            );
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        if (!runtime_schema_ready) {
+            throw std::runtime_error("Failed to initialize runtime_state tables: database not ready");
+        }
+
+        sfc::Topology persisted_topology;
+        std::string persisted_template;
+        bool restored_topology = false;
+        if (sfc::g_runtime_state_service->load_topology(&persisted_topology, &persisted_template) &&
+            !persisted_topology.nodes.empty()) {
+            sfc::g_topo_mgr->save_current_topology(persisted_topology);
+            sfc::g_res_mgr->reset_all_allocations();
+            sfc::g_res_mgr->load_topology(persisted_topology);
+            restored_topology = true;
+            spdlog::info(
+                "Restored topology from DB: {} nodes, {} links, template={}",
+                persisted_topology.nodes.size(),
+                persisted_topology.links.size(),
+                persisted_template.empty() ? "unknown" : persisted_template
+            );
+        }
+
+        double boot_sampling_interval_sec = 5.0;
+        double boot_simulation_speed = 1.0;
+        if (const nlohmann::json control_config = sfc::g_runtime_state_service->load_control_config();
+            control_config.is_object()) {
+            if (control_config.contains("resource_sampling_interval_sec")) {
+                boot_sampling_interval_sec = std::max(
+                    1.0,
+                    std::min(60.0, control_config.value("resource_sampling_interval_sec", 5.0))
+                );
+            }
+            if (control_config.contains("simulation_speed")) {
+                boot_simulation_speed = std::max(
+                    0.1,
+                    std::min(20.0, control_config.value("simulation_speed", 1.0))
+                );
+            }
+        }
+        if (!restored_topology) {
+            spdlog::info("No topology in DB at startup; waiting for /api/v1/topology/generate");
         }
 
         app().registerPreRoutingAdvice(
@@ -281,7 +379,7 @@ int main() {
                     chain_callback();
                     return;
                 }
-                if (req->method() == Options || is_public_api_path(path)) {
+                if (req->method() == Options || is_public_api_path(req)) {
                     chain_callback();
                     return;
                 }
@@ -299,7 +397,7 @@ int main() {
                     callback(build_auth_error(k401Unauthorized, "invalid_or_expired_token"));
                     return;
                 }
-                if (is_admin_only_path(path) && !claims->is_admin()) {
+                if (is_admin_only_path(req) && !claims->is_admin()) {
                     callback(build_auth_error(k403Forbidden, "admin_required"));
                     return;
                 }
@@ -367,6 +465,22 @@ int main() {
             },
             {Post}
         );
+
+        if (restored_topology) {
+            const bool started = sfc::g_dynamic_sim->start(
+                boot_sampling_interval_sec,
+                boot_simulation_speed,
+                false,
+                0.0,
+                0.0
+            );
+            spdlog::info(
+                "Dynamic simulation bootstrap on persisted topology: started={}, interval={}s speed={}x",
+                started ? "true" : "false",
+                boot_sampling_interval_sec,
+                boot_simulation_speed
+            );
+        }
         
         spdlog::info("Server configured:");
         spdlog::info("  - Address: {}:{}", config.server.host, config.server.port);
