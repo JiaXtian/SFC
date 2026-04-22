@@ -3,15 +3,13 @@ import ControlPage from '@/components/UI/ControlPage'
 import SystemPopup from '@/components/UI/SystemPopup'
 import { useStore } from '@/store/useStore'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { useAutoDynamics } from '@/hooks/useAutoDynamics'
 import { useBootstrapRuntime } from '@/hooks/useBootstrapRuntime'
 
 const CandidateModal = lazy(() => import('@/components/UI/CandidateModal'))
 
 export default function ControlCenterApp() {
   useBootstrapRuntime()
-  useWebSocket()
-  useAutoDynamics()
+  useWebSocket({ applyTopologySnapshot: false })
   const candidateResult = useStore((s) => s.candidateResult)
 
   return (

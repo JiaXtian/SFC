@@ -54,11 +54,28 @@ class APIClient {
     }
   }
   
-  async getSatellites() { return (await http.get('/satellites')).data }
+  async getSatellites() { return (await http.get('/satellites?legacy=1')).data }
+  async getSatellite(id: string) { return (await http.get(`/satellite/${encodeURIComponent(id)}`)).data }
+  async getSatellitesPage(p: {
+    page?: number
+    page_size?: number
+    q?: string
+    status?: 'all' | 'active' | 'down'
+    plane?: number
+    sort_by?: 'id' | 'status' | 'plane' | 'cpu_available' | 'mem_available' | 'disk_available' | 'node_reliability' | 'vnf_count'
+    sort_order?: 'asc' | 'desc'
+  } = {}) {
+    return (await http.get('/satellites', { params: p })).data as {
+      items: any[]
+      total: number
+      page: number
+      page_size: number
+      total_pages: number
+    }
+  }
   async deleteSatellite(nodeId: string) { return (await http.delete(`/satellite/${encodeURIComponent(nodeId)}`)).data }
 
   async getDynamicStatus() { return (await http.get('/topology/dynamic/status')).data }
-  async getRuntimeEvents(limit = 120) { return (await http.get('/runtime/events', { params: { limit } })).data }
   async getControlConfig() { return (await http.get('/runtime/config')).data }
   async updateControlConfig(p: { resource_sampling_interval_sec?: number; simulation_speed?: number; apply_now?: boolean }) {
     return (await http.put('/runtime/config', p)).data
@@ -121,6 +138,15 @@ class APIClient {
     request_id: string; 
     candidate_index: number;
     candidate: any; // 完整的候选方案
+    sfc_name?: string;
+    source_node?: string;
+    destination_node?: string;
+    path_nodes?: string[];
+    inference_latency_ms?: number;
+    score_breakdown?: any;
+    score_weights?: any;
+    score_constraints?: any;
+    strategy_mode?: 'single_request' | 'session_continuous';
   }) { 
     return (await http.post('/sfc/deploy', p)).data 
   }

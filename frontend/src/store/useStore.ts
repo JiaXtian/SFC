@@ -319,7 +319,6 @@ interface Store {
   applyTopologySnapshot: (snapshot: any) => void
   pushDecisionTrace: (trace: DecisionTrace) => void
   pushRuntimeEvent: (evt: Omit<RuntimeEvent, 'id'>) => void
-  replaceRuntimeEvents: (events: RuntimeEvent[]) => void
   upsertSessionDeploymentFromTrace: (trace: DecisionTrace) => void
   suppressSessionDeployment: (sessionId: string) => void
 }
@@ -853,10 +852,34 @@ export const useStore = create<Store>((set, get) => ({
   setTopologyVersion: (v) => set({ topologyVersion: v }),
   setBackendTopologySynced: (synced) => set({ backendTopologySynced: synced }),
   setDeployments: (deployments) => {
-    set(() => ({
-      deployments: Array.isArray(deployments) ? deployments : [],
-      highlightedDeploymentIds: [],
-    }))
+    set((s) => {
+      const nextDeployments = Array.isArray(deployments) ? deployments : []
+      const knownKeys = new Set(
+        s.deployments.flatMap((d) => [String(d.deployment_id ?? ''), String(d.backend_deployment_id ?? '')]).filter(Boolean)
+      )
+
+      const nextHighlighted = s.highlightedDeploymentIds.filter((id) =>
+        nextDeployments.some((d) => d.deployment_id === id || d.backend_deployment_id === id)
+      )
+      const highlightedSet = new Set(nextHighlighted)
+
+      nextDeployments.forEach((dep) => {
+        if (dep.status === 'failed' || dep.status === 'rolled_back') return
+        const key = String(dep.deployment_id ?? dep.backend_deployment_id ?? '')
+        if (!key) return
+        // Auto-highlight newly loaded deployments (including cold start after restart),
+        // while preserving user's existing hide/show toggles for known deployments.
+        if (!knownKeys.has(key) && !highlightedSet.has(key)) {
+          highlightedSet.add(key)
+          nextHighlighted.push(key)
+        }
+      })
+
+      return {
+        deployments: nextDeployments,
+        highlightedDeploymentIds: nextHighlighted,
+      }
+    })
     get().refreshDeploymentPaths()
   },
   addDeployment: (d) => set((s) => {
@@ -868,11 +891,26 @@ export const useStore = create<Store>((set, get) => ({
     }
     return { deployments: [d, ...s.deployments] }
   }),
-  updateDeployment: (id, p) => set((s) => ({ deployments: s.deployments.map((d) => (d.deployment_id === id ? { ...d, ...p } : d)) })),
-  removeDeployment: (id) => set((s) => ({
-    deployments: s.deployments.filter((d) => d.deployment_id !== id),
-    highlightedDeploymentIds: s.highlightedDeploymentIds.filter((x) => x !== id),
+  updateDeployment: (id, p) => set((s) => ({
+    deployments: s.deployments.map((d) => (
+      d.deployment_id === id || d.backend_deployment_id === id
+        ? { ...d, ...p }
+        : d
+    )),
   })),
+  removeDeployment: (id) => set((s) => {
+    const removedIdSet = new Set<string>([id])
+    s.deployments.forEach((d) => {
+      if (d.deployment_id === id || d.backend_deployment_id === id) {
+        removedIdSet.add(d.deployment_id)
+        if (d.backend_deployment_id) removedIdSet.add(d.backend_deployment_id)
+      }
+    })
+    return {
+      deployments: s.deployments.filter((d) => d.deployment_id !== id && d.backend_deployment_id !== id),
+      highlightedDeploymentIds: s.highlightedDeploymentIds.filter((x) => !removedIdSet.has(x)),
+    }
+  }),
   clearDeployments: () => set({ deployments: [], highlightedDeploymentIds: [] }),
   refreshDeploymentPaths: () => set((s) => {
     if (s.deployments.length === 0) return s
@@ -884,7 +922,10 @@ export const useStore = create<Store>((set, get) => ({
       const oldSig = pathSignature(dep.link_details)
       const newSig = pathSignature(rebuilt.link_details)
       const pathChanged = oldSig !== newSig
-      const nextRecomputeCount = (dep.path_recompute_count ?? 0) + (pathChanged ? 1 : 0)
+      const hasBoundVersion = Number.isFinite(Number(dep.topology_version_bound))
+      const trackRecompute = hasBoundVersion && (dep.strategy_mode === 'session_continuous' || dep.path_recompute_count != null)
+      const nextRecomputeCountRaw = (dep.path_recompute_count ?? 0) + (pathChanged && trackRecompute ? 1 : 0)
+      const nextRecomputeCount = dep.path_recompute_count == null && !trackRecompute ? undefined : nextRecomputeCountRaw
       const topologyChanged = Number(dep.topology_version_bound ?? -1) !== topoV
       const deploymentChanged =
         rebuilt !== dep ||
@@ -986,16 +1027,18 @@ export const useStore = create<Store>((set, get) => ({
     const simTime = String(snapshot?.sim_time ?? snapshot?.metadata?.sim_time ?? '')
 
     set((s) => {
+      const nodeCount = Array.isArray(nodes) ? nodes.length : 0
+      const largeTopology = nodeCount >= 3000
       const continuousRealtime =
         s.simulation.view_mode === 'realtime' &&
         s.autoDynamics.enabled &&
         s.autoDynamics.playing &&
         s.satellites.length > 0 &&
         s.links.length > 0
-      const mergedNodes = continuousRealtime
+      const mergedNodes = continuousRealtime && !largeTopology
         ? mergeNodesForContinuousMotion(s.satellites, Array.isArray(nodes) ? nodes : [])
         : nodes
-      const mergedLinks = continuousRealtime
+      const mergedLinks = continuousRealtime && !largeTopology
         ? mergeLinksForContinuousMotion(s.links, Array.isArray(links) ? links : [])
         : links
       const frame: TopologyHistoryFrame | null =
@@ -1008,8 +1051,9 @@ export const useStore = create<Store>((set, get) => ({
               metrics,
             }
           : null
+      const maxHistoryFrames = nodeCount >= 5000 ? 20 : (nodeCount >= 3000 ? 40 : 240)
       const history = frame
-        ? [...s.simulation.history, frame].slice(-240)
+        ? [...s.simulation.history, frame].slice(-maxHistoryFrames)
         : s.simulation.history
       const tailIdx = history.length - 1
       const realtime = s.simulation.view_mode === 'realtime'
@@ -1049,9 +1093,6 @@ export const useStore = create<Store>((set, get) => ({
   })),
   pushRuntimeEvent: (evt) => set((s) => ({
     runtimeEvents: [{ ...evt, id: `${Date.now()}_${Math.random().toString(16).slice(2, 6)}` }, ...s.runtimeEvents].slice(0, 120),
-  })),
-  replaceRuntimeEvents: (events) => set(() => ({
-    runtimeEvents: Array.isArray(events) ? events.slice(0, 200) : [],
   })),
   upsertSessionDeploymentFromTrace: (trace) => set((s) => {
     if (trace.mode !== 'session_continuous' || !trace.session_id) return {}

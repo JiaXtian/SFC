@@ -118,6 +118,16 @@ export default function FaultInjectionControl() {
     }
   }
 
+  const syncTopologyAfterFaultMutation = async () => {
+    try {
+      const topo = await apiClient.getTopology()
+      useStore.getState().applyTopologySnapshot(topo)
+      window.dispatchEvent(new Event('satellite-table-refresh'))
+    } catch {
+      // ignore transient sync failures
+    }
+  }
+
   useEffect(() => {
     refreshStatus(false)
     const ticker = window.setInterval(() => setNowMs(Date.now()), 1000)
@@ -212,6 +222,7 @@ export default function FaultInjectionControl() {
         addToast('未注入故障（目标可能无效）', 'warning')
       }
       await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
     } catch (e: any) {
       addToast(`故障注入失败: ${e?.message ?? e}`, 'error')
     } finally {
@@ -230,6 +241,7 @@ export default function FaultInjectionControl() {
       const removed = Number(res?.removed ?? 0)
       addToast(removed > 0 ? `已移除 ${nodeId} 故障` : `节点 ${nodeId} 当前无故障`, removed > 0 ? 'success' : 'warning')
       await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
     } catch (e: any) {
       addToast(`移除故障失败: ${e?.message ?? e}`, 'error')
     } finally {
@@ -253,6 +265,7 @@ export default function FaultInjectionControl() {
         extended > 0 ? 'success' : 'warning',
       )
       await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
     } catch (e: any) {
       addToast(`延长故障失败: ${e?.message ?? e}`, 'error')
     } finally {
@@ -275,6 +288,7 @@ export default function FaultInjectionControl() {
       })
       addToast(`已移除 ${Number(res?.removed ?? 0)} 个节点故障`, 'success')
       await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
     } catch (e: any) {
       addToast(`批量移除失败: ${e?.message ?? e}`, 'error')
     } finally {

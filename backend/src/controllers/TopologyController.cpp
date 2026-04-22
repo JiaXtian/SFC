@@ -10,6 +10,9 @@
 #include <ctime>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -30,6 +33,22 @@ double clamp_double(double v, double lo, double hi) {
     return std::max(lo, std::min(hi, v));
 }
 
+std::string lower_ascii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+int parse_int_or(const std::string& raw, int fallback) {
+    if (raw.empty()) return fallback;
+    try {
+        return std::stoi(raw);
+    } catch (...) {
+        return fallback;
+    }
+}
+
 }  // namespace
 
 namespace sfc {
@@ -39,14 +58,13 @@ void TopologyController::getTopology(
     std::function<void(const HttpResponsePtr&)>&& callback
 ) {
     try {
-        Topology topology;
-        bool loaded_from_db = false;
-        if (g_runtime_state_service) {
-            std::string ignored_template;
-            loaded_from_db = g_runtime_state_service->load_topology(&topology, &ignored_template);
-        }
-        if (!loaded_from_db) {
+        Topology topology = g_res_mgr->export_current_topology();
+        if (topology.nodes.empty()) {
             topology = g_topo_mgr->get_current_topology();
+        }
+        if (topology.nodes.empty() && g_runtime_state_service) {
+            std::string ignored_template;
+            g_runtime_state_service->load_topology(&topology, &ignored_template);
         }
         auto json_val = nlohmann_to_jsoncpp(topology.to_json());
         auto resp = HttpResponse::newHttpJsonResponse(json_val);
@@ -280,7 +298,6 @@ void TopologyController::generateTopology(
             }
             g_runtime_state_service->save_topology(topology, constellation_template);
             g_runtime_state_service->clear_deployments();
-            g_runtime_state_service->clear_runtime_events();
             const nlohmann::json evt = {
                 {"type", "topology_replaced"},
                 {"sim_time", topology.metadata.timestamp},
@@ -290,7 +307,6 @@ void TopologyController::generateTopology(
                 {"total_links", topology.links.size()},
                 {"message", "Topology replaced and deployments cleared"}
             };
-            g_runtime_state_service->append_runtime_event(evt);
             WSHandler::broadcast_json(evt);
         }
 
@@ -476,18 +492,153 @@ void TopologyController::getDynamicSimulationStatus(
 }
 
 void TopologyController::getSatellites(
-    const HttpRequestPtr&,
+    const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback
 ) {
     try {
-        auto topology = g_topo_mgr->get_current_topology();
-        
-        Json::Value satellites_json(Json::arrayValue);
-        for (const auto& sat : topology.nodes) {
-            satellites_json.append(nlohmann_to_jsoncpp(sat.to_json()));
+        Topology topology;
+        bool loaded_from_db = false;
+        if (g_runtime_state_service) {
+            std::string ignored_template;
+            loaded_from_db = g_runtime_state_service->load_topology(&topology, &ignored_template);
         }
-        
-        auto resp = HttpResponse::newHttpJsonResponse(satellites_json);
+        if (!loaded_from_db) {
+            topology = g_topo_mgr->get_current_topology();
+        }
+
+        const bool legacy = req->getParameter("legacy") == "1";
+        if (legacy) {
+            Json::Value satellites_json(Json::arrayValue);
+            for (const auto& sat : topology.nodes) {
+                satellites_json.append(nlohmann_to_jsoncpp(sat.to_json()));
+            }
+            auto resp = HttpResponse::newHttpJsonResponse(satellites_json);
+            callback(resp);
+            return;
+        }
+
+        std::unordered_map<std::string, std::unordered_set<std::string>> node_sfc_names;
+        std::unordered_map<std::string, std::unordered_set<std::string>> node_nf_types;
+        std::unordered_map<std::string, int> node_vnf_counts;
+        if (g_runtime_state_service) {
+            const nlohmann::json deps = g_runtime_state_service->load_deployments_json();
+            if (deps.is_array()) {
+                for (const auto& dep : deps) {
+                    if (!dep.is_object()) continue;
+                    const std::string dep_status = lower_ascii(dep.value("status", std::string("completed")));
+                    if (dep_status == "rolled_back" || dep_status == "failed") continue;
+                    const std::string sfc_name = dep.value("sfc_name", dep.value("request_id", dep.value("deployment_id", std::string(""))));
+                    const auto per = dep.contains("per_core_nf") && dep["per_core_nf"].is_array()
+                        ? dep["per_core_nf"]
+                        : (dep.contains("per_vnf") && dep["per_vnf"].is_array() ? dep["per_vnf"] : nlohmann::json::array());
+                    for (const auto& item : per) {
+                        if (!item.is_object()) continue;
+                        const std::string node = item.value("node", std::string(""));
+                        if (node.empty()) continue;
+                        if (!sfc_name.empty()) node_sfc_names[node].insert(sfc_name);
+                        const std::string nf_type = item.value("nf_type", item.value("core_nf", item.value("vnf", std::string(""))));
+                        if (!nf_type.empty()) node_nf_types[node].insert(nf_type);
+                        node_vnf_counts[node] += 1;
+                    }
+                }
+            }
+        }
+
+        const int page = std::max(1, parse_int_or(req->getParameter("page"), 1));
+        const int page_size = std::max(1, std::min(100, parse_int_or(req->getParameter("page_size"), 50)));
+        const std::string keyword = lower_ascii(req->getParameter("q"));
+        const std::string status_filter = lower_ascii(req->getParameter("status"));
+        const int plane_filter = parse_int_or(req->getParameter("plane"), std::numeric_limits<int>::min());
+        const bool has_plane_filter = req->getParameter("plane").size() > 0;
+        const std::string sort_by = lower_ascii(req->getParameter("sort_by"));
+        const std::string sort_order = lower_ascii(req->getParameter("sort_order")) == "desc" ? "desc" : "asc";
+
+        std::vector<const Satellite*> filtered;
+        filtered.reserve(topology.nodes.size());
+        for (const auto& sat : topology.nodes) {
+            const std::string id = sat.id;
+            const std::string id_lower = lower_ascii(id);
+            const std::string sat_status = lower_ascii(sat.status);
+            const std::string fault_tag = lower_ascii(sat.fault_tag);
+
+            if (!status_filter.empty() && status_filter != "all") {
+                if (sat_status != status_filter) continue;
+            }
+            if (has_plane_filter && sat.orbital_params.plane != plane_filter) continue;
+            if (!keyword.empty()) {
+                const bool matched =
+                    id_lower.find(keyword) != std::string::npos ||
+                    fault_tag.find(keyword) != std::string::npos ||
+                    std::to_string(sat.orbital_params.plane).find(keyword) != std::string::npos;
+                if (!matched) continue;
+            }
+            filtered.push_back(&sat);
+        }
+
+        auto compare_sat = [&](const Satellite* a, const Satellite* b) {
+            int cmp = 0;
+            if (sort_by == "status") {
+                cmp = lower_ascii(a->status).compare(lower_ascii(b->status));
+            } else if (sort_by == "plane") {
+                cmp = (a->orbital_params.plane < b->orbital_params.plane) ? -1 : ((a->orbital_params.plane > b->orbital_params.plane) ? 1 : 0);
+            } else if (sort_by == "cpu_available") {
+                cmp = (a->cpu_available < b->cpu_available) ? -1 : ((a->cpu_available > b->cpu_available) ? 1 : 0);
+            } else if (sort_by == "mem_available") {
+                cmp = (a->mem_available < b->mem_available) ? -1 : ((a->mem_available > b->mem_available) ? 1 : 0);
+            } else if (sort_by == "disk_available") {
+                cmp = (a->disk_available < b->disk_available) ? -1 : ((a->disk_available > b->disk_available) ? 1 : 0);
+            } else if (sort_by == "node_reliability") {
+                cmp = (a->node_reliability < b->node_reliability) ? -1 : ((a->node_reliability > b->node_reliability) ? 1 : 0);
+            } else if (sort_by == "vnf_count") {
+                const int av = node_vnf_counts[a->id];
+                const int bv = node_vnf_counts[b->id];
+                cmp = (av < bv) ? -1 : ((av > bv) ? 1 : 0);
+            } else {
+                cmp = a->id.compare(b->id);
+            }
+            if (cmp == 0) cmp = a->id.compare(b->id);
+            return sort_order == "desc" ? (cmp > 0) : (cmp < 0);
+        };
+        std::sort(filtered.begin(), filtered.end(), compare_sat);
+
+        const int total = static_cast<int>(filtered.size());
+        const int total_pages = std::max(1, static_cast<int>((total + page_size - 1) / page_size));
+        const int bounded_page = std::max(1, std::min(page, total_pages));
+        const int start = (bounded_page - 1) * page_size;
+        const int end = std::min(total, start + page_size);
+
+        Json::Value items(Json::arrayValue);
+        for (int i = start; i < end; ++i) {
+            const Satellite* sat = filtered[static_cast<size_t>(i)];
+            Json::Value row = nlohmann_to_jsoncpp(sat->to_json());
+            Json::Value sfc_names(Json::arrayValue);
+            Json::Value nf_types(Json::arrayValue);
+            const auto sfc_it = node_sfc_names.find(sat->id);
+            if (sfc_it != node_sfc_names.end()) {
+                std::vector<std::string> names(sfc_it->second.begin(), sfc_it->second.end());
+                std::sort(names.begin(), names.end());
+                for (const auto& name : names) sfc_names.append(name);
+            }
+            const auto nf_it = node_nf_types.find(sat->id);
+            if (nf_it != node_nf_types.end()) {
+                std::vector<std::string> types(nf_it->second.begin(), nf_it->second.end());
+                std::sort(types.begin(), types.end());
+                for (const auto& t : types) nf_types.append(t);
+            }
+            row["deployed_sfc_names"] = sfc_names;
+            row["deployed_core_nf_types"] = nf_types;
+            row["deployed_vnf_count"] = node_vnf_counts[sat->id];
+            items.append(row);
+        }
+
+        Json::Value result;
+        result["items"] = items;
+        result["total"] = total;
+        result["page"] = bounded_page;
+        result["page_size"] = page_size;
+        result["total_pages"] = total_pages;
+
+        auto resp = HttpResponse::newHttpJsonResponse(result);
         callback(resp);
         
     } catch (const std::exception& e) {
@@ -587,7 +738,6 @@ void TopologyController::deleteSatellite(
                 {"topology_version", topology.metadata.topology_version},
                 {"message", "Satellite deleted and deployments cleared"}
             };
-            g_runtime_state_service->append_runtime_event(evt);
             WSHandler::broadcast_json(evt);
         }
 
@@ -620,20 +770,8 @@ void TopologyController::getRuntimeEvents(
     std::function<void(const HttpResponsePtr&)>&& callback
 ) {
     try {
-        int limit = 120;
-        const std::string limit_param = req->getParameter("limit");
-        if (!limit_param.empty()) {
-            try {
-                limit = std::stoi(limit_param);
-            } catch (...) {
-                limit = 120;
-            }
-        }
-        nlohmann::json events = nlohmann::json::array();
-        if (g_runtime_state_service) {
-            events = g_runtime_state_service->list_runtime_events(limit);
-        }
-        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(events));
+        (void)req;
+        auto resp = HttpResponse::newHttpJsonResponse(nlohmann_to_jsoncpp(nlohmann::json::array()));
         callback(resp);
     } catch (const std::exception& e) {
         spdlog::error("Failed to get runtime events: {}", e.what());

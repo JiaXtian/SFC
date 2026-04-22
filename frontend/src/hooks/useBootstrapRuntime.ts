@@ -1,10 +1,16 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
-import { useStore, type Deployment, type RuntimeEvent } from '@/store/useStore'
+import { useStore, type Deployment } from '@/store/useStore'
 
 function toNumber(v: any, fallback = 0) {
   const n = Number(v)
   return Number.isFinite(n) ? n : fallback
+}
+
+function toPositiveNumberOrUndefined(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  return n
 }
 
 function normalizeDeployment(raw: any): Deployment {
@@ -17,7 +23,7 @@ function normalizeDeployment(raw: any): Deployment {
     sfc_name: String(raw?.sfc_name ?? raw?.request_id ?? deploymentId),
     candidate_index: toNumber(raw?.candidate_index ?? 0, 0),
     status: String(raw?.status ?? 'completed') as Deployment['status'],
-    inference_latency_ms: toNumber(raw?.inference_latency_ms ?? 0, 0),
+    inference_latency_ms: toPositiveNumberOrUndefined(raw?.inference_latency_ms),
     source_node: String(raw?.source_node ?? ''),
     destination_node: String(raw?.destination_node ?? ''),
     path_nodes: Array.isArray(raw?.path_nodes) ? raw.path_nodes.map((x: any) => String(x)) : [],
@@ -26,6 +32,31 @@ function normalizeDeployment(raw: any): Deployment {
     bottleneck_bandwidth_gbps: toNumber(raw?.bottleneck_bandwidth_gbps ?? 0, 0),
     estimated_reliability: toNumber(raw?.estimated_reliability ?? 0, 0),
     score_total: toNumber(raw?.score_total ?? 0, 0),
+    score_breakdown: raw?.score_breakdown && typeof raw.score_breakdown === 'object'
+      ? {
+          latency: toNumber(raw?.score_breakdown?.latency ?? 0, 0),
+          resource: toNumber(raw?.score_breakdown?.resource ?? 0, 0),
+          reliability: toNumber(raw?.score_breakdown?.reliability ?? 0, 0),
+          bandwidth: toNumber(raw?.score_breakdown?.bandwidth ?? 0, 0),
+          dispersion: toNumber(raw?.score_breakdown?.dispersion ?? 0, 0),
+        }
+      : undefined,
+    score_weights: raw?.score_weights && typeof raw.score_weights === 'object'
+      ? {
+          latency: toNumber(raw?.score_weights?.latency ?? 0, 0),
+          resource: toNumber(raw?.score_weights?.resource ?? 0, 0),
+          reliability: toNumber(raw?.score_weights?.reliability ?? 0, 0),
+          bandwidth: toNumber(raw?.score_weights?.bandwidth ?? 0, 0),
+          dispersion: toNumber(raw?.score_weights?.dispersion ?? 0, 0),
+        }
+      : undefined,
+    score_constraints: raw?.score_constraints && typeof raw.score_constraints === 'object'
+      ? {
+          max_latency_ms: toNumber(raw?.score_constraints?.max_latency_ms ?? 0, 0),
+          min_bandwidth_gbps: toNumber(raw?.score_constraints?.min_bandwidth_gbps ?? 0, 0),
+          min_reliability: toNumber(raw?.score_constraints?.min_reliability ?? 0, 0),
+        }
+      : undefined,
     deployed_nodes: Array.isArray(raw?.deployed_nodes) ? raw.deployed_nodes.map((x: any) => String(x)) : [],
     per_vnf: Array.isArray(raw?.per_core_nf)
       ? raw.per_core_nf
@@ -42,18 +73,6 @@ function normalizeDeployment(raw: any): Deployment {
   }
 }
 
-function normalizeEvent(raw: any): RuntimeEvent {
-  const type = String(raw?.type ?? 'event')
-  const simTime = String(raw?.sim_time ?? raw?.snapshot?.sim_time ?? '')
-  return {
-    id: String(raw?.db_id ?? `${Date.now()}_${Math.random().toString(16).slice(2, 6)}`),
-    type,
-    sim_time: simTime,
-    message: String(raw?.message ?? raw?.reason ?? type),
-    raw,
-  }
-}
-
 export function useBootstrapRuntime() {
   const bootstrappedRef = useRef(false)
 
@@ -66,19 +85,15 @@ export function useBootstrapRuntime() {
       applyTopologySnapshot,
       setDeployments,
       setSimulationStatus,
-      replaceRuntimeEvents,
       setAutoDynamics,
       setBackendTopologySynced,
-      pushDecisionTrace,
-      upsertSessionDeploymentFromTrace,
     } = st
 
     ;(async () => {
-      const [topologyRes, deploymentsRes, statusRes, eventsRes, configRes] = await Promise.allSettled([
+      const [topologyRes, deploymentsRes, statusRes, configRes] = await Promise.allSettled([
         apiClient.getTopology(),
         apiClient.getDeployments(),
         apiClient.getDynamicStatus(),
-        apiClient.getRuntimeEvents(160),
         apiClient.getControlConfig(),
       ])
 
@@ -104,18 +119,6 @@ export function useBootstrapRuntime() {
           sim_time: String(status?.sim_time ?? ''),
           metrics: status?.metrics ?? null,
         })
-      }
-
-      if (eventsRes.status === 'fulfilled' && Array.isArray(eventsRes.value)) {
-        const runtimeEvents = eventsRes.value.map(normalizeEvent)
-        replaceRuntimeEvents(runtimeEvents)
-        for (let i = runtimeEvents.length - 1; i >= 0; i -= 1) {
-          const evt = runtimeEvents[i]
-          if (evt.type === 'decision_trace' && evt.raw) {
-            pushDecisionTrace(evt.raw as any)
-            upsertSessionDeploymentFromTrace(evt.raw as any)
-          }
-        }
       }
 
       if (configRes.status === 'fulfilled') {

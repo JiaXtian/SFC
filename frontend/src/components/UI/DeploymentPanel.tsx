@@ -176,13 +176,13 @@ export default function DeploymentPanel() {
                   <span className="text-gray-600 font-mono">{dep.total_latency_ms?.toFixed(1)}ms</span>
                   <span className="text-gray-700">{new Date(dep.deployed_at).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}</span>
                 </div>
-                {(typeof dep.inference_latency_ms === 'number' || typeof (dep as any).topology_version_bound === 'number') && (
+                {(typeof dep.inference_latency_ms === 'number' || ((dep as any).strategy_mode === 'session_continuous' && typeof (dep as any).topology_version_bound === 'number')) && (
                   <div className="mt-1 flex items-center justify-between text-[10px] font-mono">
                     <span className="text-cyan-300">
                       {typeof dep.inference_latency_ms === 'number' ? `推理时延 ${dep.inference_latency_ms.toFixed(1)}ms` : '-'}
                     </span>
                     <span className="text-indigo-300">
-                      {typeof (dep as any).topology_version_bound === 'number'
+                      {(dep as any).strategy_mode === 'session_continuous' && typeof (dep as any).topology_version_bound === 'number'
                         ? `路径重算 ${(dep as any).path_recompute_count ?? 0} 次`
                         : '-'}
                     </span>

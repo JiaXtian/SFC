@@ -1,35 +1,129 @@
-import { useMemo, useState } from 'react'
-import { Copy, Trash2, Database, Satellite as SatelliteIcon } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDownUp, CheckSquare, Copy, Database, Filter, RefreshCw, Satellite as SatelliteIcon, Trash2 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import ConstellationControlPanel from './ConstellationControlPanel'
 import { useStore } from '@/store/useStore'
 
 type Role = 'admin' | 'user'
+type SortField =
+  | 'id'
+  | 'status'
+  | 'plane'
+  | 'cpu_available'
+  | 'mem_available'
+  | 'disk_available'
+  | 'node_reliability'
+  | 'vnf_count'
+type SortOrder = 'asc' | 'desc'
 
 export default function SatelliteNodeControlPage({ role }: { role: Role }) {
+  const PAGE_SIZE = 50
   const canOperate = role === 'admin'
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [batchDeleting, setBatchDeleting] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [keyword, setKeyword] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'down'>('all')
+  const [planeFilter, setPlaneFilter] = useState<string>('')
+  const [page, setPage] = useState(1)
+  const [sortField, setSortField] = useState<SortField>('id')
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+  const [rows, setRows] = useState<any[]>([])
+  const [total, setTotal] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
+
+  const debounceRef = useRef<number | null>(null)
+  const lastFetchKeyRef = useRef('')
+
   const {
-    satellites,
-    deployments,
     applyTopologySnapshot,
     openSystemPopup,
     addToast,
     setDeployments,
   } = useStore()
 
-  const vnfCountByNode = useMemo(() => {
-    const map = new Map<string, number>()
-    deployments.forEach((dep: any) => {
-      const per = Array.isArray(dep?.per_core_nf) ? dep.per_core_nf : (Array.isArray(dep?.per_vnf) ? dep.per_vnf : [])
-      per.forEach((p: any) => {
-        const node = String(p?.node ?? '')
-        if (!node) return
-        map.set(node, (map.get(node) ?? 0) + 1)
-      })
-    })
+  const rowById = useMemo(() => {
+    const map = new Map<string, any>()
+    rows.forEach((sat: any) => map.set(String(sat?.id ?? ''), sat))
     return map
-  }, [deployments])
+  }, [rows])
+
+  const fetchPage = async (opts?: { silent?: boolean; forcePage?: number }) => {
+    const targetPage = opts?.forcePage ?? page
+    const planeNum = planeFilter.trim() === '' ? undefined : Number(planeFilter)
+    const reqKey = JSON.stringify({
+      page: targetPage,
+      pageSize: PAGE_SIZE,
+      keyword,
+      statusFilter,
+      planeNum,
+      sortField,
+      sortOrder,
+    })
+    if (!opts?.silent) setLoading(true)
+    try {
+      const resp = await apiClient.getSatellitesPage({
+        page: targetPage,
+        page_size: PAGE_SIZE,
+        q: keyword.trim(),
+        status: statusFilter,
+        plane: Number.isFinite(planeNum as number) ? (planeNum as number) : undefined,
+        sort_by: sortField,
+        sort_order: sortOrder,
+      })
+
+      if (reqKey !== lastFetchKeyRef.current && !opts?.silent) {
+        lastFetchKeyRef.current = reqKey
+      }
+
+      const items = Array.isArray(resp?.items) ? resp.items : []
+      const nextTotalPages = Math.max(1, Number(resp?.total_pages ?? 1))
+      const nextPage = Math.max(1, Math.min(Number(resp?.page ?? targetPage), nextTotalPages))
+
+      setRows(items)
+      setTotal(Math.max(0, Number(resp?.total ?? 0)))
+      setTotalPages(nextTotalPages)
+      if (nextPage !== page) setPage(nextPage)
+    } catch (e: any) {
+      if (!opts?.silent) addToast(`卫星列表加载失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      if (!opts?.silent) setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (debounceRef.current) window.clearTimeout(debounceRef.current)
+    debounceRef.current = window.setTimeout(() => {
+      fetchPage({ forcePage: 1 })
+      setPage(1)
+    }, 220)
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current)
+    }
+  }, [keyword, statusFilter, planeFilter, sortField, sortOrder])
+
+  useEffect(() => {
+    fetchPage()
+  }, [page])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      fetchPage({ silent: true })
+    }, 5000)
+    const onRefresh = () => { fetchPage({ silent: true }) }
+    window.addEventListener('satellite-table-refresh', onRefresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('satellite-table-refresh', onRefresh)
+    }
+  }, [page, keyword, statusFilter, planeFilter, sortField, sortOrder])
+
+  useEffect(() => {
+    if (selectedIds.size === 0) return
+    // Only clean impossible IDs after data mutation (delete/regen), keep cross-page selections.
+    setSelectedIds((prev) => new Set(Array.from(prev)))
+  }, [rows])
 
   const copySatellite = async (sat: any) => {
     try {
@@ -37,6 +131,32 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
       addToast(`已复制 ${sat.id} 参数`, 'success')
     } catch {
       addToast('复制失败，请检查浏览器权限', 'error')
+    }
+  }
+
+  const copyBatchSatellites = async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) {
+      addToast('请先选择至少一颗卫星', 'warning')
+      return
+    }
+    try {
+      const details = await Promise.all(ids.map(async (id) => rowById.get(id) ?? await apiClient.getSatellite(id)))
+      await navigator.clipboard.writeText(JSON.stringify(details, null, 2))
+      addToast(`已复制 ${details.length} 颗卫星参数`, 'success')
+    } catch (e: any) {
+      addToast(`批量复制失败: ${e?.message ?? e}`, 'error')
+    }
+  }
+
+  const reloadTopologyAndDeployments = async () => {
+    const [topo, depList] = await Promise.all([
+      apiClient.getTopology(),
+      apiClient.getDeployments(),
+    ])
+    applyTopologySnapshot(topo)
+    if (Array.isArray(depList)) {
+      setDeployments(depList as any)
     }
   }
 
@@ -49,14 +169,13 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
     setDeletingId(satId)
     try {
       await apiClient.deleteSatellite(satId)
-      const [topo, depList] = await Promise.all([
-        apiClient.getTopology(),
-        apiClient.getDeployments(),
-      ])
-      applyTopologySnapshot(topo)
-      if (Array.isArray(depList)) {
-        setDeployments(depList as any)
-      }
+      await reloadTopologyAndDeployments()
+      setSelectedIds((prev) => {
+        const next = new Set(prev)
+        next.delete(satId)
+        return next
+      })
+      await fetchPage({ forcePage: page, silent: true })
       addToast(`已删除卫星 ${satId}`, 'success')
     } catch (e: any) {
       addToast(`删除失败: ${e?.message ?? e}`, 'error')
@@ -64,6 +183,55 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
       setDeletingId(null)
     }
   }
+
+  const deleteBatchSatellites = async () => {
+    if (!canOperate) {
+      openSystemPopup('无权限操作', '普通用户仅允许查看卫星节点控制页面，无法删除卫星。', 'warning')
+      return
+    }
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) {
+      addToast('请先选择至少一颗卫星', 'warning')
+      return
+    }
+    if (!window.confirm(`确认批量删除 ${ids.length} 颗卫星吗？删除后会清空已部署策略。`)) return
+    setBatchDeleting(true)
+    let ok = 0
+    const failed: string[] = []
+    try {
+      for (const id of ids) {
+        try {
+          await apiClient.deleteSatellite(id)
+          ok += 1
+        } catch {
+          failed.push(id)
+        }
+      }
+      await reloadTopologyAndDeployments()
+      setSelectedIds(new Set())
+      await fetchPage({ forcePage: page, silent: true })
+      if (failed.length === 0) {
+        addToast(`已删除 ${ok} 颗卫星`, 'success')
+      } else {
+        addToast(`已删除 ${ok} 颗，失败 ${failed.length} 颗`, 'warning')
+      }
+    } catch (e: any) {
+      addToast(`批量删除失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setBatchDeleting(false)
+    }
+  }
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setSortField(field)
+    setSortOrder('asc')
+  }
+
+  const allOnPageSelected = rows.length > 0 && rows.every((sat: any) => selectedIds.has(String(sat.id)))
 
   return (
     <div className="h-full grid grid-cols-12 gap-3 overflow-hidden">
@@ -87,9 +255,82 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
             <Database className="w-4 h-4 text-cyan-300" />
             卫星节点参数与状态表
           </div>
-          <div className="text-[11px] text-slate-400 inline-flex items-center gap-1.5">
+          <div className="text-[11px] text-slate-400 inline-flex items-center gap-2">
             <SatelliteIcon className="w-3.5 h-3.5" />
-            共 {satellites.length} 颗卫星
+            总计 {total} 颗
+            <span className="text-slate-500">|</span>
+            当前页 {rows.length} 颗
+            <span className="text-slate-500">|</span>
+            已选 {selectedIds.size} 颗
+          </div>
+        </div>
+
+        <div className="mb-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 p-2.5 space-y-2">
+          <div className="grid grid-cols-1 2xl:grid-cols-4 gap-2">
+            <label className="2xl:col-span-2">
+              <div className="text-[10px] text-slate-400 mb-1 inline-flex items-center gap-1"><Filter className="w-3 h-3" />关键词</div>
+              <input
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder="卫星ID / 故障标签 / 轨道面"
+                className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
+              />
+            </label>
+            <label>
+              <div className="text-[10px] text-slate-400 mb-1">状态</div>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter((e.target.value as any) || 'all')}
+                className="w-full h-8 px-2 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
+              >
+                <option value="all">全部</option>
+                <option value="active">正常</option>
+                <option value="down">故障</option>
+              </select>
+            </label>
+            <label>
+              <div className="text-[10px] text-slate-400 mb-1">轨道面</div>
+              <input
+                type="number"
+                min={0}
+                value={planeFilter}
+                onChange={(e) => setPlaneFilter(e.target.value)}
+                placeholder="全部"
+                className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => fetchPage()}
+              disabled={loading}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-cyan-100 bg-slate-700/25 border border-slate-500/35 inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              刷新
+            </button>
+            <button
+              onClick={copyBatchSatellites}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/15 border border-cyan-500/35 inline-flex items-center gap-1.5"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              批量复制
+            </button>
+            <button
+              onClick={deleteBatchSatellites}
+              disabled={batchDeleting}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-rose-100 bg-rose-500/15 border border-rose-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {batchDeleting ? '批量删除中...' : '批量删除'}
+            </button>
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70"
+            >
+              清空选择
+            </button>
           </div>
         </div>
 
@@ -97,23 +338,98 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-300">
               <tr>
-                <th className="px-2 py-2 text-left">卫星ID</th>
-                <th className="px-2 py-2 text-left">状态</th>
-                <th className="px-2 py-2 text-left">轨道</th>
+                <th className="px-2 py-2 text-left w-[34px]">
+                  <button
+                    className="inline-flex items-center justify-center h-5 w-5 rounded text-cyan-200 hover:bg-cyan-500/15"
+                    onClick={() => {
+                      if (allOnPageSelected) {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev)
+                          rows.forEach((sat: any) => next.delete(String(sat.id)))
+                          return next
+                        })
+                      } else {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev)
+                          rows.forEach((sat: any) => next.add(String(sat.id)))
+                          return next
+                        })
+                      }
+                    }}
+                    title={allOnPageSelected ? '取消全选本页' : '全选本页'}
+                  >
+                    <CheckSquare className="w-3.5 h-3.5" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('id')}>
+                    卫星ID<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('status')}>
+                    状态<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('plane')}>
+                    轨道<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
                 <th className="px-2 py-2 text-left">坐标</th>
-                <th className="px-2 py-2 text-left">CPU</th>
-                <th className="px-2 py-2 text-left">内存</th>
-                <th className="px-2 py-2 text-left">磁盘</th>
-                <th className="px-2 py-2 text-left">可靠性</th>
-                <th className="px-2 py-2 text-left">网元数</th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('cpu_available')}>
+                    CPU<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('mem_available')}>
+                    内存<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('disk_available')}>
+                    磁盘<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('node_reliability')}>
+                    可靠性<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">
+                  <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('vnf_count')}>
+                    网元数<ArrowDownUp className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-2 py-2 text-left">已部署SFC名称</th>
+                <th className="px-2 py-2 text-left">核心网网元类型</th>
                 <th className="px-2 py-2 text-left">操作</th>
               </tr>
             </thead>
             <tbody>
-              {satellites.map((sat: any) => {
+              {rows.map((sat: any) => {
                 const isDown = String(sat?.status ?? 'active') === 'down'
+                const satId = String(sat?.id ?? '')
+                const checked = selectedIds.has(satId)
+                const sfcNames = Array.isArray(sat?.deployed_sfc_names) ? sat.deployed_sfc_names.map((x: any) => String(x)) : []
+                const nfTypes = Array.isArray(sat?.deployed_core_nf_types) ? sat.deployed_core_nf_types.map((x: any) => String(x)) : []
                 return (
                   <tr key={sat.id} className="border-t border-slate-800/80 text-slate-200">
+                    <td className="px-2 py-2">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev)
+                            if (e.target.checked) next.add(satId)
+                            else next.delete(satId)
+                            return next
+                          })
+                        }}
+                      />
+                    </td>
                     <td className="px-2 py-2 font-mono">{sat.id}</td>
                     <td className="px-2 py-2">
                       <span className={`px-1.5 py-0.5 rounded ${isDown ? 'text-rose-200 bg-rose-500/20' : 'text-emerald-200 bg-emerald-500/20'}`}>
@@ -131,7 +447,35 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                     <td className="px-2 py-2 font-mono">{Number(sat?.mem_available ?? 0).toFixed(1)} / {Number(sat?.mem_total ?? 0).toFixed(1)}</td>
                     <td className="px-2 py-2 font-mono">{Number(sat?.disk_available ?? 0).toFixed(1)} / {Number(sat?.disk_total ?? 0).toFixed(1)}</td>
                     <td className="px-2 py-2 font-mono">{(Number(sat?.node_reliability ?? 0) * 100).toFixed(2)}%</td>
-                    <td className="px-2 py-2">{vnfCountByNode.get(String(sat.id)) ?? 0}</td>
+                    <td className="px-2 py-2">{Number(sat?.deployed_vnf_count ?? nfTypes.length ?? 0)}</td>
+                    <td className="px-2 py-2">
+                      {sfcNames.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {sfcNames.slice(0, 2).map((name: string) => (
+                            <span key={name} className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-200">{name}</span>
+                          ))}
+                          {sfcNames.length > 2 && (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-700/40 text-slate-300">+{sfcNames.length - 2}</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">-</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2">
+                      {nfTypes.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {nfTypes.slice(0, 3).map((name: string) => (
+                            <span key={name} className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-200">{name}</span>
+                          ))}
+                          {nfTypes.length > 3 && (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-700/40 text-slate-300">+{nfTypes.length - 3}</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">-</span>
+                      )}
+                    </td>
                     <td className="px-2 py-2">
                       <div className="inline-flex items-center gap-1">
                         <button
@@ -154,13 +498,35 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                   </tr>
                 )
               })}
-              {satellites.length === 0 && (
+              {rows.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-3 py-8 text-center text-slate-500">当前数据库暂无卫星节点</td>
+                  <td colSpan={13} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
+          <div>
+            第 {Math.min(page, totalPages)} / {totalPages} 页
+          </div>
+          <div className="inline-flex items-center gap-2">
+            <button
+              className="h-7 px-2.5 rounded-md border border-slate-700/70 bg-slate-900/45 disabled:opacity-50"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              上一页
+            </button>
+            <button
+              className="h-7 px-2.5 rounded-md border border-slate-700/70 bg-slate-900/45 disabled:opacity-50"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            >
+              下一页
+            </button>
+          </div>
         </div>
       </div>
     </div>

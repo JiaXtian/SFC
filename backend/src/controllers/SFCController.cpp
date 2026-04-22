@@ -20,14 +20,74 @@ namespace sfc {
 // 全局部署列表
 static std::vector<nlohmann::json> g_deployments;
 static std::mutex g_deployments_mutex;
+void persist_deployments_locked();
 
 void sync_deployments_from_db_locked() {
     if (!g_runtime_state_service) return;
     nlohmann::json stored = g_runtime_state_service->load_deployments_json();
     if (!stored.is_array()) return;
     g_deployments.clear();
-    for (const auto& item : stored) {
-        if (item.is_object()) g_deployments.push_back(item);
+    bool normalized = false;
+    for (auto item : stored) {
+        if (!item.is_object()) continue;
+
+        if (!item.contains("strategy_mode")) {
+            item["strategy_mode"] = "single_request";
+            normalized = true;
+        }
+        if (!item.contains("progress")) {
+            item["progress"] = item.value("status", std::string("completed")) == "completed" ? 100 : 0;
+            normalized = true;
+        }
+        if (!item.contains("inference_latency_ms")) {
+            item["inference_latency_ms"] = 0.0;
+            normalized = true;
+        }
+        if (!item.contains("satisfies_constraints")) {
+            const bool is_completed = item.value("status", std::string("completed")) == "completed";
+            item["satisfies_constraints"] = is_completed;
+            normalized = true;
+        } else if (
+            item.value("status", std::string("completed")) == "completed" &&
+            item.value("satisfies_constraints", false) == false
+        ) {
+            const bool no_violation =
+                !item.contains("violation_details") ||
+                !item["violation_details"].is_array() ||
+                item["violation_details"].empty();
+            const bool no_reason = !item.contains("reason") || item.value("reason", std::string("")).empty();
+            const bool has_allocations =
+                (item.contains("per_core_nf") && item["per_core_nf"].is_array() && !item["per_core_nf"].empty()) ||
+                (item.contains("per_vnf") && item["per_vnf"].is_array() && !item["per_vnf"].empty()) ||
+                (item.contains("deployed_nodes") && item["deployed_nodes"].is_array() && !item["deployed_nodes"].empty());
+            if ((no_violation && no_reason) || has_allocations) {
+                // Backfill old buggy records where satisfies_constraints was not persisted correctly.
+                item["satisfies_constraints"] = true;
+                normalized = true;
+            }
+        }
+
+        if ((!item.contains("path_nodes") || !item["path_nodes"].is_array() || item["path_nodes"].empty()) &&
+            item.contains("deployed_nodes") && item["deployed_nodes"].is_array()) {
+            nlohmann::json path_nodes = nlohmann::json::array();
+            const std::string src = item.value("source_node", std::string(""));
+            const std::string dst = item.value("destination_node", std::string(""));
+            if (!src.empty()) path_nodes.push_back(src);
+            for (const auto& n : item["deployed_nodes"]) {
+                if (n.is_string()) path_nodes.push_back(n.get<std::string>());
+            }
+            if (!dst.empty()) path_nodes.push_back(dst);
+            if (!path_nodes.empty()) {
+                item["path_nodes"] = path_nodes;
+                normalized = true;
+            }
+        }
+
+        g_deployments.push_back(item);
+    }
+
+    if (normalized) {
+        persist_deployments_locked();
     }
 }
 
@@ -738,6 +798,10 @@ void SFCController::deploy(
             
             candidate.score = cand_json.get("score", 0.0).asDouble();
             candidate.total_latency_ms = cand_json.get("total_latency_ms", 0.0).asDouble();
+            candidate.satisfies_constraints = cand_json.get("satisfies_constraints", true).asBool();
+            candidate.bottleneck_bandwidth_gbps = cand_json.get("bottleneck_bandwidth_gbps", 0.0).asDouble();
+            candidate.estimated_reliability = cand_json.get("estimated_reliability", 0.0).asDouble();
+            candidate.reason = cand_json.get("reason", "").asString();
             
             if (cand_json.isMember("deployed_nodes")) {
                 for (const auto& node : cand_json["deployed_nodes"]) {
@@ -837,6 +901,32 @@ void SFCController::deploy(
         dep_json["sfc_name"] = (*json).get("sfc_name", request_id).asString();
         dep_json["source_node"] = (*json).get("source_node", "").asString();
         dep_json["destination_node"] = (*json).get("destination_node", "").asString();
+        dep_json["inference_latency_ms"] = (*json).get("inference_latency_ms", 0.0).asDouble();
+        if (json->isMember("strategy_mode")) {
+            dep_json["strategy_mode"] = (*json).get("strategy_mode", "single_request").asString();
+        }
+        if (json->isMember("path_nodes") && (*json)["path_nodes"].isArray()) {
+            nlohmann::json path_nodes = nlohmann::json::array();
+            for (const auto& node : (*json)["path_nodes"]) {
+                path_nodes.push_back(node.asString());
+            }
+            dep_json["path_nodes"] = path_nodes;
+        }
+        if (json->isMember("score_breakdown")) {
+            try {
+                dep_json["score_breakdown"] = nlohmann::json::parse((*json)["score_breakdown"].toStyledString());
+            } catch (...) {}
+        }
+        if (json->isMember("score_weights")) {
+            try {
+                dep_json["score_weights"] = nlohmann::json::parse((*json)["score_weights"].toStyledString());
+            } catch (...) {}
+        }
+        if (json->isMember("score_constraints")) {
+            try {
+                dep_json["score_constraints"] = nlohmann::json::parse((*json)["score_constraints"].toStyledString());
+            } catch (...) {}
+        }
 
         auto now_ts = std::chrono::system_clock::now();
         auto time_t = std::chrono::system_clock::to_time_t(now_ts);
@@ -971,54 +1061,186 @@ void SFCController::rollback(
         }
         
         std::string deployment_id = (*json).get("deployment_id", "").asString();
-        
-        bool success = g_res_mgr->release_resources(deployment_id);
-        bool removed_record = false;
-        
-        if (success) {
-            auto updated_topology = g_res_mgr->export_current_topology();
+        if (deployment_id.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "deployment_id is required";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        std::unordered_set<std::string> ids_to_release_set;
+        ids_to_release_set.insert(deployment_id);
+        std::vector<nlohmann::json> matched_records_for_fallback;
+        {
+            std::lock_guard<std::mutex> lock(g_deployments_mutex);
+            sync_deployments_from_db_locked();
+            for (const auto& dep : g_deployments) {
+                const std::string dep_id = dep.value("deployment_id", "");
+                const std::string backend_dep_id = dep.value("backend_deployment_id", "");
+                if (dep_id == deployment_id || backend_dep_id == deployment_id) {
+                    if (!dep_id.empty()) ids_to_release_set.insert(dep_id);
+                    if (!backend_dep_id.empty()) ids_to_release_set.insert(backend_dep_id);
+                    matched_records_for_fallback.push_back(dep);
+                }
+            }
+        }
+
+        std::vector<std::string> ids_to_release(ids_to_release_set.begin(), ids_to_release_set.end());
+        bool released_any = false;
+        std::vector<std::string> released_resource_ids;
+        for (const auto& id : ids_to_release) {
+            if (id.empty()) continue;
+            if (g_res_mgr->release_resources(id)) {
+                released_any = true;
+                released_resource_ids.push_back(id);
+            }
+        }
+
+        // Fallback: if in-memory rollback snapshot is unavailable (e.g. process restarted),
+        // recover resources from persisted deployment records to keep topology/resource view consistent.
+        if (!released_any && !matched_records_for_fallback.empty()) {
+            Topology fallback_topology = g_res_mgr->export_current_topology();
+            if (fallback_topology.nodes.empty()) {
+                fallback_topology = g_topo_mgr->get_current_topology();
+            }
+
+            auto safe_num = [](const nlohmann::json& obj, const char* key) -> double {
+                if (!obj.is_object() || !obj.contains(key)) return 0.0;
+                if (obj[key].is_number_float()) return obj[key].get<double>();
+                if (obj[key].is_number_integer()) return static_cast<double>(obj[key].get<int64_t>());
+                if (obj[key].is_number_unsigned()) return static_cast<double>(obj[key].get<uint64_t>());
+                return 0.0;
+            };
+
+            bool fallback_changed = false;
+            for (const auto& dep : matched_records_for_fallback) {
+                const auto per = dep.contains("per_core_nf") && dep["per_core_nf"].is_array()
+                    ? dep["per_core_nf"]
+                    : (dep.contains("per_vnf") && dep["per_vnf"].is_array() ? dep["per_vnf"] : nlohmann::json::array());
+                for (const auto& item : per) {
+                    const std::string node_id = item.value("node", "");
+                    if (node_id.empty()) continue;
+                    for (auto& sat : fallback_topology.nodes) {
+                        if (sat.id != node_id) continue;
+                        const double cpu = std::max(0.0, safe_num(item, "cpu_used"));
+                        const double mem = std::max(0.0, safe_num(item, "mem_used"));
+                        const double disk = std::max(0.0, safe_num(item, "disk_used"));
+                        sat.cpu_available = std::min(sat.cpu_total, sat.cpu_available + cpu);
+                        sat.mem_available = std::min(sat.mem_total, sat.mem_available + mem);
+                        sat.disk_available = std::min(sat.disk_total, sat.disk_available + disk);
+                        fallback_changed = true;
+                        break;
+                    }
+                }
+
+                const auto links = dep.contains("link_details") && dep["link_details"].is_array()
+                    ? dep["link_details"]
+                    : nlohmann::json::array();
+                for (const auto& l : links) {
+                    const std::string src = l.value("src", "");
+                    const std::string dst = l.value("dst", "");
+                    if (src.empty() || dst.empty()) continue;
+                    double bw = std::max(0.0, safe_num(l, "bandwidth_required_gbps"));
+                    if (bw <= 1e-9) bw = 0.1;
+                    for (auto& link : fallback_topology.links) {
+                        const bool matched = (link.source == src && link.target == dst) || (link.source == dst && link.target == src);
+                        if (!matched) continue;
+                        link.bandwidth_available_gbps = std::min(link.bandwidth_gbps, link.bandwidth_available_gbps + bw);
+                        link.status = (link.bandwidth_available_gbps <= link.bandwidth_gbps * 0.15) ? "congested" : "active";
+                        fallback_changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (fallback_changed) {
+                g_res_mgr->load_topology(fallback_topology);
+                released_any = true;
+                released_resource_ids.push_back("fallback_recovered");
+            }
+        }
+
+        Topology updated_topology;
+        bool has_updated_topology = false;
+        if (released_any) {
+            updated_topology = g_res_mgr->export_current_topology();
+            updated_topology.metadata.topology_version += 1;
             g_topo_mgr->save_current_topology(updated_topology);
             if (g_runtime_state_service) {
                 g_runtime_state_service->save_topology(updated_topology, "");
             }
-            
-            spdlog::info("✓ Deployment {} rolled back", deployment_id);
+            has_updated_topology = true;
+            spdlog::info("✓ Deployment rollback released resources for {} id(s)", released_resource_ids.size());
         }
+
+        bool removed_record = false;
+        std::vector<std::string> removed_deployment_ids;
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
             sync_deployments_from_db_locked();
             const auto before = g_deployments.size();
-            g_deployments.erase(
-                std::remove_if(
-                    g_deployments.begin(),
-                    g_deployments.end(),
-                    [&](const nlohmann::json& dep) {
-                        return dep.value("deployment_id", "") == deployment_id ||
-                               dep.value("backend_deployment_id", "") == deployment_id;
-                    }),
-                g_deployments.end()
+            const auto end_it = std::remove_if(
+                g_deployments.begin(),
+                g_deployments.end(),
+                [&](const nlohmann::json& dep) {
+                    const std::string dep_id = dep.value("deployment_id", "");
+                    const std::string backend_dep_id = dep.value("backend_deployment_id", "");
+                    const bool matched =
+                        ids_to_release_set.find(dep_id) != ids_to_release_set.end() ||
+                        ids_to_release_set.find(backend_dep_id) != ids_to_release_set.end();
+                    if (matched) {
+                        if (!dep_id.empty()) removed_deployment_ids.push_back(dep_id);
+                        if (!backend_dep_id.empty()) removed_deployment_ids.push_back(backend_dep_id);
+                    }
+                    return matched;
+                }
             );
+            g_deployments.erase(end_it, g_deployments.end());
             removed_record = g_deployments.size() < before;
             if (removed_record) {
                 persist_deployments_locked();
             }
         }
-        if (!success && removed_record) {
-            success = true;
-            spdlog::info("Deployment {} record removed from persistent store", deployment_id);
-        }
-        
+
+        std::sort(removed_deployment_ids.begin(), removed_deployment_ids.end());
+        removed_deployment_ids.erase(
+            std::unique(removed_deployment_ids.begin(), removed_deployment_ids.end()),
+            removed_deployment_ids.end()
+        );
+
+        const bool success = released_any || removed_record;
         Json::Value response;
         response["status"] = success ? "success" : "failed";
         response["message"] = success ? "Deployment rolled back" : "Deployment not found";
         response["removed_record"] = removed_record;
+        response["requested_deployment_id"] = deployment_id;
+        Json::Value removed_ids_json(Json::arrayValue);
+        for (const auto& rid : removed_deployment_ids) removed_ids_json.append(rid);
+        response["removed_deployment_ids"] = removed_ids_json;
+        Json::Value released_ids_json(Json::arrayValue);
+        for (const auto& rid : released_resource_ids) released_ids_json.append(rid);
+        response["released_resource_ids"] = released_ids_json;
+        if (has_updated_topology) {
+            response["topology_version"] = updated_topology.metadata.topology_version;
+            response["sim_time"] = updated_topology.metadata.sim_time;
+        }
 
-        WSHandler::broadcast_json({
+        nlohmann::json evt = {
             {"type", "deployment_update"},
             {"deployment_id", deployment_id},
             {"status", success ? "rolled_back" : "rollback_failed"},
-            {"progress", success ? 100 : 0}
-        });
+            {"progress", success ? 100 : 0},
+            {"removed_deployment_ids", removed_deployment_ids},
+            {"released_resource_ids", released_resource_ids}
+        };
+        if (has_updated_topology) {
+            evt["topology_version"] = updated_topology.metadata.topology_version;
+            evt["sim_time"] = updated_topology.metadata.sim_time;
+        }
+        WSHandler::broadcast_json(evt);
         WSHandler::broadcast_json({
             {"type", "deployment_action"},
             {"level", success ? "warning" : "error"},
@@ -1027,6 +1249,12 @@ void SFCController::rollback(
             {"detail", "deployment_id=" + deployment_id},
             {"deployment_id", deployment_id}
         });
+        if (has_updated_topology) {
+            WSHandler::broadcast_json({
+                {"type", "topology_tick"},
+                {"snapshot", updated_topology.to_json()}
+            });
+        }
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
         callback(resp);

@@ -1,23 +1,9 @@
 #include "websocket/WSHandler.h"
 #include "services/AuthGlobals.h"
 #include "services/AuthService.h"
-#include "services/RuntimeStateService.h"
 #include <spdlog/spdlog.h>
 
 namespace sfc {
-namespace {
-
-bool should_persist_event(const nlohmann::json& payload) {
-    if (!payload.is_object()) return false;
-    const std::string type = payload.value("type", "");
-    if (type.empty()) return false;
-    if (type == "topology_tick" || type == "metrics_tick" || type == "orchestration_metrics_tick") {
-        return false;
-    }
-    return true;
-}
-
-}  // namespace
 
 std::set<WebSocketConnectionPtr> WSHandler::connections_{};
 std::mutex WSHandler::connections_mutex_{};
@@ -84,9 +70,6 @@ void WSHandler::broadcast(const std::string& message) {
 }
 
 void WSHandler::broadcast_json(const nlohmann::json& payload) {
-    if (g_runtime_state_service && should_persist_event(payload)) {
-        g_runtime_state_service->append_runtime_event(payload);
-    }
     broadcast(payload.dump());
 }
 

@@ -8,6 +8,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     deployments,
     setDeployments,
     removeDeployment,
+    suppressSessionDeployment,
     applyTopologySnapshot,
     addToast,
     openSystemPopup,
@@ -38,12 +39,23 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     })
     if (!window.confirm(`确认删除部署 ${label} 吗？`)) return
     try {
+      const sessionId = String(dep?.session_id ?? '')
+      if (sessionId) {
+        try {
+          await apiClient.stopSFCSession(sessionId)
+        } catch {
+          // ignore stop failure and continue rollback path
+        }
+        suppressSessionDeployment(sessionId)
+      }
       const rollbackTarget = String(dep?.backend_deployment_id ?? dep?.deployment_id ?? '')
       await apiClient.rollbackDeployment(rollbackTarget)
       removeDeployment(String(dep?.deployment_id ?? rollbackTarget))
+      if (rollbackTarget && rollbackTarget !== String(dep?.deployment_id ?? '')) {
+        removeDeployment(rollbackTarget)
+      }
       addToast(`已删除部署 ${label}`, 'success')
-      const topo = await apiClient.getTopology()
-      applyTopologySnapshot(topo)
+      await refresh()
     } catch (e: any) {
       addToast(`删除失败: ${e?.message ?? e}`, 'error')
     }
@@ -118,4 +130,3 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     </div>
   )
 }
-

@@ -164,7 +164,32 @@ export default function CandidateModal() {
       })
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
       const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
-      const deployResp = await apiClient.deploySFC({ request_id: requestId, candidate_index: sel, candidate: cand })
+      const deployResp = await apiClient.deploySFC({
+        request_id: requestId,
+        candidate_index: sel,
+        candidate: cand,
+        sfc_name: sfcName || requestId,
+        source_node: sourceNode,
+        destination_node: destinationNode,
+        path_nodes: pathNodes,
+        inference_latency_ms: Number(inferenceTime ?? 0),
+        score_breakdown: {
+          latency: scoreBreakdown.latencyScore,
+          resource: scoreBreakdown.resourceScore,
+          reliability: scoreBreakdown.reliabilityScore,
+          bandwidth: scoreBreakdown.bandwidthScore,
+          dispersion: scoreBreakdown.dispersionScore,
+        },
+        score_weights: {
+          latency: activeWeights.latency,
+          resource: activeWeights.resource,
+          reliability: activeWeights.reliability,
+          bandwidth: activeWeights.bandwidth,
+          dispersion: activeWeights.dispersion,
+        },
+        score_constraints: constraints,
+        strategy_mode: 'single_request',
+      })
       const backendDeploymentId = String(deployResp?.deployment_id ?? `dep-${Date.now()}`)
 
       let sessionId = ''

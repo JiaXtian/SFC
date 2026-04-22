@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
 import { getAuthToken } from '@/auth/session'
+import { apiClient } from '@/api/client'
 
 function defaultWsUrl() {
   const envUrl = (import.meta as any)?.env?.VITE_WS_URL?.trim?.()
@@ -46,16 +47,19 @@ function sfcLabelByIds(sessionId: string, requestId?: string): string {
   })
 }
 
-export function useWebSocket() {
+export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
   const endpointFaultPopupCooldownRef = useRef<Record<string, number>>({})
+  const applyTopologySnapshotEnabled = options.applyTopologySnapshot !== false
 
   useEffect(() => {
     const state = useStore.getState()
     const {
       setSimulationStatus,
       updateDeployment,
+      removeDeployment,
+      setDeployments,
       applyTopologySnapshot,
       pushDecisionTrace,
       upsertSessionDeploymentFromTrace,
@@ -80,10 +84,45 @@ export function useWebSocket() {
             const data = JSON.parse(evt.data)
             const type = String(data?.type ?? '')
             if (type === 'deployment_update') {
-              updateDeployment(String(data.deployment_id ?? ''), {
-                status: data.status ?? 'completed',
-                progress: Number(data.progress ?? 100),
-              })
+              const deploymentId = String(data.deployment_id ?? '')
+              const status = String(data.status ?? 'completed')
+              if (status === 'rolled_back') {
+                removeDeployment(deploymentId)
+                const removedIds = Array.isArray(data?.removed_deployment_ids) ? data.removed_deployment_ids : []
+                removedIds.forEach((id: any) => {
+                  const rid = String(id ?? '')
+                  if (rid) removeDeployment(rid)
+                })
+                ;(async () => {
+                  try {
+                    const [depList, topo] = await Promise.all([
+                      apiClient.getDeployments(),
+                      apiClient.getTopology(),
+                    ])
+                    if (Array.isArray(depList)) {
+                      setDeployments(depList as any)
+                    }
+                    if (applyTopologySnapshotEnabled) {
+                      applyTopologySnapshot(topo)
+                    } else {
+                      const topoRaw = topo?.topology ?? topo
+                      const meta = topoRaw?.metadata ?? {}
+                      setSimulationStatus({
+                        sim_time: String(meta?.sim_time ?? ''),
+                        topology_version: Number(meta?.topology_version ?? 0),
+                      })
+                    }
+                    window.dispatchEvent(new Event('satellite-table-refresh'))
+                  } catch {
+                    // ignore sync failures
+                  }
+                })()
+              } else {
+                updateDeployment(deploymentId, {
+                  status: status as any,
+                  progress: Number(data.progress ?? 100),
+                })
+              }
               pushRuntimeEvent({
                 type: 'deployment_update',
                 sim_time: data.sim_time,
@@ -93,14 +132,23 @@ export function useWebSocket() {
               return
             }
             if (type === 'topology_tick') {
-              applyTopologySnapshot(data.snapshot)
-              const mode = useStore.getState().simulation.view_mode
-              if (mode === 'playback') {
-                pushRuntimeEvent({
-                  type: 'playback_buffered',
-                  sim_time: data?.snapshot?.sim_time,
-                  message: '收到实时拓扑更新周期数据（已缓冲，当前为回放模式）',
-                  raw: { topology_version: data?.snapshot?.topology_version },
+              if (applyTopologySnapshotEnabled) {
+                applyTopologySnapshot(data.snapshot)
+                const mode = useStore.getState().simulation.view_mode
+                if (mode === 'playback') {
+                  pushRuntimeEvent({
+                    type: 'playback_buffered',
+                    sim_time: data?.snapshot?.sim_time,
+                    message: '收到实时拓扑更新周期数据（已缓冲，当前为回放模式）',
+                    raw: { topology_version: data?.snapshot?.topology_version },
+                  })
+                }
+              } else {
+                const snapshot = data?.snapshot ?? {}
+                useStore.getState().setSimulationStatus({
+                  sim_time: String(snapshot?.sim_time ?? ''),
+                  topology_version: Number(snapshot?.topology_version ?? 0),
+                  metrics: snapshot?.metrics ?? null,
                 })
               }
               return
