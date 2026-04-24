@@ -1,5 +1,6 @@
 #include "services/DynamicSimulationService.h"
 #include "services/AuthGlobals.h"
+#include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
 #include "websocket/WSHandler.h"
 #include <algorithm>
@@ -492,6 +493,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     topology_version_ += 1;
 
     const std::string sim_time = current_sim_time_iso_locked();
+    std::unordered_map<std::string, DeploymentOrchestratorService::NodeRuntimeSnapshot> runtime_snapshot;
+    if (g_deployment_orchestrator) {
+        runtime_snapshot = g_deployment_orchestrator->snapshot_node_runtime();
+    }
 
     const double inclination_deg = topology.metadata.inclination_deg;
     for (auto& sat : topology.nodes) {
@@ -521,8 +526,21 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const double mem_util = sat.mem_total > 1e-9 ? 1.0 - sat.mem_available / sat.mem_total : 1.0;
         const double disk_util = sat.disk_total > 1e-9 ? 1.0 - sat.disk_available / sat.disk_total : 1.0;
         const double avg_util = clamp((cpu_util + mem_util + disk_util) / 3.0, 0.0, 1.0);
-        sat.core_business_load = CoreBusinessLoad{};
-        sat.core_network_load = 0.0;
+        const auto rt_it = runtime_snapshot.find(sat.id);
+        if (rt_it != runtime_snapshot.end() && rt_it->second.deployed) {
+            sat.core_business_load = rt_it->second.core_business_load;
+            sat.core_business_load.normalize_inplace();
+            sat.core_network_load = clamp(rt_it->second.core_network_load, 0.0, 1.0);
+        } else {
+            sat.core_business_load = CoreBusinessLoad{};
+            sat.core_business_load.signaling_load = 0.0;
+            sat.core_business_load.session_load = 0.0;
+            sat.core_business_load.user_plane_load = 0.0;
+            sat.core_business_load.mobility_load = 0.0;
+            sat.core_business_load.policy_load = 0.0;
+            sat.core_business_load.auth_load = 0.0;
+            sat.core_network_load = 0.0;
+        }
         sat.node_reliability = clamp(0.997 - 0.045 * avg_util, 0.93, 0.9995);
     }
 
@@ -568,6 +586,12 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
             sat.mem_available = 0.0;
             sat.disk_available = 0.0;
             sat.core_business_load = CoreBusinessLoad{};
+            sat.core_business_load.signaling_load = 0.0;
+            sat.core_business_load.session_load = 0.0;
+            sat.core_business_load.user_plane_load = 0.0;
+            sat.core_business_load.mobility_load = 0.0;
+            sat.core_business_load.policy_load = 0.0;
+            sat.core_business_load.auth_load = 0.0;
             sat.core_network_load = 0.0;
             sat.node_reliability = 0.0;
         }
@@ -649,17 +673,42 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     snapshot.topology.metadata.timestamp = snapshot.sim_time;
 
     snapshot.metrics.total_nodes = static_cast<int>(snapshot.topology.nodes.size());
+    double core_load_sum = 0.0;
+    double signaling_sum = 0.0;
+    double session_sum = 0.0;
+    double user_plane_sum = 0.0;
+    double mobility_sum = 0.0;
+    double policy_sum = 0.0;
+    double auth_sum = 0.0;
     for (const auto& sat : snapshot.topology.nodes) {
         if (sat.status == "down") snapshot.metrics.down_nodes += 1;
         else snapshot.metrics.active_nodes += 1;
+        core_load_sum += clamp(sat.core_network_load, 0.0, 1.0);
+        signaling_sum += clamp(sat.core_business_load.signaling_load, 0.0, 1.0);
+        session_sum += clamp(sat.core_business_load.session_load, 0.0, 1.0);
+        user_plane_sum += clamp(sat.core_business_load.user_plane_load, 0.0, 1.0);
+        mobility_sum += clamp(sat.core_business_load.mobility_load, 0.0, 1.0);
+        policy_sum += clamp(sat.core_business_load.policy_load, 0.0, 1.0);
+        auth_sum += clamp(sat.core_business_load.auth_load, 0.0, 1.0);
     }
-    snapshot.metrics.avg_core_network_load = 0.0;
-    snapshot.metrics.avg_signaling_load = 0.0;
-    snapshot.metrics.avg_session_load = 0.0;
-    snapshot.metrics.avg_user_plane_load = 0.0;
-    snapshot.metrics.avg_mobility_load = 0.0;
-    snapshot.metrics.avg_policy_load = 0.0;
-    snapshot.metrics.avg_auth_load = 0.0;
+    if (snapshot.metrics.total_nodes > 0) {
+        const double denom = static_cast<double>(snapshot.metrics.total_nodes);
+        snapshot.metrics.avg_core_network_load = core_load_sum / denom;
+        snapshot.metrics.avg_signaling_load = signaling_sum / denom;
+        snapshot.metrics.avg_session_load = session_sum / denom;
+        snapshot.metrics.avg_user_plane_load = user_plane_sum / denom;
+        snapshot.metrics.avg_mobility_load = mobility_sum / denom;
+        snapshot.metrics.avg_policy_load = policy_sum / denom;
+        snapshot.metrics.avg_auth_load = auth_sum / denom;
+    } else {
+        snapshot.metrics.avg_core_network_load = 0.0;
+        snapshot.metrics.avg_signaling_load = 0.0;
+        snapshot.metrics.avg_session_load = 0.0;
+        snapshot.metrics.avg_user_plane_load = 0.0;
+        snapshot.metrics.avg_mobility_load = 0.0;
+        snapshot.metrics.avg_policy_load = 0.0;
+        snapshot.metrics.avg_auth_load = 0.0;
+    }
 
     snapshot.metrics.total_links = static_cast<int>(snapshot.topology.links.size());
     double latency_sum = 0.0;

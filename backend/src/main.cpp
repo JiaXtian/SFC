@@ -14,6 +14,7 @@
 #include "services/AuthService.h"
 #include "services/UserService.h"
 #include "services/RuntimeStateService.h"
+#include "services/DeploymentOrchestratorService.h"
 #include <fstream>
 #include <filesystem>
 #include <vector>
@@ -37,6 +38,7 @@ namespace sfc {
     std::shared_ptr<AuthService> g_auth_service;
     std::shared_ptr<UserService> g_user_service;
     std::shared_ptr<RuntimeStateService> g_runtime_state_service;
+    std::shared_ptr<DeploymentOrchestratorService> g_deployment_orchestrator;
 }
 
 struct Config {
@@ -316,6 +318,7 @@ int main() {
             config.database.user,
             config.database.password,
         });
+        sfc::g_deployment_orchestrator = std::make_shared<sfc::DeploymentOrchestratorService>();
         bool runtime_schema_ready = false;
         for (int attempt = 1; attempt <= 45; ++attempt) {
             if (sfc::g_runtime_state_service->init_schema()) {
@@ -331,6 +334,7 @@ int main() {
         if (!runtime_schema_ready) {
             throw std::runtime_error("Failed to initialize runtime_state tables: database not ready");
         }
+        sfc::g_deployment_orchestrator->start();
 
         sfc::Topology persisted_topology;
         std::string persisted_template;
@@ -494,8 +498,14 @@ int main() {
         spdlog::info("Starting server...");
         
         app().run();
+        if (sfc::g_deployment_orchestrator) {
+            sfc::g_deployment_orchestrator->stop();
+        }
         
     } catch (const std::exception& e) {
+        if (sfc::g_deployment_orchestrator) {
+            sfc::g_deployment_orchestrator->stop();
+        }
         spdlog::critical("Fatal error: {}", e.what());
         return 1;
     }

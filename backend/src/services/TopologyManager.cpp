@@ -82,6 +82,12 @@ Topology TopologyManager::generate_walker_delta(
             sat.disk_total = disk_dist(rng);
             sat.disk_available = sat.disk_total;
             sat.core_business_load = CoreBusinessLoad{};
+            sat.core_business_load.signaling_load = 0.0;
+            sat.core_business_load.session_load = 0.0;
+            sat.core_business_load.user_plane_load = 0.0;
+            sat.core_business_load.mobility_load = 0.0;
+            sat.core_business_load.policy_load = 0.0;
+            sat.core_business_load.auth_load = 0.0;
             sat.core_network_load = 0.0;
             sat.node_reliability = 0.98;
             sat.status = "active";

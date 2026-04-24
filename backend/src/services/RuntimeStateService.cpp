@@ -434,8 +434,28 @@ bool RuntimeStateService::parse_topology_json(const nlohmann::json& root, Topolo
             sat.mem_available = json_number(n, "mem_available", sat.mem_total);
             sat.disk_total = json_number(n, "disk_total", 0.0);
             sat.disk_available = json_number(n, "disk_available", sat.disk_total);
-            sat.core_network_load = 0.0;
+            sat.core_network_load = std::max(0.0, std::min(1.0, json_number(n, "core_network_load", 0.0)));
             sat.core_business_load = CoreBusinessLoad{};
+            if (n.contains("core_business_load") && n["core_business_load"].is_object()) {
+                const auto& cb = n["core_business_load"];
+                sat.core_business_load.signaling_load = json_number(cb, "signaling_load", sat.core_network_load);
+                sat.core_business_load.session_load = json_number(cb, "session_load", sat.core_network_load);
+                sat.core_business_load.user_plane_load = json_number(cb, "user_plane_load", sat.core_network_load);
+                sat.core_business_load.mobility_load = json_number(cb, "mobility_load", sat.core_network_load);
+                sat.core_business_load.policy_load = json_number(cb, "policy_load", sat.core_network_load);
+                sat.core_business_load.auth_load = json_number(cb, "auth_load", sat.core_network_load);
+            } else {
+                sat.core_business_load.signaling_load = sat.core_network_load;
+                sat.core_business_load.session_load = sat.core_network_load;
+                sat.core_business_load.user_plane_load = sat.core_network_load;
+                sat.core_business_load.mobility_load = sat.core_network_load;
+                sat.core_business_load.policy_load = sat.core_network_load;
+                sat.core_business_load.auth_load = sat.core_network_load;
+            }
+            sat.core_business_load.normalize_inplace();
+            if (sat.core_network_load <= 1e-9) {
+                sat.core_network_load = sat.core_business_load.load_index();
+            }
 
             sat.node_reliability = json_number(n, "node_reliability", 0.98);
             sat.status = json_string(n, "status", "active");

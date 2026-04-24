@@ -160,3 +160,8 @@ python -m ground_training.models.model_export --context-dim 48
 - 详细设计：`/Users/t1an/Desktop/project/SFC/sfc_deploy/项目总体设计文档.md`
 - 训练与推理说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/算法训练与推理说明.md`
 - 后端说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/backend/README.md`
+- Open5GS 真实部署与麒麟迁移：`/Users/t1an/Desktop/project/SFC/sfc_deploy/docs/open5gs-real-deployment.md`
+
+## 10. Open5GS 真实部署辅助脚本
+- 多架构镜像构建：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/build_open5gs_multiarch.sh`
+- 手动 UERANSIM 冒烟验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_smoke.sh`

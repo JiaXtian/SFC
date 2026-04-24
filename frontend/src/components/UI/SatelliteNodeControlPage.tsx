@@ -398,10 +398,15 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                   </button>
                 </th>
                 <th className="px-2 py-2 text-left">
+                  容器状态
+                </th>
+                <th className="px-2 py-2 text-left">
                   <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('vnf_count')}>
-                    网元数<ArrowDownUp className="w-3 h-3" />
+                    运行网元<ArrowDownUp className="w-3 h-3" />
                   </button>
                 </th>
+                <th className="px-2 py-2 text-left">服务探测</th>
+                <th className="px-2 py-2 text-left">业务负载</th>
                 <th className="px-2 py-2 text-left">已部署SFC名称</th>
                 <th className="px-2 py-2 text-left">核心网网元类型</th>
                 <th className="px-2 py-2 text-left">操作</th>
@@ -413,7 +418,14 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                 const satId = String(sat?.id ?? '')
                 const checked = selectedIds.has(satId)
                 const sfcNames = Array.isArray(sat?.deployed_sfc_names) ? sat.deployed_sfc_names.map((x: any) => String(x)) : []
-                const nfTypes = Array.isArray(sat?.deployed_core_nf_types) ? sat.deployed_core_nf_types.map((x: any) => String(x)) : []
+                const nfTypes = Array.isArray(sat?.deployed_core_nf_types)
+                  ? sat.deployed_core_nf_types.map((x: any) => String(x))
+                  : (Array.isArray(sat?.running_core_nf_types) ? sat.running_core_nf_types.map((x: any) => String(x)) : [])
+                const containerState = String(sat?.container_state ?? 'stopped')
+                const runningCoreNfCount = Number(sat?.running_core_nf_count ?? sat?.deployed_vnf_count ?? nfTypes.length ?? 0)
+                const serviceProbeOk = Boolean(sat?.service_probe_ok ?? false)
+                const coreBusinessLoadRaw = Number(sat?.core_network_load ?? sat?.core_business_load?.load_index ?? 0)
+                const coreBusinessLoad = Number.isFinite(coreBusinessLoadRaw) ? coreBusinessLoadRaw : 0
                 return (
                   <tr key={sat.id} className="border-t border-slate-800/80 text-slate-200">
                     <td className="px-2 py-2">
@@ -447,7 +459,28 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                     <td className="px-2 py-2 font-mono">{Number(sat?.mem_available ?? 0).toFixed(1)} / {Number(sat?.mem_total ?? 0).toFixed(1)}</td>
                     <td className="px-2 py-2 font-mono">{Number(sat?.disk_available ?? 0).toFixed(1)} / {Number(sat?.disk_total ?? 0).toFixed(1)}</td>
                     <td className="px-2 py-2 font-mono">{(Number(sat?.node_reliability ?? 0) * 100).toFixed(2)}%</td>
-                    <td className="px-2 py-2">{Number(sat?.deployed_vnf_count ?? nfTypes.length ?? 0)}</td>
+                    <td className="px-2 py-2">
+                      <span
+                        className={`px-1.5 py-0.5 rounded ${
+                          containerState === 'running'
+                            ? 'text-emerald-200 bg-emerald-500/20'
+                            : (containerState === 'starting'
+                              ? 'text-amber-200 bg-amber-500/20'
+                              : (containerState === 'failed'
+                                ? 'text-rose-200 bg-rose-500/20'
+                                : 'text-slate-300 bg-slate-700/40'))
+                        }`}
+                      >
+                        {containerState}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2">{runningCoreNfCount}</td>
+                    <td className="px-2 py-2">
+                      <span className={`px-1.5 py-0.5 rounded ${serviceProbeOk ? 'text-emerald-200 bg-emerald-500/20' : 'text-amber-200 bg-amber-500/20'}`}>
+                        {serviceProbeOk ? 'OK' : 'Pending'}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 font-mono">{(coreBusinessLoad * 100).toFixed(1)}%</td>
                     <td className="px-2 py-2">
                       {sfcNames.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
@@ -500,7 +533,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={13} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
+                  <td colSpan={16} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
                 </tr>
               )}
             </tbody>

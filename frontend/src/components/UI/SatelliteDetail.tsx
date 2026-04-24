@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react'
 import { X, Cpu, HardDrive, Navigation, Zap } from 'lucide-react'
+import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
 
@@ -56,12 +58,51 @@ const Bar = ({ val = 0, max = 0 }: { val?: number; max?: number }) => {
 
 export default function SatelliteDetail() {
   const { selectedSatellite, setSelectedSatellite, deployments } = useStore()
+  const [runtimeDetail, setRuntimeDetail] = useState<any | null>(null)
+
+  useEffect(() => {
+    const satId = String(selectedSatellite?.id ?? '')
+    if (!satId) return
+
+    let active = true
+    const pull = async () => {
+      try {
+        const detail = await apiClient.getSatellite(satId)
+        if (active) setRuntimeDetail(detail)
+      } catch {
+        if (active) setRuntimeDetail(null)
+      }
+    }
+
+    pull()
+    const timer = window.setInterval(pull, 4000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [selectedSatellite?.id])
 
   if (!selectedSatellite) return null
 
-  const sat = selectedSatellite
+  const sat = runtimeDetail && String(runtimeDetail?.id ?? '') === String(selectedSatellite?.id ?? '')
+    ? { ...selectedSatellite, ...runtimeDetail }
+    : selectedSatellite
   const satFaultTag = String((sat as any)?.fault_tag ?? '')
   const isFault = isNodeFault(sat)
+  const containerState = String((sat as any)?.container_state ?? 'stopped')
+  const serviceProbeOk = Boolean((sat as any)?.service_probe_ok ?? false)
+  const runningCoreNfTypes = Array.isArray((sat as any)?.running_core_nf_types)
+    ? (sat as any).running_core_nf_types.map((x: any) => String(x))
+    : []
+  const runningCoreNfCount = Number((sat as any)?.running_core_nf_count ?? runningCoreNfTypes.length ?? 0)
+  const coreBusinessLoad = (sat as any)?.core_business_load ?? {}
+  const coreLoadIndex = Number((sat as any)?.core_network_load ?? coreBusinessLoad?.load_index ?? 0)
+  const signalingLoad = Number(coreBusinessLoad?.signaling_load ?? 0)
+  const sessionLoad = Number(coreBusinessLoad?.session_load ?? 0)
+  const userPlaneLoad = Number(coreBusinessLoad?.user_plane_load ?? 0)
+  const mobilityLoad = Number(coreBusinessLoad?.mobility_load ?? 0)
+  const policyLoad = Number(coreBusinessLoad?.policy_load ?? 0)
+  const authLoad = Number(coreBusinessLoad?.auth_load ?? 0)
 
 
   const cpuTotal = Number(sat?.cpu_total ?? 0)
@@ -79,16 +120,6 @@ export default function SatelliteDetail() {
   const coords: any = sat?.coordinates ?? {}
 
   const safeDeployments = deployments ?? []
-
-
-  const vnfsHere = safeDeployments.flatMap((d: any) =>
-    (d?.per_vnf ?? [])
-      .filter((v: any) => v?.node === sat?.id)
-      .map((v: any) => ({
-        ...v,
-        dep: d
-      }))
-  )
 
   const trafficRoles = safeDeployments
     .map((d: any) => {
@@ -156,9 +187,15 @@ export default function SatelliteDetail() {
           <span className="text-slate-400">
             · 故障类型 {isFault ? nodeFaultTypeLabel(satFaultTag) : '无'}
           </span>
-          {vnfsHere.length > 0 && (
+          <span className="text-cyan-300">
+            · 容器 {containerState}
+          </span>
+          <span className={serviceProbeOk ? 'text-emerald-300' : 'text-amber-300'}>
+            · 探测 {serviceProbeOk ? 'OK' : 'Pending'}
+          </span>
+          {runningCoreNfCount > 0 && (
             <span className="text-yellow-400">
-              · {vnfsHere.length} 网元
+              · {runningCoreNfCount} 网元
             </span>
           )}
         </div>
@@ -264,14 +301,14 @@ export default function SatelliteDetail() {
         <div>
           <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
             <Zap className="w-3 h-3" />
-            运行中核心网网元 ({vnfsHere.length})
+            运行中核心网网元 ({runningCoreNfCount})
           </div>
 
-          {vnfsHere.length > 0 ? (
+          {runningCoreNfTypes.length > 0 ? (
             <div className="space-y-1.5">
-              {vnfsHere.map((item: any, i: number) => (
+              {runningCoreNfTypes.map((nfType: string, i: number) => (
                 <div
-                  key={i}
+                  key={`${nfType}-${i}`}
                   className="px-2.5 py-2 rounded-lg"
                   style={{
                     background:
@@ -279,59 +316,12 @@ export default function SatelliteDetail() {
                     border: '1px solid rgba(0,255,136,0.25)'
                   }}
                 >
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span className="text-[11px] font-semibold text-green-300">
-                      {item?.core_nf ?? item?.vnf ?? 'Unknown'}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-green-300 font-mono">
+                      {nfType.toUpperCase()}
                     </span>
-
-                    <span
-                      className={`text-[9px] px-1.5 py-0.5 rounded-full ${
-                        item?.dep?.status === 'completed'
-                          ? 'text-green-400 bg-green-900/30'
-                          : 'text-yellow-400 bg-yellow-900/30'
-                      }`}
-                    >
-                      {item?.dep?.status === 'completed'
-                        ? '运行中'
-                        : '部署中'}
-                    </span>
-                  </div>
-
-                  <div className="text-[9px] text-gray-600">
-                    SFC:{' '}
-                    <span className="text-gray-400">
-                      {resolveSfcLabel(safeDeployments as any, {
-                        deploymentId: String(item?.dep?.deployment_id ?? ''),
-                        sessionId: String(item?.dep?.session_id ?? ''),
-                        requestId: String(item?.dep?.request_id ?? ''),
-                      })}
-                    </span>
-                  </div>
-
-                  <div className="text-[9px] text-gray-600 mt-1 flex gap-3">
-                    <span>
-                      类型{' '}
-                      <span className="text-gray-400 font-mono">
-                        {String(item?.nf_type ?? '-')}
-                      </span>
-                    </span>
-                    <span>
-                      CPU{' '}
-                      <span className="text-gray-400 font-mono">
-                        {Number(item?.cpu_used ?? 0).toFixed(2)}
-                      </span>
-                    </span>
-                    <span>
-                      MEM{' '}
-                      <span className="text-gray-400 font-mono">
-                        {Number(item?.mem_used ?? 0).toFixed(1)}GB
-                      </span>
-                    </span>
-                    <span>
-                      DISK{' '}
-                      <span className="text-gray-400 font-mono">
-                        {Number(item?.disk_used ?? 0).toFixed(1)}GB
-                      </span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full text-green-400 bg-green-900/30">
+                      running
                     </span>
                   </div>
                 </div>
@@ -345,6 +335,57 @@ export default function SatelliteDetail() {
               暂无核心网网元部署
             </div>
           )}
+        </div>
+
+        <div>
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
+            <Zap className="w-3 h-3" />
+            核心网业务负载 ({(coreLoadIndex * 100).toFixed(1)}%)
+          </div>
+          <div className="space-y-2">
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">Signaling</span>
+                <span className="text-gray-300 font-mono">{(signalingLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={signalingLoad} max={1} />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">Session</span>
+                <span className="text-gray-300 font-mono">{(sessionLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={sessionLoad} max={1} />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">User Plane</span>
+                <span className="text-gray-300 font-mono">{(userPlaneLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={userPlaneLoad} max={1} />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">Mobility</span>
+                <span className="text-gray-300 font-mono">{(mobilityLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={mobilityLoad} max={1} />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">Policy</span>
+                <span className="text-gray-300 font-mono">{(policyLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={policyLoad} max={1} />
+            </div>
+            <div>
+              <div className="flex justify-between text-[10px] mb-1">
+                <span className="text-gray-500">Auth</span>
+                <span className="text-gray-300 font-mono">{(authLoad * 100).toFixed(1)}%</span>
+              </div>
+              <Bar val={authLoad} max={1} />
+            </div>
+          </div>
         </div>
 
         <div>

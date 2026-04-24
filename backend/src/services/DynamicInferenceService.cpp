@@ -1,4 +1,6 @@
 #include "services/DynamicInferenceService.h"
+#include "services/AuthGlobals.h"
+#include "services/DeploymentOrchestratorService.h"
 #include "websocket/WSHandler.h"
 #include <algorithm>
 #include <chrono>
@@ -586,8 +588,36 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             session.active_resource_deployment_id = new_allocation_id;
             auto updated_topology = res_mgr_->export_current_topology();
             topo_mgr_->save_current_topology(updated_topology);
+
+            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator) {
+                g_deployment_orchestrator->enqueue_deployment(
+                    session.orchestration_deployment_id,
+                    session.request.request_id,
+                    chosen,
+                    session.request.vnfs,
+                    "session_continuous",
+                    trigger
+                );
+            }
+
             session.redeploy_total += 1;
             total_redeploys_ += 1;
+        } else if (
+            !session.orchestration_deployment_id.empty() &&
+            g_deployment_orchestrator &&
+            trigger != "session_start" &&
+            trigger != "topology_tick_bootstrap"
+        ) {
+            // Fault-driven recomputation may keep the same placement. We still trigger orchestration
+            // so container runtime can perform stop/start recovery on the selected satellites.
+            g_deployment_orchestrator->enqueue_deployment(
+                session.orchestration_deployment_id,
+                session.request.request_id,
+                chosen,
+                session.request.vnfs,
+                "session_continuous",
+                trigger
+            );
         }
 
         session.last_candidate = chosen;
@@ -670,6 +700,7 @@ nlohmann::json DynamicInferenceService::start_session(
     session.auto_redeploy = auto_redeploy;
     session.active = true;
     sessions_[session.session_id] = session;
+    sessions_[session.session_id].orchestration_deployment_id = initial_deployment_id;
 
     TopologySnapshot snapshot = dynamic_sim_ ? dynamic_sim_->get_latest_snapshot() : TopologySnapshot{};
     if (snapshot.topology.nodes.empty()) {
@@ -687,6 +718,7 @@ nlohmann::json DynamicInferenceService::start_session(
         sessions_[session.session_id].last_candidate_signature = candidate_signature(chosen);
         sessions_[session.session_id].has_last_candidate = true;
         sessions_[session.session_id].active_resource_deployment_id = initial_deployment_id;
+        sessions_[session.session_id].orchestration_deployment_id = initial_deployment_id;
         sessions_[session.session_id].last_topology_version =
             snapshot.topology_version > 0 ? snapshot.topology_version : snapshot.topology.metadata.topology_version;
         sessions_[session.session_id].last_sim_time = !snapshot.sim_time.empty()

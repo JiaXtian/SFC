@@ -58,6 +58,7 @@ private:
         int last_required_recompute_topology_version = -1;
         nlohmann::json last_decision_trace;
         std::string active_resource_deployment_id;
+        std::string orchestration_deployment_id;
     };
 
     static std::string make_session_id();

@@ -70,6 +70,20 @@ function normalizeDeployment(raw: any): Deployment {
     topology_version_bound: raw?.topology_version_bound == null ? undefined : toNumber(raw.topology_version_bound, 0),
     path_recompute_count: raw?.path_recompute_count == null ? undefined : toNumber(raw.path_recompute_count, 0),
     decision_trigger: raw?.decision_trigger ? String(raw.decision_trigger) : undefined,
+    orchestration_phase: raw?.orchestration_phase ? String(raw.orchestration_phase) : undefined,
+    orchestration_progress: raw?.orchestration_progress == null ? undefined : toNumber(raw.orchestration_progress, 0),
+    orchestration_mode: raw?.orchestration_mode ? String(raw.orchestration_mode) : undefined,
+    orchestration_trigger: raw?.orchestration_trigger ? String(raw.orchestration_trigger) : undefined,
+    containers_total: raw?.containers_total == null ? undefined : toNumber(raw.containers_total, 0),
+    containers_running: raw?.containers_running == null ? undefined : toNumber(raw.containers_running, 0),
+    containers_failed: raw?.containers_failed == null ? undefined : toNumber(raw.containers_failed, 0),
+    core_nfs_total: raw?.core_nfs_total == null ? undefined : toNumber(raw.core_nfs_total, 0),
+    core_nfs_running: raw?.core_nfs_running == null ? undefined : toNumber(raw.core_nfs_running, 0),
+    core_nfs_failed: raw?.core_nfs_failed == null ? undefined : toNumber(raw.core_nfs_failed, 0),
+    service_ready: raw?.service_ready == null ? undefined : Boolean(raw.service_ready),
+    ready_for_ueransim: raw?.ready_for_ueransim == null ? undefined : Boolean(raw.ready_for_ueransim),
+    last_error: raw?.last_error == null ? undefined : String(raw.last_error),
+    last_update_at: raw?.last_update_at == null ? undefined : String(raw.last_update_at),
   }
 }
 

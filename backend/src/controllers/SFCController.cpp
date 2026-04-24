@@ -1,5 +1,7 @@
 #include "controllers/SFCController.h"
 #include "services/AuthGlobals.h"
+#include "services/DeploymentOrchestratorService.h"
+#include "services/DeploymentStateStore.h"
 #include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
 #include "websocket/WSHandler.h"
@@ -41,6 +43,73 @@ void sync_deployments_from_db_locked() {
         }
         if (!item.contains("inference_latency_ms")) {
             item["inference_latency_ms"] = 0.0;
+            normalized = true;
+        }
+        if (!item.contains("orchestration_phase")) {
+            item["orchestration_phase"] = "not_started";
+            normalized = true;
+        }
+        if (!item.contains("orchestration_progress")) {
+            item["orchestration_progress"] = item.value("status", std::string("completed")) == "completed" ? 100 : 0;
+            normalized = true;
+        }
+        if (!item.contains("containers_total")) {
+            const auto nodes = item.contains("deployed_nodes") && item["deployed_nodes"].is_array()
+                ? static_cast<int>(item["deployed_nodes"].size())
+                : 0;
+            item["containers_total"] = nodes;
+            normalized = true;
+        }
+        if (!item.contains("containers_running")) {
+            const int total = item.value("containers_total", 0);
+            item["containers_running"] = item.value("status", std::string("completed")) == "completed" ? total : 0;
+            normalized = true;
+        }
+        if (!item.contains("containers_failed")) {
+            item["containers_failed"] = 0;
+            normalized = true;
+        }
+        if (!item.contains("core_nfs_total")) {
+            int total = 0;
+            if (item.contains("per_core_nf") && item["per_core_nf"].is_array()) {
+                total = static_cast<int>(item["per_core_nf"].size());
+            } else if (item.contains("per_vnf") && item["per_vnf"].is_array()) {
+                total = static_cast<int>(item["per_vnf"].size());
+            }
+            item["core_nfs_total"] = total;
+            normalized = true;
+        }
+        if (!item.contains("core_nfs_running")) {
+            const int total = item.value("core_nfs_total", 0);
+            item["core_nfs_running"] = item.value("status", std::string("completed")) == "completed" ? total : 0;
+            normalized = true;
+        }
+        if (!item.contains("core_nfs_failed")) {
+            item["core_nfs_failed"] = 0;
+            normalized = true;
+        }
+        if (!item.contains("service_ready")) {
+            item["service_ready"] = item.value("status", std::string("completed")) == "completed";
+            normalized = true;
+        }
+        if (!item.contains("ready_for_ueransim")) {
+            item["ready_for_ueransim"] = item.value("service_ready", false);
+            normalized = true;
+        }
+        if (!item.contains("last_error")) {
+            item["last_error"] = "";
+            normalized = true;
+        }
+        if (!item.contains("last_update_at")) {
+            item["last_update_at"] = item.value("deployed_at", "");
+            normalized = true;
+        }
+        if (!item.contains("orchestration_mode")) {
+            item["orchestration_mode"] = item.value("strategy_mode", "single_request");
+            normalized = true;
+        }
+        if (!item.contains("orchestration_trigger")) {
+            item["orchestration_trigger"] = "manual_deploy";
             normalized = true;
         }
         if (!item.contains("satisfies_constraints")) {
@@ -96,6 +165,40 @@ void persist_deployments_locked() {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& dep : g_deployments) arr.push_back(dep);
     g_runtime_state_service->save_deployments_json(arr);
+}
+
+bool patch_deployment_record(
+    const std::string& deployment_id,
+    const nlohmann::json& patch,
+    nlohmann::json* merged_out
+) {
+    if (deployment_id.empty() || !patch.is_object()) return false;
+    std::lock_guard<std::mutex> lock(g_deployments_mutex);
+    sync_deployments_from_db_locked();
+    for (auto& dep : g_deployments) {
+        const std::string dep_id = dep.value("deployment_id", std::string(""));
+        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
+        if (dep_id != deployment_id && backend_id != deployment_id) continue;
+
+        for (auto it = patch.begin(); it != patch.end(); ++it) {
+            dep[it.key()] = it.value();
+        }
+        if (dep.value("backend_deployment_id", "").empty() && !dep_id.empty()) {
+            dep["backend_deployment_id"] = dep_id;
+        }
+        persist_deployments_locked();
+        if (merged_out) *merged_out = dep;
+        return true;
+    }
+    return false;
+}
+
+nlohmann::json list_deployment_records() {
+    std::lock_guard<std::mutex> lock(g_deployments_mutex);
+    sync_deployments_from_db_locked();
+    nlohmann::json out = nlohmann::json::array();
+    for (const auto& dep : g_deployments) out.push_back(dep);
+    return out;
 }
 
 struct CoreNFProfile {
@@ -905,6 +1008,26 @@ void SFCController::deploy(
         if (json->isMember("strategy_mode")) {
             dep_json["strategy_mode"] = (*json).get("strategy_mode", "single_request").asString();
         }
+        std::unordered_set<std::string> unique_nodes;
+        for (const auto& node : candidate.deployed_nodes) {
+            if (!node.empty()) unique_nodes.insert(node);
+        }
+        const int containers_total = static_cast<int>(unique_nodes.size());
+        const int core_nfs_total = static_cast<int>(candidate.per_vnf.size());
+        dep_json["orchestration_phase"] = g_deployment_orchestrator ? "queued" : "orchestrator_unavailable";
+        dep_json["orchestration_progress"] = g_deployment_orchestrator ? 5 : 100;
+        dep_json["orchestration_mode"] = dep_json.value("strategy_mode", std::string("single_request"));
+        dep_json["orchestration_trigger"] = "manual_deploy";
+        dep_json["containers_total"] = containers_total;
+        dep_json["containers_running"] = 0;
+        dep_json["containers_failed"] = 0;
+        dep_json["core_nfs_total"] = core_nfs_total;
+        dep_json["core_nfs_running"] = 0;
+        dep_json["core_nfs_failed"] = 0;
+        dep_json["service_ready"] = false;
+        dep_json["ready_for_ueransim"] = false;
+        dep_json["last_error"] = g_deployment_orchestrator ? "" : "orchestrator_unavailable";
+        dep_json["last_update_at"] = "";
         if (json->isMember("path_nodes") && (*json)["path_nodes"].isArray()) {
             nlohmann::json path_nodes = nlohmann::json::array();
             for (const auto& node : (*json)["path_nodes"]) {
@@ -933,6 +1056,7 @@ void SFCController::deploy(
         char buf[100];
         std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t));
         dep_json["deployed_at"] = buf;
+        dep_json["last_update_at"] = buf;
 
         nlohmann::json per_vnf_json = nlohmann::json::array();
         for (const auto& pv : candidate.per_vnf) {
@@ -1001,6 +1125,17 @@ void SFCController::deploy(
             );
             g_deployments.push_back(dep_json);
             persist_deployments_locked();
+        }
+
+        if (g_deployment_orchestrator) {
+            g_deployment_orchestrator->enqueue_deployment(
+                deployment_id,
+                request_id,
+                candidate,
+                vnfs,
+                dep_json.value("strategy_mode", std::string("single_request")),
+                "manual_deploy"
+            );
         }
         
         Json::Value response;

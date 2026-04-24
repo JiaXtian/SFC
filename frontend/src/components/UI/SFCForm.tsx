@@ -46,14 +46,19 @@ interface VNFConfig {
 
 const sfcTemplates = [
   {
-    name: 'open5GS 基础链',
-    vnfs: ['amf', 'smf', 'upf'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 160, min_bandwidth_gbps: 1.0, min_reliability: 0.9 },
+    name: 'SA-Compact-7',
+    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 220, min_bandwidth_gbps: 0.8, min_reliability: 0.86 },
   },
   {
-    name: 'open5GS 扩展链',
-    vnfs: ['nrf', 'scp', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 240, min_bandwidth_gbps: 1.2, min_reliability: 0.86 },
+    name: 'SA-Standard-9',
+    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 260, min_bandwidth_gbps: 1.0, min_reliability: 0.84 },
+  },
+  {
+    name: 'SA-Enhanced-10',
+    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 280, min_bandwidth_gbps: 1.0, min_reliability: 0.83 },
   },
 ]
 

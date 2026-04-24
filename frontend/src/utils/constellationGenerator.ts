@@ -130,6 +130,14 @@ export interface SatelliteData {
   node_reliability?: number
   status?: 'active' | 'down'
   fault_tag?: string
+  container_name?: string
+  container_state?: 'stopped' | 'starting' | 'running' | 'failed' | string
+  running_core_nf_types?: string[]
+  running_core_nf_count?: number
+  service_probe_ok?: boolean
+  deployed_sfc_names?: string[]
+  deployed_core_nf_types?: string[]
+  deployed_vnf_count?: number
   vnfs: any[]
   core_nfs?: any[]
 }

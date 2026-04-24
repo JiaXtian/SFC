@@ -88,8 +88,13 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
               <th className="px-2 py-2 text-left">SFC</th>
               <th className="px-2 py-2 text-left">状态</th>
               <th className="px-2 py-2 text-left">节点数</th>
+              <th className="px-2 py-2 text-left">编排阶段</th>
+              <th className="px-2 py-2 text-left">容器启动</th>
+              <th className="px-2 py-2 text-left">网元运行</th>
+              <th className="px-2 py-2 text-left">服务就绪</th>
+              <th className="px-2 py-2 text-left">UE验证</th>
               <th className="px-2 py-2 text-left">链路时延</th>
-              <th className="px-2 py-2 text-left">部署时间</th>
+              <th className="px-2 py-2 text-left">最后更新</th>
               <th className="px-2 py-2 text-left">操作</th>
             </tr>
           </thead>
@@ -100,13 +105,49 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
                 sessionId: String(dep?.session_id ?? ''),
                 requestId: String(dep?.request_id ?? ''),
               })
+              const phase = String(dep?.orchestration_phase ?? '-')
+              const progress = Number(dep?.orchestration_progress ?? 0)
+              const cTotal = Number(dep?.containers_total ?? 0)
+              const cRunning = Number(dep?.containers_running ?? 0)
+              const cFailed = Number(dep?.containers_failed ?? 0)
+              const nTotal = Number(dep?.core_nfs_total ?? 0)
+              const nRunning = Number(dep?.core_nfs_running ?? 0)
+              const nFailed = Number(dep?.core_nfs_failed ?? 0)
+              const serviceReady = Boolean(dep?.service_ready ?? false)
+              const readyForUe = Boolean(dep?.ready_for_ueransim ?? false)
+              const updatedAt = String(dep?.last_update_at ?? dep?.deployed_at ?? '-').replace('T', ' ').slice(0, 19)
               return (
                 <tr key={String(dep?.deployment_id ?? Math.random())} className="border-t border-slate-800/80 text-slate-200">
                   <td className="px-2 py-2 font-medium">{label}</td>
                   <td className="px-2 py-2">{String(dep?.status ?? 'completed')}</td>
                   <td className="px-2 py-2">{Array.isArray(dep?.deployed_nodes) ? dep.deployed_nodes.length : 0}</td>
+                  <td className="px-2 py-2">
+                    <div>{phase}</div>
+                    <div className="text-[10px] text-slate-400">{progress}%</div>
+                    {String(dep?.last_error ?? '').trim() && (
+                      <div className="text-[10px] text-rose-300">{String(dep.last_error)}</div>
+                    )}
+                  </td>
+                  <td className="px-2 py-2">
+                    <div>{cRunning}/{cTotal}</div>
+                    {cFailed > 0 && <div className="text-[10px] text-rose-300">failed {cFailed}</div>}
+                  </td>
+                  <td className="px-2 py-2">
+                    <div>{nRunning}/{nTotal}</div>
+                    {nFailed > 0 && <div className="text-[10px] text-rose-300">failed {nFailed}</div>}
+                  </td>
+                  <td className="px-2 py-2">
+                    <span className={`px-1.5 py-0.5 rounded ${serviceReady ? 'text-emerald-200 bg-emerald-500/20' : 'text-amber-200 bg-amber-500/20'}`}>
+                      {serviceReady ? 'Ready' : 'Pending'}
+                    </span>
+                  </td>
+                  <td className="px-2 py-2">
+                    <span className={`px-1.5 py-0.5 rounded ${readyForUe ? 'text-emerald-200 bg-emerald-500/20' : 'text-slate-300 bg-slate-700/40'}`}>
+                      {readyForUe ? '可验证' : '未就绪'}
+                    </span>
+                  </td>
                   <td className="px-2 py-2 font-mono">{Number(dep?.total_latency_ms ?? 0).toFixed(2)}ms</td>
-                  <td className="px-2 py-2">{String(dep?.deployed_at ?? '-').replace('T', ' ').slice(0, 19)}</td>
+                  <td className="px-2 py-2">{updatedAt}</td>
                   <td className="px-2 py-2">
                     <button
                       onClick={() => rollback(dep)}
@@ -121,7 +162,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
             })}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-slate-500">当前无已部署 SFC</td>
+                <td colSpan={11} className="px-3 py-8 text-center text-slate-500">当前无已部署 SFC</td>
               </tr>
             )}
           </tbody>

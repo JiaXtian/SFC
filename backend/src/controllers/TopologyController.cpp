@@ -1,5 +1,6 @@
 #include "controllers/TopologyController.h"
 #include "services/AuthGlobals.h"
+#include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
 #include "websocket/WSHandler.h"
@@ -47,6 +48,18 @@ int parse_int_or(const std::string& raw, int fallback) {
     } catch (...) {
         return fallback;
     }
+}
+
+Json::Value zero_core_business_load_json() {
+    Json::Value load(Json::objectValue);
+    load["signaling_load"] = 0.0;
+    load["session_load"] = 0.0;
+    load["user_plane_load"] = 0.0;
+    load["mobility_load"] = 0.0;
+    load["policy_load"] = 0.0;
+    load["auth_load"] = 0.0;
+    load["load_index"] = 0.0;
+    return load;
 }
 
 }  // namespace
@@ -223,6 +236,12 @@ void TopologyController::generateTopology(
                 const double disk_ratio = sat.disk_total > 1e-9 ? sat.disk_available / sat.disk_total : 0.0;
                 const double resource_health = std::max(0.0, std::min(1.0, (cpu_ratio + mem_ratio + disk_ratio) / 3.0));
                 sat.core_business_load = CoreBusinessLoad{};
+                sat.core_business_load.signaling_load = 0.0;
+                sat.core_business_load.session_load = 0.0;
+                sat.core_business_load.user_plane_load = 0.0;
+                sat.core_business_load.mobility_load = 0.0;
+                sat.core_business_load.policy_load = 0.0;
+                sat.core_business_load.auth_load = 0.0;
                 sat.core_network_load = 0.0;
                 sat.node_reliability = n.get("node_reliability", 0.985 + 0.014 * resource_health).asDouble();
                 sat.status = n.get("status", "active").asString();
@@ -520,6 +539,7 @@ void TopologyController::getSatellites(
         std::unordered_map<std::string, std::unordered_set<std::string>> node_sfc_names;
         std::unordered_map<std::string, std::unordered_set<std::string>> node_nf_types;
         std::unordered_map<std::string, int> node_vnf_counts;
+        std::unordered_map<std::string, DeploymentOrchestratorService::NodeRuntimeSnapshot> node_runtime;
         if (g_runtime_state_service) {
             const nlohmann::json deps = g_runtime_state_service->load_deployments_json();
             if (deps.is_array()) {
@@ -541,6 +561,22 @@ void TopologyController::getSatellites(
                         node_vnf_counts[node] += 1;
                     }
                 }
+            }
+        }
+        if (g_deployment_orchestrator) {
+            node_runtime = g_deployment_orchestrator->snapshot_node_runtime();
+            for (const auto& kv : node_runtime) {
+                if (!kv.second.deployed) {
+                    node_nf_types[kv.first].clear();
+                    node_vnf_counts[kv.first] = 0;
+                    continue;
+                }
+                const std::unordered_set<std::string> rt_types(
+                    kv.second.running_core_nf_types.begin(),
+                    kv.second.running_core_nf_types.end()
+                );
+                node_nf_types[kv.first] = rt_types;
+                node_vnf_counts[kv.first] = static_cast<int>(rt_types.size());
             }
         }
 
@@ -625,9 +661,43 @@ void TopologyController::getSatellites(
                 std::sort(types.begin(), types.end());
                 for (const auto& t : types) nf_types.append(t);
             }
+
+            const auto rt_it = node_runtime.find(sat->id);
+            if (rt_it != node_runtime.end() && rt_it->second.deployed) {
+                const auto& rt = rt_it->second;
+                Json::Value running_types(Json::arrayValue);
+                std::vector<std::string> sorted_types = rt.running_core_nf_types;
+                std::sort(sorted_types.begin(), sorted_types.end());
+                sorted_types.erase(std::unique(sorted_types.begin(), sorted_types.end()), sorted_types.end());
+                for (const auto& t : sorted_types) running_types.append(t);
+                row["container_name"] = rt.container_name;
+                row["container_state"] = rt.container_state.empty() ? "running" : rt.container_state;
+                row["running_core_nf_types"] = running_types;
+                row["running_core_nf_count"] = static_cast<int>(sorted_types.size());
+                row["service_probe_ok"] = rt.service_probe_ok;
+                row["core_business_load"] = nlohmann_to_jsoncpp(rt.core_business_load.to_json());
+                row["core_network_load"] = rt.core_network_load;
+                row["deployed_core_nf_types"] = running_types;
+                row["deployed_vnf_count"] = static_cast<int>(sorted_types.size());
+            } else {
+                row["container_name"] = "";
+                row["container_state"] = "stopped";
+                row["running_core_nf_types"] = Json::Value(Json::arrayValue);
+                row["running_core_nf_count"] = 0;
+                row["service_probe_ok"] = false;
+                row["core_business_load"] = zero_core_business_load_json();
+                row["core_network_load"] = 0.0;
+                row["deployed_core_nf_types"] = Json::Value(Json::arrayValue);
+                row["deployed_vnf_count"] = 0;
+            }
+
             row["deployed_sfc_names"] = sfc_names;
-            row["deployed_core_nf_types"] = nf_types;
-            row["deployed_vnf_count"] = node_vnf_counts[sat->id];
+            if (!row.isMember("deployed_core_nf_types")) {
+                row["deployed_core_nf_types"] = nf_types;
+            }
+            if (!row.isMember("deployed_vnf_count")) {
+                row["deployed_vnf_count"] = node_vnf_counts[sat->id];
+            }
             items.append(row);
         }
 
@@ -660,6 +730,74 @@ void TopologyController::getSatellite(
     try {
         auto sat = g_res_mgr->get_satellite(id);
         auto json_val = nlohmann_to_jsoncpp(sat.to_json());
+
+        Json::Value sfc_names(Json::arrayValue);
+        if (g_runtime_state_service) {
+            const nlohmann::json deps = g_runtime_state_service->load_deployments_json();
+            if (deps.is_array()) {
+                std::unordered_set<std::string> names;
+                for (const auto& dep : deps) {
+                    if (!dep.is_object()) continue;
+                    const std::string dep_status = lower_ascii(dep.value("status", std::string("completed")));
+                    if (dep_status == "rolled_back" || dep_status == "failed") continue;
+                    const std::string sfc_name = dep.value("sfc_name", dep.value("request_id", dep.value("deployment_id", std::string(""))));
+                    const auto per = dep.contains("per_core_nf") && dep["per_core_nf"].is_array()
+                        ? dep["per_core_nf"]
+                        : (dep.contains("per_vnf") && dep["per_vnf"].is_array() ? dep["per_vnf"] : nlohmann::json::array());
+                    for (const auto& item : per) {
+                        if (!item.is_object()) continue;
+                        if (item.value("node", std::string("")) == id && !sfc_name.empty()) {
+                            names.insert(sfc_name);
+                        }
+                    }
+                }
+                std::vector<std::string> ordered(names.begin(), names.end());
+                std::sort(ordered.begin(), ordered.end());
+                for (const auto& name : ordered) sfc_names.append(name);
+            }
+        }
+
+        Json::Value nf_types(Json::arrayValue);
+        if (g_deployment_orchestrator) {
+            auto rt_opt = g_deployment_orchestrator->get_node_runtime(id);
+            if (rt_opt.has_value() && rt_opt->deployed) {
+                std::vector<std::string> sorted_types = rt_opt->running_core_nf_types;
+                std::sort(sorted_types.begin(), sorted_types.end());
+                sorted_types.erase(std::unique(sorted_types.begin(), sorted_types.end()), sorted_types.end());
+                for (const auto& t : sorted_types) nf_types.append(t);
+                json_val["container_name"] = rt_opt->container_name;
+                json_val["container_state"] = rt_opt->container_state.empty() ? "running" : rt_opt->container_state;
+                json_val["running_core_nf_types"] = nf_types;
+                json_val["running_core_nf_count"] = static_cast<int>(sorted_types.size());
+                json_val["service_probe_ok"] = rt_opt->service_probe_ok;
+                json_val["core_business_load"] = nlohmann_to_jsoncpp(rt_opt->core_business_load.to_json());
+                json_val["core_network_load"] = rt_opt->core_network_load;
+                json_val["deployed_core_nf_types"] = nf_types;
+                json_val["deployed_vnf_count"] = static_cast<int>(sorted_types.size());
+            } else {
+                json_val["container_name"] = "";
+                json_val["container_state"] = "stopped";
+                json_val["running_core_nf_types"] = Json::Value(Json::arrayValue);
+                json_val["running_core_nf_count"] = 0;
+                json_val["service_probe_ok"] = false;
+                json_val["core_business_load"] = zero_core_business_load_json();
+                json_val["core_network_load"] = 0.0;
+                json_val["deployed_core_nf_types"] = Json::Value(Json::arrayValue);
+                json_val["deployed_vnf_count"] = 0;
+            }
+        } else {
+            json_val["container_name"] = "";
+            json_val["container_state"] = "stopped";
+            json_val["running_core_nf_types"] = Json::Value(Json::arrayValue);
+            json_val["running_core_nf_count"] = 0;
+            json_val["service_probe_ok"] = false;
+            json_val["core_business_load"] = zero_core_business_load_json();
+            json_val["core_network_load"] = 0.0;
+            json_val["deployed_core_nf_types"] = Json::Value(Json::arrayValue);
+            json_val["deployed_vnf_count"] = 0;
+        }
+        json_val["deployed_sfc_names"] = sfc_names;
+
         auto resp = HttpResponse::newHttpJsonResponse(json_val);
         callback(resp);
         

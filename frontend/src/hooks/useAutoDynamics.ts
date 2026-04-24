@@ -227,6 +227,20 @@ export function useAutoDynamics() {
               node_reliability: Number(src.node_reliability ?? sat.node_reliability ?? 0.98),
               status: String(src.status ?? 'active'),
               fault_tag: String(src.fault_tag ?? ''),
+              container_name: String(src.container_name ?? sat.container_name ?? ''),
+              container_state: String(src.container_state ?? sat.container_state ?? 'stopped'),
+              running_core_nf_types: Array.isArray(src.running_core_nf_types)
+                ? src.running_core_nf_types.map((x: any) => String(x))
+                : (Array.isArray(sat.running_core_nf_types) ? sat.running_core_nf_types.map((x: any) => String(x)) : []),
+              running_core_nf_count: Number(src.running_core_nf_count ?? sat.running_core_nf_count ?? 0),
+              service_probe_ok: Boolean(src.service_probe_ok ?? sat.service_probe_ok ?? false),
+              deployed_sfc_names: Array.isArray(src.deployed_sfc_names)
+                ? src.deployed_sfc_names.map((x: any) => String(x))
+                : (Array.isArray(sat.deployed_sfc_names) ? sat.deployed_sfc_names.map((x: any) => String(x)) : []),
+              deployed_core_nf_types: Array.isArray(src.deployed_core_nf_types)
+                ? src.deployed_core_nf_types.map((x: any) => String(x))
+                : (Array.isArray(sat.deployed_core_nf_types) ? sat.deployed_core_nf_types.map((x: any) => String(x)) : []),
+              deployed_vnf_count: Number(src.deployed_vnf_count ?? sat.deployed_vnf_count ?? 0),
               vnfs: Array.isArray(src.core_nfs) ? src.core_nfs : (Array.isArray(src.vnfs) ? src.vnfs : sat.vnfs),
             }
           })

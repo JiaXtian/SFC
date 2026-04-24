@@ -1,0 +1,104 @@
+#pragma once
+
+#include "models/types.h"
+
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace sfc {
+
+class DeploymentOrchestratorService {
+  public:
+    struct NodeRuntimeSnapshot {
+        std::string node_id;
+        std::string container_name;
+        std::string container_state;  // stopped, starting, running, failed
+        std::vector<std::string> running_core_nf_types;
+        bool service_probe_ok = false;
+        bool deployed = false;
+        CoreBusinessLoad core_business_load{};
+        double core_network_load = 0.0;
+    };
+
+    DeploymentOrchestratorService();
+    ~DeploymentOrchestratorService();
+
+    void start();
+    void stop();
+
+    void enqueue_deployment(
+        const std::string& deployment_id,
+        const std::string& request_id,
+        const DeploymentCandidate& candidate,
+        const std::vector<VNF>& request_vnfs,
+        const std::string& mode,
+        const std::string& trigger
+    );
+
+    std::unordered_map<std::string, NodeRuntimeSnapshot> snapshot_node_runtime() const;
+    std::optional<NodeRuntimeSnapshot> get_node_runtime(const std::string& node_id) const;
+
+  private:
+    struct OrchestrationTask {
+        uint64_t sequence = 0;
+        std::string deployment_id;
+        std::string request_id;
+        DeploymentCandidate candidate;
+        std::vector<VNF> request_vnfs;
+        std::string mode;
+        std::string trigger;
+    };
+
+    struct DeploymentRuntimeState {
+        std::string deployment_id;
+        std::vector<std::string> active_nodes;
+    };
+
+    void worker_loop();
+    void process_task(const OrchestrationTask& task);
+
+    static std::string iso_now();
+    static std::string normalize_nf_type(const std::string& nf_type);
+    static CoreBusinessLoad compute_business_load_for_nfs(
+        const std::vector<std::string>& nf_types,
+        bool service_probe_ok
+    );
+
+    bool ensure_network();
+    bool stop_container(const std::string& container_name);
+    bool ensure_satellite_container(const std::string& container_name);
+    bool start_nf_in_container(const std::string& container_name, const std::string& nf_type);
+    bool run_shell_command(const std::string& cmd, int* code = nullptr) const;
+    static std::string node_to_container_name(const std::string& node_id);
+
+    void update_deployment_runtime_state(
+        const std::string& deployment_id,
+        const nlohmann::json& patch,
+        bool broadcast
+    );
+    void update_node_runtime_state(
+        const std::string& node_id,
+        const NodeRuntimeSnapshot& snapshot
+    );
+    void clear_nodes_for_deployment(const std::vector<std::string>& old_nodes);
+
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    bool running_ = false;
+    bool stop_requested_ = false;
+    uint64_t seq_ = 0;
+    std::thread worker_;
+    std::deque<OrchestrationTask> queue_;
+    std::unordered_map<std::string, DeploymentRuntimeState> deployment_runtime_;
+    std::unordered_map<std::string, NodeRuntimeSnapshot> node_runtime_;
+};
+
+}  // namespace sfc
+

@@ -131,6 +131,32 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               })
               return
             }
+            if (type === 'deployment_runtime_update') {
+              const deploymentId = String(data.deployment_id ?? '')
+              if (deploymentId) {
+                updateDeployment(deploymentId, {
+                  orchestration_phase: String(data.orchestration_phase ?? ''),
+                  orchestration_progress: Number(data.orchestration_progress ?? 0),
+                  containers_total: Number(data.containers_total ?? 0),
+                  containers_running: Number(data.containers_running ?? 0),
+                  containers_failed: Number(data.containers_failed ?? 0),
+                  core_nfs_total: Number(data.core_nfs_total ?? 0),
+                  core_nfs_running: Number(data.core_nfs_running ?? 0),
+                  core_nfs_failed: Number(data.core_nfs_failed ?? 0),
+                  service_ready: Boolean(data.service_ready),
+                  ready_for_ueransim: Boolean(data.ready_for_ueransim),
+                  last_error: String(data.last_error ?? ''),
+                  last_update_at: String(data.last_update_at ?? ''),
+                } as any)
+              }
+              pushRuntimeEvent({
+                type: 'deployment_runtime_update',
+                sim_time: data.last_update_at,
+                message: `部署运行态更新 ${deploymentId}: ${String(data.orchestration_phase ?? 'unknown')} (${Number(data.orchestration_progress ?? 0)}%)`,
+                raw: data,
+              })
+              return
+            }
             if (type === 'topology_tick') {
               if (applyTopologySnapshotEnabled) {
                 applyTopologySnapshot(data.snapshot)
