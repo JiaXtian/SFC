@@ -8,12 +8,19 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
-#include <iomanip>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <sstream>
+#include <sys/wait.h>
+#include <thread>
+#include <unordered_set>
+
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 namespace sfc {
@@ -21,6 +28,21 @@ namespace {
 
 constexpr const char* kSatelliteNetwork = "sfc-open5gs-net";
 constexpr const char* kDefaultSatelliteImage = "ghcr.io/open5gs/open5gs:latest";
+constexpr const char* kLocalSatelliteImage = "sfc-open5gs-satellite:local";
+constexpr const char* kLocalSatelliteImageLatest = "sfc-open5gs-satellite:latest";
+constexpr const char* kMongoContainer = "sfc-open5gs-mongo";
+constexpr const char* kMongoImage = "mongo:6";
+constexpr const char* kMongoUri = "mongodb://sfc-open5gs-mongo/open5gs";
+
+constexpr int kSbiPortNrf = 7777;
+constexpr int kSbiPortAmf = 7778;
+constexpr int kSbiPortSmf = 7779;
+constexpr int kSbiPortAusf = 7780;
+constexpr int kSbiPortUdm = 7781;
+constexpr int kSbiPortUdr = 7782;
+constexpr int kSbiPortPcf = 7783;
+constexpr int kSbiPortNssf = 7784;
+constexpr int kSbiPortScp = 7785;
 
 double clamp01(double v) {
     if (v < 0.0) return 0.0;
@@ -28,25 +50,26 @@ double clamp01(double v) {
     return v;
 }
 
+std::string trim_copy(std::string s) {
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+    s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), s.end());
+    return s;
+}
+
+std::string sanitize_for_filename(std::string s) {
+    for (auto& ch : s) {
+        if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')) {
+            ch = '_';
+        }
+    }
+    if (s.empty()) s = "x";
+    return s;
+}
+
 std::string getenv_str(const char* key) {
     const char* v = std::getenv(key);
     if (!v || !*v) return "";
     return std::string(v);
-}
-
-std::string resolve_satellite_image() {
-    const std::string explicit_image = getenv_str("SFC_SATELLITE_IMAGE");
-    if (!explicit_image.empty()) return explicit_image;
-#if defined(__aarch64__) || defined(__arm64__)
-    const std::string arm64_image = getenv_str("SFC_SATELLITE_IMAGE_ARM64");
-    if (!arm64_image.empty()) return arm64_image;
-#elif defined(__x86_64__)
-    const std::string amd64_image = getenv_str("SFC_SATELLITE_IMAGE_AMD64");
-    if (!amd64_image.empty()) return amd64_image;
-    const std::string x86_64_image = getenv_str("SFC_SATELLITE_IMAGE_X86_64");
-    if (!x86_64_image.empty()) return x86_64_image;
-#endif
-    return std::string(kDefaultSatelliteImage);
 }
 
 std::vector<std::string> unique_nf_types(const std::vector<std::string>& values) {
@@ -66,6 +89,96 @@ CoreBusinessLoad zero_business_load() {
     load.policy_load = 0.0;
     load.auth_load = 0.0;
     return load;
+}
+
+int decode_exit_code(int status) {
+    if (status < 0) return status;
+#if defined(WIFEXITED) && defined(WEXITSTATUS)
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+#endif
+    return status;
+}
+
+std::vector<std::string> split_lines(std::string s) {
+    std::vector<std::string> out;
+    std::stringstream ss(s);
+    std::string line;
+    while (std::getline(ss, line)) out.push_back(line);
+    return out;
+}
+
+std::string tail_lines(const std::string& text, size_t max_lines) {
+    const auto lines = split_lines(text);
+    if (lines.size() <= max_lines) return text;
+    std::ostringstream oss;
+    const size_t start = lines.size() - max_lines;
+    for (size_t i = start; i < lines.size(); ++i) {
+        oss << lines[i] << '\n';
+    }
+    return oss.str();
+}
+
+std::string upper_copy(std::string s) {
+    for (auto& ch : s) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
+
+void collect_nf_types_from_json(
+    const nlohmann::json& node,
+    std::unordered_set<std::string>* out
+) {
+    if (!out) return;
+
+    if (node.is_object()) {
+        auto it = node.find("nfType");
+        if (it != node.end() && it->is_string()) {
+            out->insert(upper_copy(it->get<std::string>()));
+        }
+        for (const auto& kv : node.items()) {
+            collect_nf_types_from_json(kv.value(), out);
+        }
+        return;
+    }
+
+    if (node.is_array()) {
+        for (const auto& item : node) {
+            collect_nf_types_from_json(item, out);
+        }
+    }
+}
+
+std::string join_sorted(const std::unordered_set<std::string>& values) {
+    if (values.empty()) return "";
+    std::vector<std::string> sorted(values.begin(), values.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::ostringstream oss;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << sorted[i];
+    }
+    return oss.str();
+}
+
+std::vector<std::string> build_image_candidates() {
+    std::vector<std::string> out;
+    const auto push_if = [&](const std::string& v) {
+        if (v.empty()) return;
+        if (std::find(out.begin(), out.end(), v) == out.end()) out.push_back(v);
+    };
+    push_if(getenv_str("SFC_SATELLITE_IMAGE"));
+#if defined(__aarch64__) || defined(__arm64__)
+    push_if(getenv_str("SFC_SATELLITE_IMAGE_ARM64"));
+#elif defined(__x86_64__)
+    push_if(getenv_str("SFC_SATELLITE_IMAGE_AMD64"));
+    push_if(getenv_str("SFC_SATELLITE_IMAGE_X86_64"));
+#endif
+    push_if(kLocalSatelliteImage);
+    push_if(kLocalSatelliteImageLatest);
+    push_if(kDefaultSatelliteImage);
+    return out;
 }
 
 }  // namespace
@@ -182,16 +295,24 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }, true);
 
     std::vector<std::string> old_nodes;
+    std::vector<std::string> old_containers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = deployment_runtime_.find(task.deployment_id);
         if (it != deployment_runtime_.end()) {
             old_nodes = it->second.active_nodes;
+            old_containers = it->second.active_containers;
         }
     }
-    for (const auto& node : old_nodes) {
-        const std::string c = node_to_container_name(node);
+    for (const auto& c : old_containers) {
         (void)stop_container(c);
+    }
+    if (old_containers.empty()) {
+        for (const auto& node : old_nodes) {
+            const std::string c = node_to_container_name(task.deployment_id, node);
+            (void)stop_container(c);
+            (void)stop_container(legacy_node_container_name(node));
+        }
     }
     clear_nodes_for_deployment(old_nodes);
 
@@ -202,7 +323,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         nfs_by_node[pv.node].push_back(normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type));
     }
 
-    if (!ensure_network()) {
+    auto fail_deployment = [&](const std::string& reason) {
         update_deployment_runtime_state(task.deployment_id, {
             {"orchestration_phase", "failed"},
             {"orchestration_progress", 100},
@@ -214,17 +335,48 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             {"core_nfs_failed", static_cast<int>(task.candidate.per_vnf.size())},
             {"service_ready", false},
             {"ready_for_ueransim", false},
-            {"last_error", "docker_network_unavailable"},
+            {"last_error", reason},
             {"last_update_at", iso_now()}
         }, true);
+    };
+
+    if (!ensure_network()) {
+        fail_deployment("docker_network_unavailable");
         return;
     }
+
+    bool has_db_nf = false;
+    for (const auto& kv : nfs_by_node) {
+        for (const auto& nf : kv.second) {
+            if (nf_uses_mongo(nf)) {
+                has_db_nf = true;
+                break;
+            }
+        }
+        if (has_db_nf) break;
+    }
+    if (has_db_nf) {
+        std::string mongo_reason;
+        if (!ensure_mongo_container(&mongo_reason)) {
+            fail_deployment(mongo_reason.empty() ? "mongo_unavailable" : mongo_reason);
+            return;
+        }
+    }
+
+    std::string satellite_image;
+    std::string image_reason;
+    if (!ensure_satellite_image_available(&satellite_image, &image_reason)) {
+        fail_deployment(image_reason.empty() ? "satellite_image_unavailable" : image_reason);
+        return;
+    }
+    const std::string platform = getenv_str("SFC_SATELLITE_PLATFORM");
 
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "starting_containers"},
         {"orchestration_progress", 28},
         {"containers_total", static_cast<int>(unique_nodes.size())},
         {"core_nfs_total", static_cast<int>(task.candidate.per_vnf.size())},
+        {"last_error", ""},
         {"last_update_at", iso_now()}
     }, true);
 
@@ -234,10 +386,15 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     int core_nfs_failed = 0;
 
     std::vector<std::string> active_nodes;
+    std::vector<std::string> active_containers;
+    std::unordered_map<std::string, std::string> node_container_by_id;
+    std::unordered_map<std::string, std::string> node_ip_by_id;
+    std::vector<std::string> errors;
     active_nodes.reserve(unique_nodes.size());
+    active_containers.reserve(unique_nodes.size());
 
     for (const auto& node : unique_nodes) {
-        const std::string container_name = node_to_container_name(node);
+        const std::string container_name = node_to_container_name(task.deployment_id, node);
         NodeRuntimeSnapshot node_state;
         node_state.node_id = node;
         node_state.container_name = container_name;
@@ -245,7 +402,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         node_state.deployed = true;
         update_node_runtime_state(node, node_state);
 
-        const bool container_ready = ensure_satellite_container(container_name);
+        const bool container_ready = ensure_satellite_container(container_name, satellite_image, platform);
         if (!container_ready) {
             node_state.container_state = "failed";
             node_state.service_probe_ok = false;
@@ -255,46 +412,145 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             update_node_runtime_state(node, node_state);
             containers_failed += 1;
             core_nfs_failed += static_cast<int>(nfs_by_node[node].size());
+            errors.push_back("container_start_failed:" + node);
+            continue;
+        }
+
+        const std::string node_ip = inspect_container_ip(container_name);
+        if (node_ip.empty()) {
+            node_state.container_state = "failed";
+            node_state.service_probe_ok = false;
+            node_state.running_core_nf_types.clear();
+            node_state.core_business_load = zero_business_load();
+            node_state.core_network_load = 0.0;
+            update_node_runtime_state(node, node_state);
+            containers_failed += 1;
+            core_nfs_failed += static_cast<int>(nfs_by_node[node].size());
+            errors.push_back("container_ip_unavailable:" + node);
+            (void)stop_container(container_name);
             continue;
         }
 
         containers_running += 1;
         node_state.container_state = "running";
+        node_state.service_probe_ok = false;
+        node_state.running_core_nf_types.clear();
+        node_state.core_business_load = zero_business_load();
+        node_state.core_network_load = 0.0;
+        update_node_runtime_state(node, node_state);
+        node_ip_by_id[node] = node_ip;
+        node_container_by_id[node] = container_name;
+        active_nodes.push_back(node);
+        active_containers.push_back(container_name);
+    }
+
+    std::string nrf_node;
+    std::string upf_node;
+    std::string scp_node;
+    for (const auto& pv : task.candidate.per_vnf) {
+        const std::string nf = normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type);
+        if (nf == "nrf" && nrf_node.empty()) nrf_node = pv.node;
+        if (nf == "upf" && upf_node.empty()) upf_node = pv.node;
+        if (nf == "scp" && scp_node.empty()) scp_node = pv.node;
+    }
+
+    const std::string nrf_ip = (!nrf_node.empty() && node_ip_by_id.count(nrf_node))
+        ? node_ip_by_id[nrf_node]
+        : "";
+    const std::string upf_ip = (!upf_node.empty() && node_ip_by_id.count(upf_node))
+        ? node_ip_by_id[upf_node]
+        : "";
+    const std::string scp_ip = (!scp_node.empty() && node_ip_by_id.count(scp_node))
+        ? node_ip_by_id[scp_node]
+        : "";
+    const std::string nrf_uri = nrf_ip.empty()
+        ? ""
+        : ("http://" + nrf_ip + ":" + std::to_string(sbi_port_for_nf_type("nrf")));
+    const std::string scp_uri = scp_ip.empty()
+        ? ""
+        : ("http://" + scp_ip + ":" + std::to_string(sbi_port_for_nf_type("scp")));
+
+    std::unordered_set<std::string> started_nfs_set;
+    for (const auto& node : unique_nodes) {
+        const auto ip_it = node_ip_by_id.find(node);
+        if (ip_it == node_ip_by_id.end()) continue;
+        const std::string local_ip = ip_it->second;
+        const auto c_it = node_container_by_id.find(node);
+        if (c_it == node_container_by_id.end()) continue;
+        const std::string container_name = c_it->second;
+
         std::vector<std::string> running_nfs;
         for (const auto& nf : nfs_by_node[node]) {
-            if (start_nf_in_container(container_name, nf)) {
+            const std::string cfg = render_nf_config(
+                nf,
+                local_ip,
+                nrf_uri,
+                upf_ip.empty() ? local_ip : upf_ip,
+                kMongoUri,
+                scp_uri
+            );
+            if (start_nf_in_container(container_name, nf, cfg)) {
                 running_nfs.push_back(nf);
+                started_nfs_set.insert(nf);
                 core_nfs_running += 1;
             } else {
                 core_nfs_failed += 1;
+                errors.push_back("nf_start_failed:" + nf + "@" + node);
             }
         }
-        running_nfs = unique_nf_types(running_nfs);
-        node_state.running_core_nf_types = running_nfs;
-        node_state.service_probe_ok = !running_nfs.empty();
+
+        NodeRuntimeSnapshot node_state;
+        node_state.node_id = node;
+        node_state.container_name = container_name;
+        node_state.container_state = "running";
+        node_state.deployed = true;
+        node_state.running_core_nf_types = unique_nf_types(running_nfs);
+        node_state.service_probe_ok =
+            !node_state.running_core_nf_types.empty() &&
+            node_state.running_core_nf_types.size() == unique_nf_types(nfs_by_node[node]).size();
         node_state.core_business_load = compute_business_load_for_nfs(
-            running_nfs,
+            node_state.running_core_nf_types,
             node_state.service_probe_ok
         );
         node_state.core_network_load = node_state.core_business_load.load_index();
         update_node_runtime_state(node, node_state);
-        active_nodes.push_back(node);
+    }
+
+    bool registration_ok = true;
+    if (!nrf_node.empty()) {
+        if (nrf_ip.empty()) {
+            registration_ok = false;
+            errors.push_back("nrf_ip_unavailable");
+        } else {
+            const std::string nrf_container = node_container_by_id.count(nrf_node)
+                ? node_container_by_id[nrf_node]
+                : node_to_container_name(task.deployment_id, nrf_node);
+            std::vector<std::string> started_nfs(started_nfs_set.begin(), started_nfs_set.end());
+            registration_ok = check_nrf_registration(nrf_container, nrf_ip, started_nfs);
+            if (!registration_ok) {
+                errors.push_back("nrf_registration_incomplete");
+            }
+        }
     }
 
     const bool has_amf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
-        return normalize_nf_type(pv.nf_type) == "amf";
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "amf";
     });
     const bool has_smf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
-        return normalize_nf_type(pv.nf_type) == "smf";
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "smf";
     });
     const bool has_upf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
-        return normalize_nf_type(pv.nf_type) == "upf";
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "upf";
     });
     const bool has_nrf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
-        return normalize_nf_type(pv.nf_type) == "nrf";
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "nrf";
     });
     const bool min_chain_ready = has_amf && has_smf && has_upf && has_nrf;
-    const bool service_ready = min_chain_ready && containers_failed == 0 && core_nfs_failed == 0;
+    const bool service_ready =
+        min_chain_ready &&
+        containers_failed == 0 &&
+        core_nfs_failed == 0 &&
+        registration_ok;
     const std::string phase = service_ready ? "running" : "degraded";
 
     {
@@ -302,7 +558,12 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         auto& rt = deployment_runtime_[task.deployment_id];
         rt.deployment_id = task.deployment_id;
         rt.active_nodes = active_nodes;
+        rt.active_containers = active_containers;
     }
+
+    const std::string err = errors.empty()
+        ? (service_ready ? "" : "open5gs_nf_not_fully_running")
+        : errors.front();
 
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", phase},
@@ -315,7 +576,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         {"core_nfs_failed", core_nfs_failed},
         {"service_ready", service_ready},
         {"ready_for_ueransim", service_ready},
-        {"last_error", service_ready ? "" : "open5gs_nf_not_fully_running"},
+        {"last_error", err},
         {"last_update_at", iso_now()}
     }, true);
 }
@@ -399,6 +660,73 @@ CoreBusinessLoad DeploymentOrchestratorService::compute_business_load_for_nfs(
     return load;
 }
 
+bool DeploymentOrchestratorService::ensure_satellite_image_available(
+    std::string* image_out,
+    std::string* reason_out
+) {
+    if (!image_out) return false;
+
+    const auto candidates = build_image_candidates();
+    int code = 0;
+
+    for (const auto& image : candidates) {
+        const std::string inspect_cmd = "docker image inspect " + image + " >/dev/null 2>&1";
+        if (run_shell_command(inspect_cmd, &code) && code == 0) {
+            *image_out = image;
+            if (reason_out) *reason_out = "";
+            return true;
+        }
+    }
+
+    for (const auto& image : candidates) {
+        std::string output;
+        const std::string pull_cmd = "docker pull " + image;
+        run_shell_command_capture(pull_cmd, &output, &code);
+        if (code == 0) {
+            *image_out = image;
+            if (reason_out) *reason_out = "";
+            return true;
+        }
+        spdlog::warn("Failed to pull image {}: {}", image, trim_copy(tail_lines(output, 8)));
+    }
+
+    const std::string explicit_df = getenv_str("SFC_SATELLITE_DOCKERFILE");
+    const std::string explicit_ctx = getenv_str("SFC_SATELLITE_BUILD_CONTEXT");
+    std::vector<std::pair<std::string, std::string>> build_attempts;
+    if (!explicit_df.empty()) {
+        build_attempts.emplace_back(explicit_df, explicit_ctx.empty() ? "." : explicit_ctx);
+    }
+    build_attempts.emplace_back("docker/open5gs-satellite.Dockerfile", ".");
+    build_attempts.emplace_back("../docker/open5gs-satellite.Dockerfile", "..");
+
+    for (const auto& attempt : build_attempts) {
+        const auto& dockerfile = attempt.first;
+        const auto& context = attempt.second;
+        if (!std::filesystem::exists(dockerfile)) continue;
+
+        std::string output;
+        const std::string build_cmd =
+            "docker build -f " + dockerfile + " -t " + std::string(kLocalSatelliteImage) + " " + context;
+        run_shell_command_capture(build_cmd, &output, &code);
+        if (code == 0) {
+            *image_out = kLocalSatelliteImage;
+            if (reason_out) *reason_out = "";
+            return true;
+        }
+        spdlog::warn(
+            "Failed to build {} from {}: {}",
+            kLocalSatelliteImage,
+            dockerfile,
+            trim_copy(tail_lines(output, 12))
+        );
+    }
+
+    if (reason_out) {
+        *reason_out = "satellite_image_unavailable";
+    }
+    return false;
+}
+
 bool DeploymentOrchestratorService::ensure_network() {
     int code = 0;
     const std::string inspect_cmd = "docker network inspect " + std::string(kSatelliteNetwork) + " >/dev/null 2>&1";
@@ -411,20 +739,72 @@ bool DeploymentOrchestratorService::ensure_network() {
     return ok;
 }
 
+bool DeploymentOrchestratorService::ensure_mongo_container(std::string* reason_out) {
+    int code = 0;
+    std::string inspect_output;
+    bool has_container = false;
+    bool attached_to_target_network = false;
+    {
+        const std::string inspect_cmd =
+            "docker inspect -f '{{json .NetworkSettings.Networks}}' " + std::string(kMongoContainer) + " 2>/dev/null";
+        run_shell_command_capture(inspect_cmd, &inspect_output, &code);
+        has_container = (code == 0);
+        if (has_container) {
+            attached_to_target_network =
+                inspect_output.find("\"" + std::string(kSatelliteNetwork) + "\"") != std::string::npos;
+        }
+    }
+
+    if (!has_container || !attached_to_target_network) {
+        run_shell_command("docker rm -f " + std::string(kMongoContainer) + " >/dev/null 2>&1", &code);
+        const std::string run_cmd =
+            "docker run -d --name " + std::string(kMongoContainer) +
+            " --network " + std::string(kSatelliteNetwork) +
+            " --network-alias " + std::string(kMongoContainer) +
+            " " + std::string(kMongoImage) + " >/dev/null 2>&1";
+        if (!(run_shell_command(run_cmd, &code) && code == 0)) {
+            if (reason_out) *reason_out = "mongo_container_start_failed";
+            return false;
+        }
+    } else {
+        const std::string inspect_running =
+            "docker inspect -f '{{.State.Running}}' " + std::string(kMongoContainer) + " 2>/dev/null | grep -q true";
+        if (!(run_shell_command(inspect_running, &code) && code == 0)) {
+            const std::string start_cmd = "docker start " + std::string(kMongoContainer) + " >/dev/null 2>&1";
+            if (!(run_shell_command(start_cmd, &code) && code == 0)) {
+                if (reason_out) *reason_out = "mongo_container_start_failed";
+                return false;
+            }
+        }
+    }
+
+    for (int i = 0; i < 30; ++i) {
+        const std::string probe_cmd =
+            "docker exec " + std::string(kMongoContainer) +
+            " sh -lc 'mongosh --quiet --eval \"db.adminCommand({ping:1}).ok\" >/dev/null 2>&1 || "
+            "mongo --quiet --eval \"db.runCommand({ping:1}).ok\" >/dev/null 2>&1'";
+        if (run_shell_command(probe_cmd, &code) && code == 0) return true;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    if (reason_out) *reason_out = "mongo_not_ready";
+    return false;
+}
+
 bool DeploymentOrchestratorService::stop_container(const std::string& container_name) {
     if (container_name.empty()) return false;
     int code = 0;
-    const std::string cmd =
-        "docker rm -f " + container_name + " >/dev/null 2>&1";
-    const bool ok = run_shell_command(cmd, &code);
-    (void)ok;
+    const std::string cmd = "docker rm -f " + container_name + " >/dev/null 2>&1";
+    run_shell_command(cmd, &code);
     return code == 0;
 }
 
-bool DeploymentOrchestratorService::ensure_satellite_container(const std::string& container_name) {
-    if (container_name.empty()) return false;
-    const std::string image = resolve_satellite_image();
-    const std::string platform = getenv_str("SFC_SATELLITE_PLATFORM");
+bool DeploymentOrchestratorService::ensure_satellite_container(
+    const std::string& container_name,
+    const std::string& image,
+    const std::string& platform
+) {
+    if (container_name.empty() || image.empty()) return false;
     int code = 0;
 
     const std::string inspect_running =
@@ -436,43 +816,580 @@ bool DeploymentOrchestratorService::ensure_satellite_container(const std::string
 
     run_shell_command("docker rm -f " + container_name + " >/dev/null 2>&1", &code);
 
-    const std::string run_cmd =
-        "docker run -d --name " + container_name +
-        " --network " + std::string(kSatelliteNetwork) +
-        (platform.empty() ? "" : (" --platform " + platform)) +
-        " " + image +
-        " sh -lc 'while true; do sleep 3600; done' >/dev/null 2>&1";
-    const bool ok = run_shell_command(run_cmd, &code) && code == 0;
-    if (!ok) {
-        spdlog::warn("Failed to start satellite container {} with image {}", container_name, image);
+    std::string output;
+    auto try_run = [&](const std::string& extra_flags) -> bool {
+        const std::string run_cmd =
+            "docker run -d --name " + container_name +
+            " --network " + std::string(kSatelliteNetwork) +
+            (platform.empty() ? "" : (" --platform " + platform)) +
+            (extra_flags.empty() ? "" : (" " + extra_flags)) +
+            " " + image +
+            " sh -lc 'trap : TERM INT; while true; do sleep 3600; done'";
+        run_shell_command_capture(run_cmd, &output, &code);
+        return code == 0;
+    };
+
+    bool started = try_run("--cap-add=NET_ADMIN --device=/dev/net/tun");
+    if (!started) {
+        spdlog::warn(
+            "Satellite container {} device-start failed, fallback to privileged mode: {}",
+            container_name,
+            trim_copy(tail_lines(output, 8))
+        );
+        run_shell_command("docker rm -f " + container_name + " >/dev/null 2>&1", &code);
+        started = try_run("--privileged");
     }
-    return ok;
+    if (!started) {
+        spdlog::warn(
+            "Failed to start satellite container {} with image {}: {}",
+            container_name,
+            image,
+            trim_copy(tail_lines(output, 10))
+        );
+        return false;
+    }
+
+    if (run_shell_command(inspect_running, &code) && code == 0) return true;
+    return false;
+}
+
+std::string DeploymentOrchestratorService::inspect_container_ip(const std::string& container_name) const {
+    if (container_name.empty()) return "";
+    int code = 0;
+    std::string output;
+    const std::string cmd =
+        "docker inspect -f '{{(index .NetworkSettings.Networks \"" + std::string(kSatelliteNetwork) +
+        "\").IPAddress}}' " + container_name + " 2>/dev/null";
+    run_shell_command_capture(cmd, &output, &code);
+    if (code != 0) return "";
+    return trim_copy(output);
+}
+
+std::string DeploymentOrchestratorService::daemon_for_nf_type(const std::string& nf_type) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    if (nf == "nrf") return "open5gs-nrfd";
+    if (nf == "amf") return "open5gs-amfd";
+    if (nf == "smf") return "open5gs-smfd";
+    if (nf == "upf") return "open5gs-upfd";
+    if (nf == "ausf") return "open5gs-ausfd";
+    if (nf == "udm") return "open5gs-udmd";
+    if (nf == "udr") return "open5gs-udrd";
+    if (nf == "pcf") return "open5gs-pcfd";
+    if (nf == "nssf") return "open5gs-nssfd";
+    if (nf == "scp") return "open5gs-scpd";
+    return "open5gs-" + nf + "d";
+}
+
+std::string DeploymentOrchestratorService::nf_type_to_3gpp(const std::string& nf_type) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    if (nf == "nrf") return "NRF";
+    if (nf == "amf") return "AMF";
+    if (nf == "smf") return "SMF";
+    if (nf == "upf") return "UPF";
+    if (nf == "ausf") return "AUSF";
+    if (nf == "udm") return "UDM";
+    if (nf == "udr") return "UDR";
+    if (nf == "pcf") return "PCF";
+    if (nf == "nssf") return "NSSF";
+    if (nf == "scp") return "SCP";
+    std::string up = nf;
+    for (auto& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return up;
+}
+
+int DeploymentOrchestratorService::sbi_port_for_nf_type(const std::string& nf_type) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    if (nf == "nrf") return kSbiPortNrf;
+    if (nf == "amf") return kSbiPortAmf;
+    if (nf == "smf") return kSbiPortSmf;
+    if (nf == "ausf") return kSbiPortAusf;
+    if (nf == "udm") return kSbiPortUdm;
+    if (nf == "udr") return kSbiPortUdr;
+    if (nf == "pcf") return kSbiPortPcf;
+    if (nf == "nssf") return kSbiPortNssf;
+    if (nf == "scp") return kSbiPortScp;
+    return kSbiPortNrf;
+}
+
+bool DeploymentOrchestratorService::nf_uses_mongo(const std::string& nf_type) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    return nf == "udr" || nf == "udm" || nf == "ausf" || nf == "pcf";
+}
+
+bool DeploymentOrchestratorService::nf_registers_to_nrf(const std::string& nf_type) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    return nf != "upf";
+}
+
+std::string DeploymentOrchestratorService::render_nf_config(
+    const std::string& nf_type,
+    const std::string& local_ip,
+    const std::string& nrf_uri,
+    const std::string& upf_ip,
+    const std::string& mongo_uri,
+    const std::string& scp_uri
+) const {
+    const std::string nf = normalize_nf_type(nf_type);
+    const int sbi_port = sbi_port_for_nf_type(nf);
+    const bool has_nrf_uri = !nrf_uri.empty();
+    const bool has_scp_uri = !scp_uri.empty();
+
+    const auto append_common_header = [&](std::ostringstream& oss, const char* log_name) {
+        oss << "logger:\n";
+        oss << "  level: info\n";
+        if (log_name && *log_name) {
+            oss << "  file:\n";
+            oss << "    path: /var/log/open5gs/" << log_name << ".log\n";
+        }
+        oss << "global:\n";
+        oss << "  max:\n";
+        oss << "    ue: 2048\n";
+    };
+
+    const auto append_sbi_client = [&](std::ostringstream& oss, bool prefer_scp) {
+        if (!has_nrf_uri && !has_scp_uri) return;
+        oss << "    client:\n";
+        if (prefer_scp && has_scp_uri) {
+            oss << "      scp:\n";
+            oss << "        - uri: " << scp_uri << "\n";
+            if (has_nrf_uri) {
+                oss << "      nrf:\n";
+                oss << "        - uri: " << nrf_uri << "\n";
+            }
+            return;
+        }
+        if (has_nrf_uri) {
+            oss << "      nrf:\n";
+            oss << "        - uri: " << nrf_uri << "\n";
+        } else if (has_scp_uri) {
+            oss << "      scp:\n";
+            oss << "        - uri: " << scp_uri << "\n";
+        }
+    };
+
+    std::ostringstream oss;
+
+    if (nf == "nrf") {
+        append_common_header(oss, "nrf");
+        oss << "nrf:\n";
+        oss << "  serving:\n";
+        oss << "    - plmn_id:\n";
+        oss << "        mcc: 999\n";
+        oss << "        mnc: 70\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        return oss.str();
+    }
+
+    if (nf == "amf") {
+        append_common_header(oss, "amf");
+        oss << "amf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        oss << "  ngap:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "  metrics:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 9090\n";
+        oss << "  guami:\n";
+        oss << "    - plmn_id:\n";
+        oss << "        mcc: 999\n";
+        oss << "        mnc: 70\n";
+        oss << "      amf_id:\n";
+        oss << "        region: 2\n";
+        oss << "        set: 1\n";
+        oss << "  tai:\n";
+        oss << "    - plmn_id:\n";
+        oss << "        mcc: 999\n";
+        oss << "        mnc: 70\n";
+        oss << "      tac: 1\n";
+        oss << "  plmn_support:\n";
+        oss << "    - plmn_id:\n";
+        oss << "        mcc: 999\n";
+        oss << "        mnc: 70\n";
+        oss << "      s_nssai:\n";
+        oss << "        - sst: 1\n";
+        oss << "  security:\n";
+        oss << "    integrity_order: [ NIA2, NIA1, NIA0 ]\n";
+        oss << "    ciphering_order: [ NEA0, NEA1, NEA2 ]\n";
+        oss << "  network_name:\n";
+        oss << "    full: Open5GS\n";
+        oss << "    short: Next\n";
+        oss << "  amf_name: open5gs-amf0\n";
+        oss << "  time:\n";
+        oss << "    t3512:\n";
+        oss << "      value: 540\n";
+        return oss.str();
+    }
+
+    if (nf == "smf") {
+        append_common_header(oss, "smf");
+        oss << "smf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        oss << "  pfcp:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 8806\n";
+        oss << "    client:\n";
+        oss << "      upf:\n";
+        oss << "        - address: " << (upf_ip.empty() ? local_ip : upf_ip) << "\n";
+        oss << "  gtpc:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 2124\n";
+        oss << "  gtpu:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 2153\n";
+        oss << "  session:\n";
+        oss << "    - subnet: 10.45.0.0/16\n";
+        oss << "      gateway: 10.45.0.1\n";
+        oss << "    - subnet: 2001:db8:cafe::/48\n";
+        oss << "      gateway: 2001:db8:cafe::1\n";
+        oss << "  dns:\n";
+        oss << "    - 8.8.8.8\n";
+        oss << "    - 8.8.4.4\n";
+        oss << "  mtu: 1400\n";
+        return oss.str();
+    }
+
+    if (nf == "upf") {
+        append_common_header(oss, "upf");
+        oss << "upf:\n";
+        oss << "  pfcp:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 8805\n";
+        oss << "  gtpu:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 2152\n";
+        oss << "  session:\n";
+        oss << "    - subnet: 10.45.0.0/16\n";
+        oss << "      gateway: 10.45.0.1\n";
+        oss << "    - subnet: 2001:db8:cafe::/48\n";
+        oss << "      gateway: 2001:db8:cafe::1\n";
+        return oss.str();
+    }
+
+    if (nf == "ausf") {
+        append_common_header(oss, "ausf");
+        oss << "ausf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        return oss.str();
+    }
+
+    if (nf == "udm") {
+        append_common_header(oss, "udm");
+        oss << "udm:\n";
+        oss << "  hnet:\n";
+        oss << "    - id: 1\n";
+        oss << "      scheme: 1\n";
+        oss << "      key: /etc/open5gs/hnet/curve25519-1.key\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        return oss.str();
+    }
+
+    if (nf == "udr") {
+        if (!mongo_uri.empty()) {
+            oss << "db_uri: " << mongo_uri << "\n";
+        }
+        append_common_header(oss, "udr");
+        oss << "udr:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        return oss.str();
+    }
+
+    if (nf == "pcf") {
+        if (!mongo_uri.empty()) {
+            oss << "db_uri: " << mongo_uri << "\n";
+        }
+        append_common_header(oss, "pcf");
+        oss << "pcf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        oss << "  metrics:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: 9090\n";
+        return oss.str();
+    }
+
+    if (nf == "nssf") {
+        append_common_header(oss, "nssf");
+        oss << "nssf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        if (has_nrf_uri) {
+            oss << "      nsi:\n";
+            oss << "        - uri: " << nrf_uri << "\n";
+            oss << "          s_nssai:\n";
+            oss << "            sst: 1\n";
+        }
+        return oss.str();
+    }
+
+    if (nf == "scp") {
+        append_common_header(oss, "scp");
+        oss << "scp:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, true);
+        return oss.str();
+    }
+
+    // Fallback minimal SBI-style config for unknown NF.
+    append_common_header(oss, nf.c_str());
+    oss << nf << ":\n";
+    oss << "  sbi:\n";
+    oss << "    server:\n";
+    oss << "      - address: " << local_ip << "\n";
+    oss << "        port: " << sbi_port << "\n";
+    append_sbi_client(oss, false);
+    return oss.str();
+}
+
+bool DeploymentOrchestratorService::write_config_to_container(
+    const std::string& container_name,
+    const std::string& nf_type,
+    const std::string& content
+) const {
+    if (container_name.empty() || nf_type.empty()) return false;
+    int code = 0;
+    const std::string nf = normalize_nf_type(nf_type);
+    const std::string config_in_container = "/tmp/open5gs/" + nf + ".yaml";
+    const std::string mkdir_cmd = "docker exec " + container_name + " sh -lc 'mkdir -p /tmp/open5gs'";
+    if (!(run_shell_command(mkdir_cmd, &code) && code == 0)) return false;
+
+    const auto tmp_dir = std::filesystem::temp_directory_path();
+    const auto ts = static_cast<unsigned long long>(
+        std::chrono::steady_clock::now().time_since_epoch().count()
+    );
+    const std::string tmp_name =
+        "sfc-open5gs-" + sanitize_for_filename(container_name) + "-" + sanitize_for_filename(nf) +
+        "-" + std::to_string(ts) + ".yaml";
+    const std::filesystem::path tmp_path = tmp_dir / tmp_name;
+
+    {
+        std::ofstream ofs(tmp_path, std::ios::out | std::ios::trunc);
+        if (!ofs.is_open()) return false;
+        ofs << content;
+    }
+
+    std::string cp_cmd = "docker cp " + tmp_path.string() + " " + container_name + ":" + config_in_container;
+    const bool cp_ok = run_shell_command(cp_cmd, &code) && code == 0;
+    std::error_code ec;
+    std::filesystem::remove(tmp_path, ec);
+    return cp_ok;
 }
 
 bool DeploymentOrchestratorService::start_nf_in_container(
     const std::string& container_name,
-    const std::string& nf_type
+    const std::string& nf_type,
+    const std::string& config_content
 ) {
     if (container_name.empty() || nf_type.empty()) return false;
     const std::string nf = normalize_nf_type(nf_type);
-    const std::string daemon = "open5gs-" + nf + "d";
+    const std::string daemon = daemon_for_nf_type(nf);
+    const std::string config_path = "/tmp/open5gs/" + nf + ".yaml";
+    const std::string log_path = "/tmp/open5gs/" + daemon + ".log";
 
+    if (!write_config_to_container(container_name, nf, config_content)) {
+        spdlog::warn("Failed to write config for {} in {}", nf, container_name);
+        return false;
+    }
+
+    int code = 0;
     std::ostringstream oss;
     oss
         << "docker exec " << container_name
         << " sh -lc 'if command -v " << daemon << " >/dev/null 2>&1; then "
-        << "nohup " << daemon << " >/tmp/" << daemon << ".log 2>&1 & "
-        << "sleep 0.3; "
-        << "pgrep -f \"" << daemon << "\" >/dev/null 2>&1; "
+        << "pkill -x \"" << daemon << "\" >/dev/null 2>&1 || true; "
+        << ": > " << log_path << "; "
+        << "nohup " << daemon << " -c " << config_path << " >" << log_path << " 2>&1 & "
+        << "sleep 1; "
+        << "pgrep -x \"" << daemon << "\" >/dev/null 2>&1; "
         << "else "
         << "exit 2; "
-        << "fi' >/dev/null 2>&1";
-    int code = 0;
-    const bool invoked = run_shell_command(oss.str(), &code);
-    if (!invoked) return false;
+        << "fi'";
+    run_shell_command(oss.str(), &code);
     if (code == 0) return true;
-    // command not available in image.
+
+    std::string log_tail;
+    const std::string tail_cmd =
+        "docker exec " + container_name + " sh -lc 'tail -n 80 " + log_path + " 2>/dev/null || true'";
+    run_shell_command_capture(tail_cmd, &log_tail, &code);
+    spdlog::warn(
+        "Failed to start {} in {} (nf={}): {}",
+        daemon,
+        container_name,
+        nf,
+        trim_copy(tail_lines(log_tail, 12))
+    );
     return false;
+}
+
+bool DeploymentOrchestratorService::check_nrf_registration(
+    const std::string& nrf_container,
+    const std::string& nrf_ip,
+    const std::vector<std::string>& started_nfs
+) const {
+    if (nrf_container.empty() || nrf_ip.empty()) return false;
+
+    std::unordered_set<std::string> wanted;
+    for (const auto& nf_raw : started_nfs) {
+        const std::string nf = normalize_nf_type(nf_raw);
+        if (!nf_registers_to_nrf(nf)) continue;
+        if (nf == "nrf") continue;
+        wanted.insert(nf_type_to_3gpp(nf));
+    }
+    if (wanted.empty()) return true;
+
+    auto fetch_url = [&](const std::string& url, std::string* output) -> bool {
+        if (output) output->clear();
+        int code = 0;
+        std::string cmd_output;
+        const std::string cmd_h2 =
+            "docker exec " + nrf_container +
+            " sh -lc 'curl --http2-prior-knowledge -fsS --max-time 3 \"" + url + "\"'";
+        run_shell_command_capture(cmd_h2, &cmd_output, &code);
+        if (code == 0) {
+            if (output) *output = cmd_output;
+            return true;
+        }
+
+        const std::string cmd_http1 =
+            "docker exec " + nrf_container +
+            " sh -lc 'curl -fsS --max-time 3 \"" + url + "\"'";
+        run_shell_command_capture(cmd_http1, &cmd_output, &code);
+        if (output) *output = cmd_output;
+        return code == 0;
+    };
+
+    const std::vector<std::string> nrf_hosts = {nrf_ip, nrf_container};
+    std::string last_probe_output;
+    std::unordered_set<std::string> last_found;
+
+    for (int i = 0; i < 20; ++i) {
+        std::unordered_set<std::string> found;
+        for (const auto& host : nrf_hosts) {
+            if (host.empty()) continue;
+
+            const std::string list_url =
+                "http://" + host + ":" + std::to_string(sbi_port_for_nf_type("nrf")) +
+                "/nnrf-nfm/v1/nf-instances";
+            std::string list_output;
+            if (!fetch_url(list_url, &list_output)) {
+                last_probe_output = list_output;
+                continue;
+            }
+
+            const nlohmann::json list_json = nlohmann::json::parse(list_output, nullptr, false);
+            if (list_json.is_discarded()) {
+                last_probe_output = list_output;
+                continue;
+            }
+            collect_nf_types_from_json(list_json, &found);
+
+            const auto links_it = list_json.find("_links");
+            if (links_it == list_json.end() || !links_it->is_object()) continue;
+            const auto item_it = links_it->find("item");
+            if (item_it == links_it->end() || !item_it->is_array()) continue;
+
+            for (const auto& item : *item_it) {
+                if (!item.is_object()) continue;
+                const auto href_it = item.find("href");
+                if (href_it == item.end() || !href_it->is_string()) continue;
+
+                std::string detail_output;
+                if (!fetch_url(href_it->get<std::string>(), &detail_output)) {
+                    continue;
+                }
+                const nlohmann::json detail_json = nlohmann::json::parse(detail_output, nullptr, false);
+                if (detail_json.is_discarded()) continue;
+                collect_nf_types_from_json(detail_json, &found);
+            }
+        }
+
+        bool all_found = true;
+        for (const auto& nf : wanted) {
+            if (found.find(nf) == found.end()) {
+                all_found = false;
+                break;
+            }
+        }
+        if (all_found) return true;
+
+        last_found = std::move(found);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    spdlog::warn(
+        "NRF registration incomplete in {} wanted=[{}] found=[{}] probe={}",
+        nrf_container,
+        join_sorted(wanted),
+        join_sorted(last_found),
+        trim_copy(tail_lines(last_probe_output, 20))
+    );
+    return false;
+}
+
+bool DeploymentOrchestratorService::run_shell_command_capture(
+    const std::string& cmd,
+    std::string* output,
+    int* code
+) const {
+    if (output) output->clear();
+    if (cmd.empty()) {
+        if (code) *code = -1;
+        return false;
+    }
+
+    const std::string wrapped = cmd + " 2>&1";
+    FILE* fp = ::popen(wrapped.c_str(), "r");
+    if (!fp) {
+        if (code) *code = -1;
+        return false;
+    }
+
+    std::array<char, 4096> buf{};
+    while (fgets(buf.data(), static_cast<int>(buf.size()), fp) != nullptr) {
+        if (output) output->append(buf.data());
+    }
+    const int rc = ::pclose(fp);
+    if (code) *code = decode_exit_code(rc);
+    return true;
 }
 
 bool DeploymentOrchestratorService::run_shell_command(const std::string& cmd, int* code) const {
@@ -481,11 +1398,39 @@ bool DeploymentOrchestratorService::run_shell_command(const std::string& cmd, in
         return false;
     }
     const int rc = std::system(cmd.c_str());
-    if (code) *code = rc;
+    if (code) *code = decode_exit_code(rc);
     return true;
 }
 
-std::string DeploymentOrchestratorService::node_to_container_name(const std::string& node_id) {
+std::string DeploymentOrchestratorService::node_to_container_name(
+    const std::string& deployment_id,
+    const std::string& node_id
+) {
+    auto norm = [](const std::string& input) {
+        std::string out;
+        out.reserve(input.size());
+        bool last_dash = false;
+        for (char ch : input) {
+            const unsigned char u = static_cast<unsigned char>(ch);
+            if (std::isalnum(u)) {
+                out.push_back(static_cast<char>(std::tolower(u)));
+                last_dash = false;
+                continue;
+            }
+            if (!last_dash) {
+                out.push_back('-');
+                last_dash = true;
+            }
+        }
+        while (!out.empty() && out.back() == '-') out.pop_back();
+        if (out.empty()) out = "x";
+        return out;
+    };
+
+    return "sfc-sat-" + norm(deployment_id) + "-" + norm(node_id);
+}
+
+std::string DeploymentOrchestratorService::legacy_node_container_name(const std::string& node_id) {
     std::string out = "sfc-sat-";
     out.reserve(out.size() + node_id.size());
     for (char ch : node_id) {

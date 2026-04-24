@@ -29,6 +29,21 @@
 
 未部署卫星节点会返回 0 业务负载与 `container_state=stopped`。
 
+### 1.1 卫星容器命名规则
+
+每个卫星容器名称包含 **SFC 部署标识** 与 **卫星节点标识**：
+
+`sfc-sat-<deployment_id>-<satellite_node_id>`
+
+例如：
+
+`sfc-sat-deploy-1777040402348-sat-000-003`
+
+说明：
+- `<deployment_id>` 来自部署记录（如 `deploy_1777040402348`）
+- `<satellite_node_id>` 来自节点 ID（如 `SAT_000_003`）
+- 重调度沿用同一部署 ID，容器会按“先停后起”在该命名空间下重建
+
 ## 2. Open5GS 卫星容器镜像
 
 默认镜像：`ghcr.io/open5gs/open5gs:latest`。
@@ -84,12 +99,22 @@ export SFC_SATELLITE_IMAGE_AMD64=ghcr.io/<your-org>/sfc-open5gs-satellite:v0.1.0
 ```bash
 API_BASE=http://127.0.0.1:8080/api/v1 \
 SFC_OPEN5GS_NETWORK=sfc-open5gs-net \
-UERANSIM_IMAGE=ghcr.io/herlesupreeth/docker_ueransim:latest \
+UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
+DEPLOYMENT_ID=deploy_xxx \
 VERIFY_TIMEOUT_SEC=120 \
 ./scripts/verify_ueransim_smoke.sh
 ```
 
+说明：
+- 默认镜像已切换为 Docker Hub：`docker.io/free5gc/ueransim:latest`
+- 脚本会自动 `docker pull` 指定镜像
+- 可通过 `DEPLOYMENT_ID` 精确验证指定部署；不传时默认选择最新 `ready_for_ueransim=true` 的部署
+
 ## 4. 银河麒麟 V10(x86) 迁移清单
+
+另见独立迁移文档：
+
+- `docs/migration-macos-arm64-to-kylin-v10-x86.md`
 
 ### 4.1 依赖
 - Docker Engine + Docker Compose Plugin

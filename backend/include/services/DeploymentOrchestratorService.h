@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -59,6 +60,7 @@ class DeploymentOrchestratorService {
     struct DeploymentRuntimeState {
         std::string deployment_id;
         std::vector<std::string> active_nodes;
+        std::vector<std::string> active_containers;
     };
 
     void worker_loop();
@@ -71,12 +73,55 @@ class DeploymentOrchestratorService {
         bool service_probe_ok
     );
 
+    bool ensure_satellite_image_available(std::string* image_out, std::string* reason_out);
     bool ensure_network();
+    bool ensure_mongo_container(std::string* reason_out = nullptr);
     bool stop_container(const std::string& container_name);
-    bool ensure_satellite_container(const std::string& container_name);
-    bool start_nf_in_container(const std::string& container_name, const std::string& nf_type);
+    bool ensure_satellite_container(
+        const std::string& container_name,
+        const std::string& image,
+        const std::string& platform
+    );
+    std::string inspect_container_ip(const std::string& container_name) const;
+    bool write_config_to_container(
+        const std::string& container_name,
+        const std::string& nf_type,
+        const std::string& content
+    ) const;
+    std::string render_nf_config(
+        const std::string& nf_type,
+        const std::string& local_ip,
+        const std::string& nrf_uri,
+        const std::string& upf_ip,
+        const std::string& mongo_uri,
+        const std::string& scp_uri
+    ) const;
+    std::string daemon_for_nf_type(const std::string& nf_type) const;
+    std::string nf_type_to_3gpp(const std::string& nf_type) const;
+    int sbi_port_for_nf_type(const std::string& nf_type) const;
+    bool nf_uses_mongo(const std::string& nf_type) const;
+    bool nf_registers_to_nrf(const std::string& nf_type) const;
+    bool start_nf_in_container(
+        const std::string& container_name,
+        const std::string& nf_type,
+        const std::string& config_content
+    );
+    bool check_nrf_registration(
+        const std::string& nrf_container,
+        const std::string& nrf_ip,
+        const std::vector<std::string>& started_nfs
+    ) const;
+    bool run_shell_command_capture(
+        const std::string& cmd,
+        std::string* output,
+        int* code = nullptr
+    ) const;
     bool run_shell_command(const std::string& cmd, int* code = nullptr) const;
-    static std::string node_to_container_name(const std::string& node_id);
+    static std::string node_to_container_name(
+        const std::string& deployment_id,
+        const std::string& node_id
+    );
+    static std::string legacy_node_container_name(const std::string& node_id);
 
     void update_deployment_runtime_state(
         const std::string& deployment_id,
@@ -101,4 +146,3 @@ class DeploymentOrchestratorService {
 };
 
 }  // namespace sfc
-
