@@ -30,6 +30,7 @@ export function buildSfcLabelMaps(deployments: Deployment[]) {
     const sid = String(dep?.session_id ?? '')
     const rid = String(dep?.request_id ?? '')
     const did = String(dep?.deployment_id ?? '')
+    const backendDid = String(dep?.backend_deployment_id ?? '')
 
     let label = ''
     if (sid && bySession.has(sid)) label = String(bySession.get(sid))
@@ -39,6 +40,7 @@ export function buildSfcLabelMaps(deployments: Deployment[]) {
     if (sid && !bySession.has(sid)) bySession.set(sid, label)
     if (rid && !byRequest.has(rid)) byRequest.set(rid, label)
     if (did && !byDeployment.has(did)) byDeployment.set(did, label)
+    if (backendDid && !byDeployment.has(backendDid)) byDeployment.set(backendDid, label)
   })
 
   return { bySession, byRequest, byDeployment }

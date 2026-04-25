@@ -133,17 +133,29 @@ export default function Satellites() {
 
   const vecToTuple = (v: THREE.Vector3): [number, number, number] => [v.x, v.y, v.z]
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     const mesh = instanceRef.current
     if (!mesh || satellites.length === 0 || !meshDirtyRef.current) return
+    const lerpAlpha = Math.min(1, Math.max(0.14, delta * 5.5))
+    let keepAnimating = false
     const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {
       const sat = satellites[i]
       const cur = currentPosMapRef.current.get(sat.id)
       const tgt = targetPosMapRef.current.get(sat.id) ?? targetPositions[i]
-      const pos = cur && tgt
-        ? cur.copy(tgt)
-        : (cur ?? tgt)
+      let pos = cur ?? tgt
+      if (cur && tgt) {
+        const distSq = cur.distanceToSquared(tgt)
+        if (distSq > 1e-10) {
+          cur.lerp(tgt, lerpAlpha)
+          if (cur.distanceToSquared(tgt) <= 1e-10) {
+            cur.copy(tgt)
+          } else {
+            keepAnimating = true
+          }
+        }
+        pos = cur
+      }
       if (!pos) continue
       dummy.position.copy(pos)
       dummy.updateMatrix()
@@ -152,7 +164,7 @@ export default function Satellites() {
     }
     mesh.instanceMatrix.needsUpdate = true
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-    meshDirtyRef.current = false
+    meshDirtyRef.current = keepAnimating
   })
 
   const isOccludedByEarth = (point: THREE.Vector3) => {

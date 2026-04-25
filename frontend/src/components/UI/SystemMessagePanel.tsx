@@ -41,6 +41,14 @@ function short(text: string, max = 52) {
   return text.length <= max ? text : `${text.slice(0, max)}...`
 }
 
+function replaceDeployIdsWithLabel(
+  input: string,
+  resolveSfcLabel: (ids?: { sessionId?: string; requestId?: string; deploymentId?: string }) => string,
+): string {
+  if (!input) return ''
+  return input.replace(/\bdeploy_[A-Za-z0-9_-]+\b/g, (match) => resolveSfcLabel({ deploymentId: match }))
+}
+
 function compactTime(raw: string) {
   const ts = Date.parse(raw)
   if (Number.isNaN(ts)) return raw || '-'
@@ -300,13 +308,16 @@ export default function SystemMessagePanel() {
         if (e.type === 'deployment_update') {
           const status = String((e.raw as any)?.status ?? '')
           const did = String((e.raw as any)?.deployment_id ?? '')
+          const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel({ deploymentId: did, sessionId: sid, requestId: rid })
           if (status === 'completed') {
             return {
               id: e.id,
               time,
               tone: 'ok',
               title: '部署状态更新',
-              text: short(`部署 ${did} 已完成`),
+              text: short(`${sfcLabel} 已完成部署`),
             }
           }
           if (status === 'rolled_back') {
@@ -315,7 +326,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'warn',
               title: '部署已回滚',
-              text: short(`部署 ${did} 已回滚并释放资源`),
+              text: short(`${sfcLabel} 已回滚并释放资源`),
             }
           }
           if (status === 'rollback_failed') {
@@ -324,7 +335,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'warn',
               title: '回滚失败',
-              text: short(`部署 ${did} 回滚失败，请检查资源状态`),
+              text: short(`${sfcLabel} 回滚失败，请检查资源状态`),
             }
           }
           return {
@@ -332,17 +343,34 @@ export default function SystemMessagePanel() {
             time,
             tone: 'info',
             title: '部署进度更新',
-            text: short(`部署 ${did} 状态: ${status || 'unknown'}`),
+            text: short(`${sfcLabel} 状态: ${status || 'unknown'}`),
+          }
+        }
+
+        if (e.type === 'deployment_runtime_update') {
+          const did = String((e.raw as any)?.deployment_id ?? '')
+          const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel({ deploymentId: did, sessionId: sid, requestId: rid })
+          const phase = String((e.raw as any)?.orchestration_phase ?? 'unknown')
+          const progress = Number((e.raw as any)?.orchestration_progress ?? 0)
+          return {
+            id: e.id,
+            time,
+            tone: 'info',
+            title: '部署运行态更新',
+            text: short(`${sfcLabel} · ${phase} (${progress}%)`),
           }
         }
 
         if (e.type === 'deployment_action') {
+          const detail = replaceDeployIdsWithLabel(String((e.raw as any)?.detail ?? e.message), resolveSfcLabel)
           return {
             id: e.id,
             time,
             tone: String((e.raw as any)?.level ?? 'info'),
             title: String((e.raw as any)?.title ?? '部署动作'),
-            text: short(String((e.raw as any)?.detail ?? e.message)),
+            text: short(detail),
           }
         }
 
@@ -390,12 +418,13 @@ export default function SystemMessagePanel() {
         }
 
         if (e.message) {
+          const msg = replaceDeployIdsWithLabel(String(e.message), resolveSfcLabel)
           return {
             id: e.id,
             time,
             tone: 'info',
             title: `系统事件 · ${e.type || 'event'}`,
-            text: short(String(e.message)),
+            text: short(msg),
           }
         }
 

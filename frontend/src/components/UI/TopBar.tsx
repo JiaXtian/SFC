@@ -50,10 +50,10 @@ export default function TopBar() {
     <>
       <header className="absolute top-0 left-0 right-0 h-11 z-30 flex items-center justify-between px-5"
         style={{
-          background: 'linear-gradient(90deg, rgba(3,7,12,0.97) 0%, rgba(7,15,26,0.95) 56%, rgba(12,27,43,0.92) 100%)',
+          background: 'linear-gradient(90deg, rgba(4,8,14,0.72) 0%, rgba(6,12,21,0.66) 56%, rgba(9,20,33,0.62) 100%)',
           borderBottom: '1px solid rgba(102,139,170,0.22)',
           backdropFilter: 'blur(16px)',
-          boxShadow: 'inset 0 -1px 0 rgba(98,151,191,0.1), 0 8px 24px rgba(0,0,0,0.35)',
+          boxShadow: 'inset 0 -1px 0 rgba(98,151,191,0.1)',
         }}>
         
         <div className="flex items-center gap-3">

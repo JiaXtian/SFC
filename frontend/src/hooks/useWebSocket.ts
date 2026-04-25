@@ -47,6 +47,13 @@ function sfcLabelByIds(sessionId: string, requestId?: string): string {
   })
 }
 
+function sfcLabelByDeploymentId(deploymentId: string): string {
+  const st = useStore.getState()
+  return resolveSfcLabel(st.deployments as any, {
+    deploymentId: String(deploymentId ?? ''),
+  })
+}
+
 export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
@@ -85,6 +92,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
             const type = String(data?.type ?? '')
             if (type === 'deployment_update') {
               const deploymentId = String(data.deployment_id ?? '')
+              const sfcLabel = sfcLabelByDeploymentId(deploymentId)
               const status = String(data.status ?? 'completed')
               if (status === 'rolled_back') {
                 removeDeployment(deploymentId)
@@ -126,13 +134,14 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               pushRuntimeEvent({
                 type: 'deployment_update',
                 sim_time: data.sim_time,
-                message: `部署进度 ${String(data.deployment_id ?? '')}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
+                message: `部署进度 ${sfcLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
                 raw: data,
               })
               return
             }
             if (type === 'deployment_runtime_update') {
               const deploymentId = String(data.deployment_id ?? '')
+              const sfcLabel = sfcLabelByDeploymentId(deploymentId)
               if (deploymentId) {
                 updateDeployment(deploymentId, {
                   orchestration_phase: String(data.orchestration_phase ?? ''),
@@ -152,7 +161,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               pushRuntimeEvent({
                 type: 'deployment_runtime_update',
                 sim_time: data.last_update_at,
-                message: `部署运行态更新 ${deploymentId}: ${String(data.orchestration_phase ?? 'unknown')} (${Number(data.orchestration_progress ?? 0)}%)`,
+                message: `部署运行态更新 ${sfcLabel}: ${String(data.orchestration_phase ?? 'unknown')} (${Number(data.orchestration_progress ?? 0)}%)`,
                 raw: data,
               })
               return

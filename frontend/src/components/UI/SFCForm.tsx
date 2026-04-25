@@ -49,9 +49,9 @@ interface VNFConfig {
 
 const sfcTemplates = [
   {
-    name: 'SA-Full-12',
-    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp', 'bsf', 'sepp'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.82 },
+    name: 'SA-Basic-9',
+    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.72 },
   },
 ]
 

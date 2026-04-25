@@ -143,8 +143,8 @@ export default function DeploymentPanel() {
           return (
             <div key={dep.deployment_id} className="rounded-xl overflow-hidden transition-all"
               style={{
-                background: isHL ? 'rgba(255,255,255,0.08)' : 'rgba(20,20,35,0.6)',
-                border: isHL ? '1px solid rgba(255,255,255,0.35)' : '1px solid rgba(100,100,120,0.15)',
+                background: isHL ? 'rgba(125,211,252,0.14)' : 'rgba(9,18,31,0.32)',
+                border: isHL ? '1px solid rgba(125,211,252,0.42)' : '1px solid rgba(100,130,155,0.2)',
               }}>
               <div className="px-3 py-2.5">
                 <div className="flex items-center gap-2 mb-1.5">
@@ -237,7 +237,7 @@ export default function DeploymentPanel() {
                     <div className="space-y-1">
                       {dep.per_vnf?.map((v, i) => (
                         <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px]"
-                          style={{ background: 'rgba(0,255,136,0.05)', border: '1px solid rgba(0,255,136,0.12)' }}>
+                          style={{ background: 'rgba(15,23,42,0.28)', border: '1px solid rgba(100,130,155,0.2)' }}>
                           <div className="flex items-center gap-2">
                             <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[9px] font-bold"
                               style={{ background: 'rgba(0,255,136,0.2)', color: '#00ff88' }}>{i+1}</span>
@@ -276,7 +276,7 @@ export default function DeploymentPanel() {
                           const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps`
                           return (
                             <div key={i} className="px-2 py-1 rounded text-[11px]"
-                              style={{ background: 'rgba(20,20,35,0.4)', border: '1px solid rgba(100,100,120,0.08)' }}>
+                              style={{ background: 'rgba(15,23,42,0.3)', border: '1px solid rgba(100,130,155,0.18)' }}>
                               <div className="flex items-center justify-between">
                                 <span className="font-mono text-green-400">
                                   <span className="text-gray-500 mr-1">{String(i + 1).padStart(2, '0')}.</span>
