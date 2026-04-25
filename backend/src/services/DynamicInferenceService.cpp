@@ -502,10 +502,21 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     trim_latency_window_locked();
     total_decisions_ += 1;
 
+    const auto down_nodes = collect_down_nodes(topology);
+    const auto is_deployable_candidate = [&](const DeploymentCandidate& c) {
+        if (!c.satisfies_constraints) return false;
+        for (const auto& node : c.deployed_nodes) {
+            if (!node.empty() && down_nodes.find(node) != down_nodes.end()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     auto chosen_it = std::find_if(
         response_candidates.begin(),
         response_candidates.end(),
-        [](const DeploymentCandidate& c) { return c.satisfies_constraints; }
+        [&](const DeploymentCandidate& c) { return is_deployable_candidate(c); }
     );
     const bool link_fault_reroute_only = trigger == "anchor_path_disconnected" && session.has_last_candidate;
     if (link_fault_reroute_only) {
@@ -513,9 +524,19 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             response_candidates.begin(),
             response_candidates.end(),
             [&](const DeploymentCandidate& c) {
-                return c.satisfies_constraints && c.deployed_nodes == session.last_candidate.deployed_nodes;
+                return is_deployable_candidate(c) &&
+                    c.deployed_nodes == session.last_candidate.deployed_nodes;
             }
         );
+        if (chosen_it == response_candidates.end()) {
+            // Link-local reroute failed; immediately fallback to cross-node redeploy
+            // in the same decision cycle to minimize outage recovery time.
+            chosen_it = std::find_if(
+                response_candidates.begin(),
+                response_candidates.end(),
+                [&](const DeploymentCandidate& c) { return is_deployable_candidate(c); }
+            );
+        }
     }
     if (chosen_it != response_candidates.end()) {
         auto chosen = *chosen_it;
@@ -663,7 +684,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     session.failures_total += 1;
     total_failures_ += 1;
     const std::string pending_reason = link_fault_reroute_only
-        ? "anchor_reroute_unavailable_without_reschedule"
+        ? "anchor_reroute_and_cross_node_reschedule_unavailable"
         : (response_candidates.empty() ? "no_candidate" : "no_deployable_candidate");
     session.pending_replanning = true;
     session.last_replanning_attempt_topology_version = session.last_topology_version;

@@ -225,8 +225,20 @@ void DeploymentOrchestratorService::enqueue_deployment(
     if (deployment_id.empty()) return;
 
     OrchestrationTask task;
+    size_t dropped_stale = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto before = queue_.size();
+        queue_.erase(
+            std::remove_if(
+                queue_.begin(),
+                queue_.end(),
+                [&](const OrchestrationTask& queued) { return queued.deployment_id == deployment_id; }
+            ),
+            queue_.end()
+        );
+        dropped_stale = before - queue_.size();
+
         task.sequence = ++seq_;
         task.deployment_id = deployment_id;
         task.request_id = request_id;
@@ -235,6 +247,14 @@ void DeploymentOrchestratorService::enqueue_deployment(
         task.mode = mode;
         task.trigger = trigger;
         queue_.push_back(task);
+    }
+
+    if (dropped_stale > 0) {
+        spdlog::info(
+            "Orchestrator dedup dropped {} stale queued task(s) for deployment {}",
+            dropped_stale,
+            deployment_id
+        );
     }
 
     const int containers_total = static_cast<int>(unique_nf_types(task.candidate.deployed_nodes).size());

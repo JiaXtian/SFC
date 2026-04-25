@@ -139,6 +139,30 @@ VERIFY_TIMEOUT_SEC=120 \
 - 若日志出现 `TUN allocation failure [Open failure /dev/net/tun]`，脚本会给出警告提示：
   在 macOS Docker Desktop 下常见于容器缺少 TUN 设备，不影响本脚本的控制面注册/PDU 信令验证结论。
 
+### 3.1 重调度恢复验证（故障注入 + UE 恢复计时）
+
+脚本：`scripts/verify_ueransim_reschedule_recovery.sh`
+
+该脚本会按顺序执行：
+1. 先对当前部署做一次基线 `UERANSIM` 验证（确保故障前可用）。
+2. 进入等待状态，由你在系统控制中心手动注入节点故障。
+3. 轮询部署运行态，感知“重调度开始/完成”。
+4. 再次执行 `UERANSIM` 验证，输出服务恢复耗时 `recovery_time_ms`。
+
+示例：
+
+```bash
+DEPLOYMENT_ID=deploy_xxx \
+WAIT_FAULT_TIMEOUT_SEC=600 \
+RECOVERY_TIMEOUT_SEC=240 \
+./scripts/verify_ueransim_reschedule_recovery.sh
+```
+
+常用参数：
+- `WAIT_FAULT_TIMEOUT_SEC`：等待你手动注入故障的最长时间（默认 600s）
+- `RECOVERY_TIMEOUT_SEC`：检测到重调度开始后，允许恢复的最长时间（默认 240s）
+- `VERIFY_TIMEOUT_SEC/PDU_WAIT_SEC/STRICT_PDU_SESSION`：透传给冒烟脚本
+
 ## 4. 银河麒麟 V10(x86) 迁移清单
 
 另见独立迁移文档：
