@@ -129,6 +129,7 @@ export default function LeftPanel() {
     setBackendTopologySynced,
     setAutoDynamics,
     setSimulationStatus,
+    applyTopologySnapshot,
     openSystemPopup,
     setSelectedSatellite,
     setSelectedLink,
@@ -183,7 +184,15 @@ export default function LeftPanel() {
 
       try {
         const topologyData = prepareTopologyForBackend(sats, links, type, planes)
+        topologyData.force_replace = true
+        topologyData.metadata = {
+          ...(topologyData.metadata ?? {}),
+          constellation_template: type,
+          force_replace: true,
+        }
         await apiClient.generateTopology(topologyData)
+        const topo = await apiClient.getTopology()
+        applyTopologySnapshot(topo)
         try {
           const ad = useStore.getState().autoDynamics
           await apiClient.startDynamicSimulation({
@@ -256,12 +265,17 @@ export default function LeftPanel() {
             num_planes: planes,
             altitude_km: parsed.satellites[0]?.orbital_params?.altitude_km ?? tpl.altitude_km,
             inclination_deg: parsed.satellites[0]?.orbital_params?.inclination ?? tpl.inclination_deg,
+            constellation_template: 'imported_topology',
+            force_replace: true,
             timestamp: new Date().toISOString(),
           },
+          force_replace: true,
           nodes: parsed.satellites,
           links: parsed.links,
         }
         await apiClient.generateTopology(topologyData)
+        const topo = await apiClient.getTopology()
+        applyTopologySnapshot(topo)
         try {
           const ad = useStore.getState().autoDynamics
           await apiClient.startDynamicSimulation({

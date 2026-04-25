@@ -3,8 +3,19 @@ import { Activity, AlertTriangle, Clock3, ListChecks, Plus, RotateCw, X, Trash2 
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 
-type ActiveFault = {
+type NodeFault = {
   node_id: string
+  fault_type: string
+  injection_mode: string
+  ttl_ticks: number
+  remaining_sec: number
+  fetched_at_ms: number
+}
+
+type LinkFault = {
+  link_key: string
+  source: string
+  target: string
   fault_type: string
   injection_mode: string
   ttl_ticks: number
@@ -24,6 +35,19 @@ function faultTypeLabel(tag: string): string {
   return map[tag] ?? tag
 }
 
+function linkFaultTypeLabel(tag: string): string {
+  const map: Record<string, string> = {
+    optical_signal_loss: '光链路信号丢失',
+    beam_misalignment: '波束失准',
+    interference_jamming: '链路干扰',
+    routing_blackhole: '路由黑洞',
+    transceiver_failure: '收发器故障',
+    line_degradation: '链路退化',
+    endpoint_node_fault: '端点节点故障',
+  }
+  return map[tag] ?? tag
+}
+
 function splitIds(raw: string): string[] {
   return raw
     .split(/[\s,;，；\n\t]+/)
@@ -31,7 +55,7 @@ function splitIds(raw: string): string[] {
     .filter(Boolean)
 }
 
-function readNodeFaults(status: any): ActiveFault[] {
+function readNodeFaults(status: any): NodeFault[] {
   const now = Date.now()
   const arr = Array.isArray(status?.active_fault_details?.node) ? status.active_fault_details.node : []
   return arr.map((f: any) => ({
@@ -42,6 +66,28 @@ function readNodeFaults(status: any): ActiveFault[] {
     remaining_sec: Math.max(0, Number(f?.remaining_sec ?? 0)),
     fetched_at_ms: now,
   }))
+}
+
+function readLinkFaults(status: any): LinkFault[] {
+  const now = Date.now()
+  const arr = Array.isArray(status?.active_fault_details?.link) ? status.active_fault_details.link : []
+  return arr
+    .map((f: any) => {
+      const source = String(f?.source ?? '')
+      const target = String(f?.target ?? '')
+      const linkKey = String(f?.link_key ?? (source && target ? `${source}|${target}` : ''))
+      return {
+        link_key: linkKey,
+        source,
+        target,
+        fault_type: String(f?.fault_type ?? 'unknown'),
+        injection_mode: String(f?.injection_mode ?? 'manual'),
+        ttl_ticks: Math.max(0, Number(f?.ttl_ticks ?? 0)),
+        remaining_sec: Math.max(0, Number(f?.remaining_sec ?? 0)),
+        fetched_at_ms: now,
+      } as LinkFault
+    })
+    .filter((f) => !!f.link_key)
 }
 
 export default function FaultInjectionControl() {

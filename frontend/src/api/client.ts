@@ -97,10 +97,17 @@ class APIClient {
   }
 
   async injectDynamicFaults(p: {
-    entity_type?: 'node'
+    entity_type?: 'node' | 'link'
     action?: 'inject' | 'remove' | 'extend'
     node_id?: string
     node_ids?: string[]
+    source?: string
+    target?: string
+    src?: string
+    dst?: string
+    links?: Array<{ source?: string; target?: string; src?: string; dst?: string }>
+    link_id?: string
+    link_ids?: string[]
     fault_type?: string
     ttl_ticks?: number
     delta_ttl_ticks?: number

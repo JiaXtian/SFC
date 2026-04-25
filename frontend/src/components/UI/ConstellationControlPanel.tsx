@@ -69,6 +69,7 @@ export default function ConstellationControlPanel({
     setBackendTopologySynced,
     setAutoDynamics,
     setSimulationStatus,
+    applyTopologySnapshot,
     setSelectedSatellite,
     setSelectedLink,
     addToast,
@@ -101,6 +102,8 @@ export default function ConstellationControlPanel({
       force_replace: true,
     }
     await apiClient.generateTopology(topologyData)
+    const topo = await apiClient.getTopology()
+    applyTopologySnapshot(topo)
     const ad = useStore.getState().autoDynamics
     await apiClient.startDynamicSimulation({
       sampling_interval_sec: ad.resource_update_sec,

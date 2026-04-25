@@ -1,5 +1,6 @@
 #include "controllers/TopologyController.h"
 #include "services/AuthGlobals.h"
+#include "services/DeploymentStateStore.h"
 #include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
@@ -69,6 +70,54 @@ Json::Value zero_core_business_load_json() {
 }  // namespace
 
 namespace sfc {
+
+namespace {
+
+std::vector<std::string> collect_deployment_nodes(const nlohmann::json& deployment) {
+    std::unordered_set<std::string> dedup;
+    if (deployment.contains("deployed_nodes") && deployment["deployed_nodes"].is_array()) {
+        for (const auto& item : deployment["deployed_nodes"]) {
+            if (!item.is_string()) continue;
+            const std::string node = item.get<std::string>();
+            if (!node.empty()) dedup.insert(node);
+        }
+    }
+    const auto per = deployment.contains("per_core_nf") && deployment["per_core_nf"].is_array()
+        ? deployment["per_core_nf"]
+        : (deployment.contains("per_vnf") && deployment["per_vnf"].is_array()
+            ? deployment["per_vnf"] : nlohmann::json::array());
+    for (const auto& item : per) {
+        if (!item.is_object()) continue;
+        const std::string node = item.value("node", std::string(""));
+        if (!node.empty()) dedup.insert(node);
+    }
+    std::vector<std::string> out(dedup.begin(), dedup.end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+int rollback_existing_deployments_before_topology_replace() {
+    if (!g_deployment_orchestrator) return 0;
+    const nlohmann::json deployments = list_deployment_records();
+    if (!deployments.is_array()) return 0;
+
+    int rolled_back = 0;
+    std::unordered_set<std::string> seen;
+    for (const auto& dep : deployments) {
+        if (!dep.is_object()) continue;
+        const std::string backend_id = dep.value(
+            "backend_deployment_id",
+            dep.value("deployment_id", std::string(""))
+        );
+        if (backend_id.empty()) continue;
+        if (!seen.insert(backend_id).second) continue;
+        const auto nodes_hint = collect_deployment_nodes(dep);
+        rolled_back += g_deployment_orchestrator->rollback_deployment(backend_id, nodes_hint) ? 1 : 0;
+    }
+    return rolled_back;
+}
+
+}  // namespace
 
 void TopologyController::getTopology(
     const HttpRequestPtr&,
@@ -174,6 +223,7 @@ void TopologyController::generateTopology(
         );
         double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
         g_dynamic_sim->stop();
+        const int rolled_back_deployments = rollback_existing_deployments_before_topology_replace();
 
         Topology topology;
         if (has_nodes) {
@@ -329,6 +379,7 @@ void TopologyController::generateTopology(
             }
             g_runtime_state_service->save_topology(topology, constellation_template);
             g_runtime_state_service->clear_deployments();
+            g_runtime_state_service->clear_runtime_events();
             const nlohmann::json evt = {
                 {"type", "topology_replaced"},
                 {"sim_time", topology.metadata.timestamp},
@@ -336,6 +387,7 @@ void TopologyController::generateTopology(
                 {"topology_version", topology.metadata.topology_version},
                 {"total_nodes", topology.nodes.size()},
                 {"total_links", topology.links.size()},
+                {"rolled_back_deployments", rolled_back_deployments},
                 {"message", "Topology replaced and deployments cleared"}
             };
             WSHandler::broadcast_json(evt);

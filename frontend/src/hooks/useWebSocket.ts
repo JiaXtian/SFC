@@ -166,6 +166,39 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               })
               return
             }
+            if (type === 'topology_replaced') {
+              ;(async () => {
+                try {
+                  const [topo, depList] = await Promise.all([
+                    apiClient.getTopology(),
+                    apiClient.getDeployments(),
+                  ])
+                  if (Array.isArray(depList)) {
+                    setDeployments(depList as any)
+                  }
+                  if (applyTopologySnapshotEnabled) {
+                    applyTopologySnapshot(topo)
+                  } else {
+                    const topoRaw = topo?.topology ?? topo
+                    const meta = topoRaw?.metadata ?? {}
+                    setSimulationStatus({
+                      sim_time: String(meta?.sim_time ?? ''),
+                      topology_version: Number(meta?.topology_version ?? 0),
+                    })
+                  }
+                  window.dispatchEvent(new Event('satellite-table-refresh'))
+                } catch {
+                  // ignore sync failures
+                }
+              })()
+              pushRuntimeEvent({
+                type,
+                sim_time: data.sim_time,
+                message: `星座已替换：${Number(data?.total_nodes ?? 0)} 节点 / ${Number(data?.total_links ?? 0)} 链路`,
+                raw: data,
+              })
+              return
+            }
             if (type === 'topology_tick') {
               if (applyTopologySnapshotEnabled) {
                 applyTopologySnapshot(data.snapshot)

@@ -32,7 +32,12 @@ const std::vector<std::string> kNodeFaultTypes = {
 };
 
 const std::vector<std::string> kLinkFaultTypes = {
-    // Link fault injection is disabled. Keep placeholder for backward compatibility.
+    "optical_signal_loss",
+    "beam_misalignment",
+    "interference_jamming",
+    "routing_blackhole",
+    "transceiver_failure",
+    "line_degradation"
 };
 
 std::unordered_set<std::string> make_catalog_set(const std::vector<std::string>& values) {
@@ -40,6 +45,76 @@ std::unordered_set<std::string> make_catalog_set(const std::vector<std::string>&
 }
 
 const std::unordered_set<std::string> kNodeFaultTypeSet = make_catalog_set(kNodeFaultTypes);
+const std::unordered_set<std::string> kLinkFaultTypeSet = make_catalog_set(kLinkFaultTypes);
+
+std::string canonical_link_key(const std::string& a, const std::string& b) {
+    if (a <= b) return a + "|" + b;
+    return b + "|" + a;
+}
+
+std::pair<std::string, std::string> split_link_key(const std::string& key) {
+    const size_t pos = key.find('|');
+    if (pos == std::string::npos) return {"", ""};
+    return {key.substr(0, pos), key.substr(pos + 1)};
+}
+
+std::vector<std::pair<std::string, std::string>> parse_target_links(const nlohmann::json& req) {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto push_pair = [&](std::string a, std::string b) {
+        if (a.empty() || b.empty() || a == b) return;
+        out.emplace_back(std::move(a), std::move(b));
+    };
+
+    if (req.contains("links") && req["links"].is_array()) {
+        for (const auto& item : req["links"]) {
+            if (!item.is_object()) continue;
+            const std::string src = item.value("source", item.value("src", std::string("")));
+            const std::string dst = item.value("target", item.value("dst", std::string("")));
+            push_pair(src, dst);
+        }
+    }
+    const std::string src = req.value("source", req.value("src", std::string("")));
+    const std::string dst = req.value("target", req.value("dst", std::string("")));
+    if (!src.empty() || !dst.empty()) {
+        push_pair(src, dst);
+    }
+
+    auto parse_link_text = [&](const std::string& value) {
+        if (value.empty()) return;
+        const std::string normalized = [&]() {
+            std::string s = value;
+            for (char& ch : s) {
+                if (ch == '>' || ch == '-' || ch == '<') ch = '|';
+            }
+            return s;
+        }();
+        const size_t split = normalized.find('|');
+        if (split == std::string::npos) return;
+        const std::string a = normalized.substr(0, split);
+        const std::string b = normalized.substr(split + 1);
+        push_pair(a, b);
+    };
+
+    if (req.contains("link_ids") && req["link_ids"].is_array()) {
+        for (const auto& item : req["link_ids"]) {
+            if (!item.is_string()) continue;
+            parse_link_text(item.get<std::string>());
+        }
+    }
+    if (req.contains("link_id") && req["link_id"].is_string()) {
+        parse_link_text(req["link_id"].get<std::string>());
+    }
+
+    std::unordered_set<std::string> dedup;
+    std::vector<std::pair<std::string, std::string>> unique;
+    unique.reserve(out.size());
+    for (const auto& p : out) {
+        const std::string key = canonical_link_key(p.first, p.second);
+        if (!dedup.insert(key).second) continue;
+        unique.push_back(p);
+    }
+    return unique;
+}
 
 std::vector<std::string> parse_target_ids(const nlohmann::json& req, const char* array_key, const char* scalar_key) {
     std::vector<std::string> out;
@@ -221,6 +296,19 @@ nlohmann::json DynamicSimulationService::status_json() const {
             {"remaining_sec", kv.second.ttl_ticks * sampling_interval_sec_}
         });
     }
+    nlohmann::json link_fault_details = nlohmann::json::array();
+    for (const auto& kv : link_fault_states_) {
+        const auto [source, target] = split_link_key(kv.first);
+        link_fault_details.push_back({
+            {"link_key", kv.first},
+            {"source", source},
+            {"target", target},
+            {"fault_type", kv.second.fault_type},
+            {"injection_mode", kv.second.injection_mode},
+            {"ttl_ticks", kv.second.ttl_ticks},
+            {"remaining_sec", kv.second.ttl_ticks * sampling_interval_sec_}
+        });
+    }
     return {
         {"running", running_.load()},
         {"sampling_interval_sec", sampling_interval_sec_},
@@ -233,15 +321,15 @@ nlohmann::json DynamicSimulationService::status_json() const {
         {"sim_time", latest_snapshot_.sim_time},
         {"active_faults", {
             {"node", node_fault_states_.size()},
-            {"link", 0}
+            {"link", link_fault_states_.size()}
         }},
         {"active_fault_details", {
             {"node", node_fault_details},
-            {"link", nlohmann::json::array()}
+            {"link", link_fault_details}
         }},
         {"fault_catalog", {
             {"node", node_fault_catalog()},
-            {"link", nlohmann::json::array()}
+            {"link", link_fault_catalog()}
         }},
         {"metrics", latest_snapshot_.to_json().value("metrics", nlohmann::json::object())}
     };
@@ -392,13 +480,125 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                 }
             }
         } else if (entity_type == "link") {
-            return {
-                {"ok", false},
-                {"message", "Link fault injection is disabled; node faults only"},
-                {"action", action},
-                {"entity_type", entity_type},
-                {"injected", 0}
-            };
+            std::unordered_set<std::string> existing_links;
+            for (const auto& link : topology.links) {
+                if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+                existing_links.insert(canonical_link_key(link.source, link.target));
+            }
+
+            std::vector<std::pair<std::string, std::string>> link_pairs = parse_target_links(request);
+            if (link_pairs.empty() && request.contains("batch_count")) {
+                const int batch_count_req = static_cast<int>(request.value("batch_count", 0));
+                if (batch_count_req > 0) {
+                    const bool only_active = request.value("only_active", true);
+                    std::vector<std::pair<std::string, std::string>> candidates;
+                    candidates.reserve(topology.links.size());
+                    for (const auto& link : topology.links) {
+                        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+                        if (only_active && link.status == "down") continue;
+                        candidates.emplace_back(link.source, link.target);
+                    }
+                    std::shuffle(candidates.begin(), candidates.end(), rng_);
+                    const int batch_count = std::max(0, std::min(batch_count_req, static_cast<int>(candidates.size())));
+                    link_pairs.assign(candidates.begin(), candidates.begin() + batch_count);
+                }
+            }
+
+            for (const auto& pair : link_pairs) {
+                const std::string link_key = canonical_link_key(pair.first, pair.second);
+                if (existing_links.find(link_key) == existing_links.end()) {
+                    invalid_targets.push_back(link_key);
+                    continue;
+                }
+                const auto [source, target] = split_link_key(link_key);
+
+                if (action == "inject") {
+                    if (!overwrite_existing && link_fault_states_.find(link_key) != link_fault_states_.end()) {
+                        skipped_existing += 1;
+                        continue;
+                    }
+                    const std::string requested_type = request.value("fault_type", std::string(""));
+                    const std::string fault_type =
+                        (requested_type.empty() || requested_type == "auto" ||
+                        kLinkFaultTypeSet.find(requested_type) == kLinkFaultTypeSet.end())
+                            ? pick_link_fault_type()
+                            : requested_type;
+                    link_fault_states_[link_key] = FaultState{ttl_ticks, fault_type, "manual"};
+                    injected_count += 1;
+                    events.push_back({
+                        {"type", "fault_event"},
+                        {"entity_type", "link"},
+                        {"entity_id", link_key},
+                        {"source", source},
+                        {"target", target},
+                        {"fault_type", fault_type},
+                        {"reason", fault_type},
+                        {"injection_mode", "manual"},
+                        {"ttl_ticks", ttl_ticks},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
+                    continue;
+                }
+
+                auto it = link_fault_states_.find(link_key);
+                if (action == "remove") {
+                    if (it == link_fault_states_.end()) {
+                        invalid_targets.push_back(link_key);
+                        continue;
+                    }
+                    const std::string fault_type = it->second.fault_type;
+                    link_fault_states_.erase(it);
+                    removed_count += 1;
+                    events.push_back({
+                        {"type", "recovery_event"},
+                        {"entity_type", "link"},
+                        {"entity_id", link_key},
+                        {"source", source},
+                        {"target", target},
+                        {"fault_type", fault_type},
+                        {"reason", fault_type},
+                        {"injection_mode", "manual_remove"},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
+                    continue;
+                }
+
+                if (action == "extend") {
+                    if (it == link_fault_states_.end()) {
+                        invalid_targets.push_back(link_key);
+                        continue;
+                    }
+                    int delta_ttl_ticks = static_cast<int>(request.value("delta_ttl_ticks", 0));
+                    if (delta_ttl_ticks <= 0 && request.contains("delta_seconds")) {
+                        const double delta_seconds = std::max(0.0, request.value("delta_seconds", 0.0));
+                        delta_ttl_ticks = static_cast<int>(std::ceil(delta_seconds / std::max(1.0, sampling_interval_sec_)));
+                    }
+                    delta_ttl_ticks = static_cast<int>(clamp(static_cast<double>(delta_ttl_ticks), 1.0, 3600.0));
+                    it->second.ttl_ticks = static_cast<int>(clamp(
+                        static_cast<double>(it->second.ttl_ticks + delta_ttl_ticks),
+                        1.0,
+                        7200.0
+                    ));
+                    extended_count += 1;
+                    events.push_back({
+                        {"type", "fault_update_event"},
+                        {"entity_type", "link"},
+                        {"entity_id", link_key},
+                        {"source", source},
+                        {"target", target},
+                        {"fault_type", it->second.fault_type},
+                        {"reason", "ttl_extended"},
+                        {"injection_mode", "manual_extend"},
+                        {"delta_ttl_ticks", delta_ttl_ticks},
+                        {"ttl_ticks", it->second.ttl_ticks},
+                        {"sim_time", sim_time},
+                        {"topology_version", topology_version_ + 1}
+                    });
+                    continue;
+                }
+            }
         } else {
             return {
                 {"ok", false},
@@ -578,6 +778,31 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         }
     }
 
+    for (auto it = link_fault_states_.begin(); it != link_fault_states_.end();) {
+        if (advance_fault_timers) {
+            it->second.ttl_ticks -= 1;
+        }
+        if (advance_fault_timers && it->second.ttl_ticks <= 0) {
+            const std::string link_key = it->first;
+            const std::string fault_type = it->second.fault_type;
+            const auto [source, target] = split_link_key(link_key);
+            change_events.push_back({
+                {"type", "recovery_event"},
+                {"entity_type", "link"},
+                {"entity_id", link_key},
+                {"source", source},
+                {"target", target},
+                {"fault_type", fault_type},
+                {"reason", fault_type},
+                {"sim_time", sim_time},
+                {"topology_version", topology_version_}
+            });
+            it = link_fault_states_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     (void)allow_random_fault_generation;
 
     for (auto& sat : topology.nodes) {
@@ -600,14 +825,21 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         }
     }
 
-    link_fault_states_.clear();
-
     std::unordered_map<std::string, const Satellite*> node_map;
     node_map.reserve(topology.nodes.size() * 2);
     for (const auto& sat : topology.nodes) node_map[sat.id] = &sat;
 
     for (auto& link : topology.links) {
         link.fault_tag.clear();
+        const std::string link_key = canonical_link_key(link.source, link.target);
+        const auto link_fault_it = link_fault_states_.find(link_key);
+        if (link_fault_it != link_fault_states_.end()) {
+            link.status = "down";
+            link.fault_tag = link_fault_it->second.fault_type.empty()
+                ? "link_fault" : link_fault_it->second.fault_type;
+            link.bandwidth_available_gbps = 0.0;
+            continue;
+        }
 
         const auto src_it = node_map.find(link.source);
         const auto dst_it = node_map.find(link.target);
