@@ -65,7 +65,7 @@ export default function FaultInjectionControl() {
   const [managingFaults, setManagingFaults] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [savingControl, setSavingControl] = useState(false)
-  const [resourceSamplingSec, setResourceSamplingSec] = useState<number>(Math.max(1, Number(autoDynamics.resource_update_sec || 5)))
+  const [resourceSamplingSec, setResourceSamplingSec] = useState<number>(Math.max(10, Math.min(30, Number(autoDynamics.resource_update_sec || 15))))
   const [simulationSpeed, setSimulationSpeed] = useState<number>(Math.max(0.1, Number(autoDynamics.time_scale || 1)))
 
   const [nodeFaultCatalog, setNodeFaultCatalog] = useState<string[]>([])
@@ -100,10 +100,10 @@ export default function FaultInjectionControl() {
       const status = await apiClient.getDynamicStatus()
       setSimulationStatus({
         running: !!status?.running,
-        sampling_interval_sec: Number(status?.sampling_interval_sec ?? simulation.sampling_interval_sec ?? 5),
+        sampling_interval_sec: Number(status?.sampling_interval_sec ?? simulation.sampling_interval_sec ?? 15),
         simulation_speed: Number(status?.simulation_speed ?? simulation.simulation_speed ?? 1),
       })
-      setResourceSamplingSec(Math.max(1, Math.min(60, Number(status?.control_config?.resource_sampling_interval_sec ?? status?.sampling_interval_sec ?? resourceSamplingSec))))
+      setResourceSamplingSec(Math.max(10, Math.min(30, Number(status?.control_config?.resource_sampling_interval_sec ?? status?.sampling_interval_sec ?? resourceSamplingSec))))
       setSimulationSpeed(Math.max(0.1, Math.min(20, Number(status?.control_config?.simulation_speed ?? status?.simulation_speed ?? simulationSpeed))))
 
       const nodeFaults = Array.isArray(status?.fault_catalog?.node)
@@ -141,7 +141,7 @@ export default function FaultInjectionControl() {
   const applyControlConfig = async () => {
     setSavingControl(true)
     try {
-      const sampling = Math.max(1, Math.min(60, Number(resourceSamplingSec || 5)))
+      const sampling = Math.max(10, Math.min(30, Number(resourceSamplingSec || 15)))
       const speed = Math.max(0.1, Math.min(20, Number(simulationSpeed || 1)))
       await apiClient.updateControlConfig({
         resource_sampling_interval_sec: sampling,
@@ -182,7 +182,7 @@ export default function FaultInjectionControl() {
   }
 
   const secToTicks = (seconds: number) => {
-    const samplingSec = Math.max(1, Number(simulation.sampling_interval_sec || 5))
+    const samplingSec = Math.max(10, Number(simulation.sampling_interval_sec || 15))
     return Math.max(1, Math.ceil(seconds / samplingSec))
   }
 
@@ -331,11 +331,11 @@ export default function FaultInjectionControl() {
               <div className="text-slate-400">采样间隔（秒）</div>
               <input
                 type="number"
-                min={1}
-                max={60}
+                min={10}
+                max={30}
                 step={1}
                 value={resourceSamplingSec}
-                onChange={(e) => setResourceSamplingSec(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
+                onChange={(e) => setResourceSamplingSec(Math.max(10, Math.min(30, Number(e.target.value) || 15)))}
                 className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200"
               />
             </label>

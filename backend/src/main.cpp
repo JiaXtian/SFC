@@ -353,14 +353,14 @@ int main() {
             );
         }
 
-        double boot_sampling_interval_sec = 5.0;
+        double boot_sampling_interval_sec = 15.0;
         double boot_simulation_speed = 1.0;
         if (const nlohmann::json control_config = sfc::g_runtime_state_service->load_control_config();
             control_config.is_object()) {
             if (control_config.contains("resource_sampling_interval_sec")) {
                 boot_sampling_interval_sec = std::max(
-                    1.0,
-                    std::min(60.0, control_config.value("resource_sampling_interval_sec", 5.0))
+                    10.0,
+                    std::min(30.0, control_config.value("resource_sampling_interval_sec", 15.0))
                 );
             }
             if (control_config.contains("simulation_speed")) {

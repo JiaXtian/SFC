@@ -333,7 +333,7 @@ export default function MonitoringPage() {
         if (!mounted) return
         setSimulationStatus({
           running: !!res.running,
-          sampling_interval_sec: Number(res.sampling_interval_sec ?? 5),
+          sampling_interval_sec: Number(res.sampling_interval_sec ?? 15),
           simulation_speed: Number(res.simulation_speed ?? 1),
           topology_version: Number(res.topology_version ?? 0),
           sim_time: String(res.sim_time ?? ''),

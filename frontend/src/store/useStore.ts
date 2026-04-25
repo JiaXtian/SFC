@@ -841,7 +841,7 @@ export const useStore = create<Store>((set, get) => ({
   simulation: {
     connected: false,
     running: false,
-    sampling_interval_sec: 5,
+    sampling_interval_sec: 15,
     simulation_speed: 1,
     sim_time: '',
     topology_version: 0,
@@ -859,7 +859,7 @@ export const useStore = create<Store>((set, get) => ({
     playing: true,
     auto_start_on_topology: true,
     position_update_hz: 4,
-    resource_update_sec: 5,
+    resource_update_sec: 15,
     time_scale: 1,
     elapsed_sec: 0,
     last_resource_sync_at: '',
@@ -995,9 +995,14 @@ export const useStore = create<Store>((set, get) => ({
     systemPopup: { ...s.systemPopup, open: false },
   })),
   setSimulationStatus: (status) => set((s) => ({ simulation: { ...s.simulation, ...status } })),
-  setAutoDynamics: (patch) => set((s) => ({
-    autoDynamics: { ...s.autoDynamics, ...patch },
-  })),
+  setAutoDynamics: (patch) => set((s) => {
+    const next = { ...s.autoDynamics, ...patch }
+    const sampling = Number(next.resource_update_sec ?? s.autoDynamics.resource_update_sec ?? 15)
+    next.resource_update_sec = Math.max(10, Math.min(30, Number.isFinite(sampling) ? sampling : 15))
+    const speed = Number(next.time_scale ?? s.autoDynamics.time_scale ?? 1)
+    next.time_scale = Math.max(0.1, Math.min(20, Number.isFinite(speed) ? speed : 1))
+    return { autoDynamics: next }
+  }),
   setSimulationViewMode: (mode) => {
     set((s) => {
       const next = { ...s.simulation, view_mode: mode }

@@ -14,6 +14,9 @@
 namespace sfc {
 namespace {
 
+constexpr double kMinSamplingIntervalSec = 10.0;
+constexpr double kMaxSamplingIntervalSec = 30.0;
+
 constexpr double kEarthRadiusKm = 6371.0;
 constexpr double kEarthMuKm3PerSec2 = 398600.4418;
 constexpr double kLightSpeedKmPerSec = 299792.458;
@@ -63,7 +66,7 @@ DynamicSimulationService::DynamicSimulationService(
 ) : topo_mgr_(std::move(topo_mgr)),
     res_mgr_(std::move(res_mgr)),
     running_(false),
-    sampling_interval_sec_(5.0),
+    sampling_interval_sec_(15.0),
     simulation_speed_(1.0),
     enable_faults_(false),
     node_fault_prob_per_tick_(0.0),
@@ -120,7 +123,7 @@ bool DynamicSimulationService::start(
     double link_fault_prob_per_tick
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
-    sampling_interval_sec_ = clamp(sampling_interval_sec, 1.0, 30.0);
+    sampling_interval_sec_ = clamp(sampling_interval_sec, kMinSamplingIntervalSec, kMaxSamplingIntervalSec);
     simulation_speed_ = clamp(simulation_speed, 0.1, 20.0);
     (void)enable_faults;
     (void)node_fault_prob_per_tick;

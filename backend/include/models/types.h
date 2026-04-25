@@ -207,7 +207,7 @@ struct Topology {
         double altitude_km;
         double inclination_deg;
         int topology_version = 0;
-        double sampling_interval_sec = 5.0;
+        double sampling_interval_sec = 15.0;
         std::string sim_time = "";
         std::string timestamp;
         
@@ -253,7 +253,7 @@ struct Topology {
 struct TopologySnapshot {
     std::string sim_time;
     int topology_version = 0;
-    double sampling_interval_sec = 5.0;
+    double sampling_interval_sec = 15.0;
     Topology topology;
     struct {
         int total_nodes = 0;

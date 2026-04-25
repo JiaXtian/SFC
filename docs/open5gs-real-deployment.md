@@ -29,6 +29,11 @@
 
 未部署卫星节点会返回 0 业务负载与 `container_state=stopped`。
 
+当执行 `SFC 回滚/删除` 时，系统会：
+- 停止并删除该部署关联的卫星容器
+- 清空对应卫星节点的运行网元信息
+- 将对应卫星节点 `core_business_load/core_network_load` 复位为 0
+
 ### 1.1 卫星容器命名规则
 
 每个卫星容器名称包含 **SFC 部署标识** 与 **卫星节点标识**：
@@ -87,6 +92,7 @@ export SFC_SATELLITE_IMAGE_AMD64=ghcr.io/<your-org>/sfc-open5gs-satellite:v0.1.0
 1. 查询 `ready_for_ueransim=true` 的部署。
 2. 自动定位运行 AMF 的卫星容器。
 3. 启动 UERANSIM gNB/UE 容器并执行基础注册与最小业务验证。
+4. 自动处理 API 鉴权（支持显式 `API_TOKEN`，或用 `API_USERNAME/API_PASSWORD` 自动登录）。
 
 示例：
 
@@ -97,7 +103,12 @@ export SFC_SATELLITE_IMAGE_AMD64=ghcr.io/<your-org>/sfc-open5gs-satellite:v0.1.0
 常用可选参数：
 
 ```bash
-API_BASE=http://127.0.0.1:8080/api/v1 \
+API_BASE=http://127.0.0.1:18080/api/v1 \
+API_TOKEN=<jwt_token> \
+# 或使用账号自动登录（默认 admin / 123456）
+# API_USERNAME=admin API_PASSWORD=123456 \
+STRICT_PDU_SESSION=1 \
+PDU_WAIT_SEC=30 \
 SFC_OPEN5GS_NETWORK=sfc-open5gs-net \
 UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
 DEPLOYMENT_ID=deploy_xxx \
@@ -108,7 +119,12 @@ VERIFY_TIMEOUT_SEC=120 \
 说明：
 - 默认镜像已切换为 Docker Hub：`docker.io/free5gc/ueransim:latest`
 - 脚本会自动 `docker pull` 指定镜像
+- 未显式设置 `API_BASE` 时，脚本会自动探测 `http://127.0.0.1:18080/api/v1` 与 `http://127.0.0.1:8080/api/v1`
 - 可通过 `DEPLOYMENT_ID` 精确验证指定部署；不传时默认选择最新 `ready_for_ueransim=true` 的部署
+- 脚本默认仅验证 `ready_for_ueransim=true` 的部署；如需强制对 `service_ready=true` 但未标记 UE 就绪的部署执行测试，可设置 `ALLOW_SERVICE_READY_FALLBACK=1`
+- 默认切片参数：`SST=1`、`SD=000001`（可通过 `UERANSIM_SST/UERANSIM_SD` 覆盖）
+- 脚本会自动向 `sfc-open5gs-mongo` 写入/更新测试订阅数据（IMSI/KEY/OPC/APN）
+- 脚本会先强制验证注册成功；可通过 `STRICT_PDU_SESSION=1` 强制要求在 `PDU_WAIT_SEC` 内出现 PDU 会话建立成功日志。
 
 ## 4. 银河麒麟 V10(x86) 迁移清单
 
@@ -147,3 +163,5 @@ sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
 - 系统内不自动启动 UE（按需求保留手动验证脚本）。
 - CPU/MEM/DISK 仍是模拟波动。
 - 核心网业务负载来自“容器内真实运行 NF + 健康状态”感知结果。
+- `ready_for_ueransim=true` 额外要求具备 UE 验证所需网元前置条件（`AUSF/UDM/UDR/PCF`）。
+- 资源采样间隔统一为 `10-30s`（默认 `15s`），该间隔同时作用于计算资源与核心网业务负载刷新。

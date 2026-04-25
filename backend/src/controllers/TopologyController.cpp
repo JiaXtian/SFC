@@ -17,6 +17,10 @@
 
 namespace {
 
+constexpr double kMinSamplingIntervalSec = 10.0;
+constexpr double kMaxSamplingIntervalSec = 30.0;
+constexpr double kDefaultSamplingIntervalSec = 15.0;
+
 bool json_bool(const Json::Value& obj, const std::string& key, bool fallback = false) {
     if (!obj.isMember(key)) return fallback;
     const auto& v = obj[key];
@@ -163,7 +167,11 @@ void TopologyController::generateTopology(
 
         const auto old_dynamic_status = g_dynamic_sim->status_json();
         const bool was_running = old_dynamic_status.value("running", false);
-        double sampling_interval_sec = clamp_double(old_dynamic_status.value("sampling_interval_sec", 5.0), 1.0, 60.0);
+        double sampling_interval_sec = clamp_double(
+            old_dynamic_status.value("sampling_interval_sec", kDefaultSamplingIntervalSec),
+            kMinSamplingIntervalSec,
+            kMaxSamplingIntervalSec
+        );
         double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
         g_dynamic_sim->stop();
 
@@ -177,7 +185,11 @@ void TopologyController::generateTopology(
                 ? (*json)["metadata"].get("topology_version", 0).asInt()
                 : 0;
             topology.metadata.sampling_interval_sec = json->isMember("metadata")
-                ? (*json)["metadata"].get("sampling_interval_sec", sampling_interval_sec).asDouble()
+                ? clamp_double(
+                    (*json)["metadata"].get("sampling_interval_sec", sampling_interval_sec).asDouble(),
+                    kMinSamplingIntervalSec,
+                    kMaxSamplingIntervalSec
+                )
                 : sampling_interval_sec;
             topology.metadata.sim_time = json->isMember("metadata")
                 ? (*json)["metadata"].get("sim_time", "").asString()
@@ -303,8 +315,8 @@ void TopologyController::generateTopology(
                 if (control_config.contains("resource_sampling_interval_sec")) {
                     sampling_interval_sec = clamp_double(
                         control_config.value("resource_sampling_interval_sec", sampling_interval_sec),
-                        1.0,
-                        60.0
+                        kMinSamplingIntervalSec,
+                        kMaxSamplingIntervalSec
                     );
                 }
                 if (control_config.contains("simulation_speed")) {
@@ -370,7 +382,9 @@ void TopologyController::startDynamicSimulation(
 ) {
     try {
         auto json = req->getJsonObject();
-        const double interval_sec = json ? (*json).get("sampling_interval_sec", 5.0).asDouble() : 5.0;
+        const double interval_sec = json
+            ? (*json).get("sampling_interval_sec", kDefaultSamplingIntervalSec).asDouble()
+            : kDefaultSamplingIntervalSec;
         const double sim_speed = json ? (*json).get("simulation_speed", 1.0).asDouble() : 1.0;
         const bool enable_faults = false;
         const double node_fault_prob = 0.0;
@@ -387,7 +401,11 @@ void TopologyController::startDynamicSimulation(
         if (g_runtime_state_service) {
             nlohmann::json cfg = g_runtime_state_service->load_control_config();
             if (!cfg.is_object()) cfg = nlohmann::json::object();
-            cfg["resource_sampling_interval_sec"] = clamp_double(interval_sec, 1.0, 60.0);
+            cfg["resource_sampling_interval_sec"] = clamp_double(
+                interval_sec,
+                kMinSamplingIntervalSec,
+                kMaxSamplingIntervalSec
+            );
             cfg["simulation_speed"] = clamp_double(sim_speed, 0.1, 20.0);
             cfg["running"] = started;
             g_runtime_state_service->save_control_config(cfg);
@@ -854,7 +872,11 @@ void TopologyController::deleteSatellite(
 
         const auto dynamic_status = g_dynamic_sim->status_json();
         const bool was_running = dynamic_status.value("running", false);
-        const double interval_sec = clamp_double(dynamic_status.value("sampling_interval_sec", 5.0), 1.0, 60.0);
+        const double interval_sec = clamp_double(
+            dynamic_status.value("sampling_interval_sec", kDefaultSamplingIntervalSec),
+            kMinSamplingIntervalSec,
+            kMaxSamplingIntervalSec
+        );
         const double speed = clamp_double(dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
         g_dynamic_sim->stop();
 
@@ -934,7 +956,7 @@ void TopologyController::getControlConfig(
         }
         if (!cfg.is_object()) cfg = nlohmann::json::object();
         if (!cfg.contains("resource_sampling_interval_sec")) {
-            cfg["resource_sampling_interval_sec"] = 5.0;
+            cfg["resource_sampling_interval_sec"] = kDefaultSamplingIntervalSec;
         }
         if (!cfg.contains("simulation_speed")) {
             cfg["simulation_speed"] = 1.0;
@@ -970,9 +992,9 @@ void TopologyController::updateControlConfig(
         }
 
         const double sampling = clamp_double(
-            json->get("resource_sampling_interval_sec", 5.0).asDouble(),
-            1.0,
-            60.0
+            json->get("resource_sampling_interval_sec", kDefaultSamplingIntervalSec).asDouble(),
+            kMinSamplingIntervalSec,
+            kMaxSamplingIntervalSec
         );
         const double speed = clamp_double(
             json->get("simulation_speed", 1.0).asDouble(),

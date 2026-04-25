@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
 #include <sstream>
 #include <limits>
 #include <cmath>
@@ -1209,6 +1210,7 @@ void SFCController::rollback(
         std::unordered_set<std::string> ids_to_release_set;
         ids_to_release_set.insert(deployment_id);
         std::vector<nlohmann::json> matched_records_for_fallback;
+        std::unordered_map<std::string, std::unordered_set<std::string>> rollback_nodes_by_dep;
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
             sync_deployments_from_db_locked();
@@ -1219,11 +1221,44 @@ void SFCController::rollback(
                     if (!dep_id.empty()) ids_to_release_set.insert(dep_id);
                     if (!backend_dep_id.empty()) ids_to_release_set.insert(backend_dep_id);
                     matched_records_for_fallback.push_back(dep);
+
+                    auto collect_nodes = [&](const std::string& key) {
+                        if (key.empty()) return;
+                        auto& bucket = rollback_nodes_by_dep[key];
+                        if (dep.contains("deployed_nodes") && dep["deployed_nodes"].is_array()) {
+                            for (const auto& n : dep["deployed_nodes"]) {
+                                if (n.is_string()) bucket.insert(n.get<std::string>());
+                            }
+                        }
+                        const auto per = dep.contains("per_core_nf") && dep["per_core_nf"].is_array()
+                            ? dep["per_core_nf"]
+                            : (dep.contains("per_vnf") && dep["per_vnf"].is_array() ? dep["per_vnf"] : nlohmann::json::array());
+                        for (const auto& item : per) {
+                            const std::string node = item.value("node", "");
+                            if (!node.empty()) bucket.insert(node);
+                        }
+                    };
+                    collect_nodes(dep_id);
+                    collect_nodes(backend_dep_id);
                 }
             }
         }
 
         std::vector<std::string> ids_to_release(ids_to_release_set.begin(), ids_to_release_set.end());
+        bool orchestrator_rollback_any = false;
+        if (g_deployment_orchestrator) {
+            for (const auto& id : ids_to_release) {
+                if (id.empty()) continue;
+                std::vector<std::string> nodes_hint;
+                const auto it = rollback_nodes_by_dep.find(id);
+                if (it != rollback_nodes_by_dep.end()) {
+                    nodes_hint.assign(it->second.begin(), it->second.end());
+                }
+                orchestrator_rollback_any =
+                    g_deployment_orchestrator->rollback_deployment(id, nodes_hint) || orchestrator_rollback_any;
+            }
+        }
+
         bool released_any = false;
         std::vector<std::string> released_resource_ids;
         for (const auto& id : ids_to_release) {
@@ -1346,11 +1381,12 @@ void SFCController::rollback(
             removed_deployment_ids.end()
         );
 
-        const bool success = released_any || removed_record;
+        const bool success = released_any || removed_record || orchestrator_rollback_any;
         Json::Value response;
         response["status"] = success ? "success" : "failed";
         response["message"] = success ? "Deployment rolled back" : "Deployment not found";
         response["removed_record"] = removed_record;
+        response["runtime_cleaned"] = orchestrator_rollback_any;
         response["requested_deployment_id"] = deployment_id;
         Json::Value removed_ids_json(Json::arrayValue);
         for (const auto& rid : removed_deployment_ids) removed_ids_json.append(rid);
@@ -1389,6 +1425,9 @@ void SFCController::rollback(
                 {"type", "topology_tick"},
                 {"snapshot", updated_topology.to_json()}
             });
+        } else if (success && g_dynamic_sim) {
+            // Force a fresh snapshot so frontend node panels immediately reflect cleared runtime state.
+            g_dynamic_sim->step_once();
         }
         
         auto resp = HttpResponse::newHttpJsonResponse(response);

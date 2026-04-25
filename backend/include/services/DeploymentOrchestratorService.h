@@ -42,6 +42,10 @@ class DeploymentOrchestratorService {
         const std::string& mode,
         const std::string& trigger
     );
+    bool rollback_deployment(
+        const std::string& deployment_id,
+        const std::vector<std::string>& nodes_hint = {}
+    );
 
     std::unordered_map<std::string, NodeRuntimeSnapshot> snapshot_node_runtime() const;
     std::optional<NodeRuntimeSnapshot> get_node_runtime(const std::string& node_id) const;

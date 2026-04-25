@@ -257,6 +257,108 @@ void DeploymentOrchestratorService::enqueue_deployment(
     cv_.notify_one();
 }
 
+bool DeploymentOrchestratorService::rollback_deployment(
+    const std::string& deployment_id,
+    const std::vector<std::string>& nodes_hint
+) {
+    if (deployment_id.empty()) return false;
+
+    std::vector<std::string> containers_to_stop;
+    std::unordered_set<std::string> nodes_to_clear(nodes_hint.begin(), nodes_hint.end());
+    bool touched_runtime = false;
+
+    auto normalize_token = [](const std::string& input) {
+        std::string out;
+        out.reserve(input.size());
+        bool last_dash = false;
+        for (char ch : input) {
+            const unsigned char u = static_cast<unsigned char>(ch);
+            if (std::isalnum(u)) {
+                out.push_back(static_cast<char>(std::tolower(u)));
+                last_dash = false;
+            } else if (!last_dash) {
+                out.push_back('-');
+                last_dash = true;
+            }
+        }
+        while (!out.empty() && out.back() == '-') out.pop_back();
+        if (out.empty()) out = "x";
+        return out;
+    };
+    const std::string deployment_prefix = "sfc-sat-" + normalize_token(deployment_id) + "-";
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        queue_.erase(
+            std::remove_if(
+                queue_.begin(),
+                queue_.end(),
+                [&](const OrchestrationTask& task) { return task.deployment_id == deployment_id; }
+            ),
+            queue_.end()
+        );
+
+        auto it = deployment_runtime_.find(deployment_id);
+        if (it != deployment_runtime_.end()) {
+            for (const auto& node : it->second.active_nodes) {
+                if (!node.empty()) nodes_to_clear.insert(node);
+            }
+            for (const auto& c : it->second.active_containers) {
+                if (!c.empty()) containers_to_stop.push_back(c);
+            }
+            deployment_runtime_.erase(it);
+            touched_runtime = true;
+        } else {
+            for (const auto& kv : node_runtime_) {
+                const auto& snap = kv.second;
+                if (snap.container_name.rfind(deployment_prefix, 0) != 0) continue;
+                nodes_to_clear.insert(kv.first);
+                if (!snap.container_name.empty()) containers_to_stop.push_back(snap.container_name);
+                touched_runtime = true;
+            }
+        }
+
+        for (const auto& node : nodes_to_clear) {
+            auto rt_it = node_runtime_.find(node);
+            if (rt_it == node_runtime_.end()) continue;
+            rt_it->second.deployed = false;
+            rt_it->second.container_state = "stopped";
+            rt_it->second.running_core_nf_types.clear();
+            rt_it->second.service_probe_ok = false;
+            rt_it->second.core_business_load = zero_business_load();
+            rt_it->second.core_network_load = 0.0;
+            touched_runtime = true;
+        }
+    }
+
+    std::unordered_set<std::string> dedup(containers_to_stop.begin(), containers_to_stop.end());
+    for (const auto& node : nodes_to_clear) {
+        dedup.insert(node_to_container_name(deployment_id, node));
+        dedup.insert(legacy_node_container_name(node));
+    }
+
+    if (dedup.empty()) {
+        std::string list_output;
+        int code = 0;
+        const std::string list_cmd =
+            "docker ps -a --format '{{.Names}}' | grep '^" + deployment_prefix + "' || true";
+        run_shell_command_capture(list_cmd, &list_output, &code);
+        for (const auto& line : split_lines(list_output)) {
+            const std::string c = trim_copy(line);
+            if (!c.empty()) dedup.insert(c);
+        }
+    }
+
+    bool stopped_any = false;
+    for (const auto& c : dedup) {
+        if (c.empty()) continue;
+        stopped_any = stop_container(c) || stopped_any;
+    }
+
+    return touched_runtime || !dedup.empty() || stopped_any;
+}
+
 std::unordered_map<std::string, DeploymentOrchestratorService::NodeRuntimeSnapshot>
 DeploymentOrchestratorService::snapshot_node_runtime() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -545,12 +647,30 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     const bool has_nrf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
         return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "nrf";
     });
+    const bool has_ausf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "ausf";
+    });
+    const bool has_udm = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "udm";
+    });
+    const bool has_udr = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "udr";
+    });
+    const bool has_pcf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
+        return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "pcf";
+    });
     const bool min_chain_ready = has_amf && has_smf && has_upf && has_nrf;
     const bool service_ready =
         min_chain_ready &&
         containers_failed == 0 &&
         core_nfs_failed == 0 &&
         registration_ok;
+    const bool ue_validation_ready =
+        service_ready &&
+        has_ausf &&
+        has_udm &&
+        has_udr &&
+        has_pcf;
     const std::string phase = service_ready ? "running" : "degraded";
 
     {
@@ -562,7 +682,9 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }
 
     const std::string err = errors.empty()
-        ? (service_ready ? "" : "open5gs_nf_not_fully_running")
+        ? (service_ready
+            ? (ue_validation_ready ? "" : "ueransim_prerequisites_not_met")
+            : "open5gs_nf_not_fully_running")
         : errors.front();
 
     update_deployment_runtime_state(task.deployment_id, {
@@ -575,7 +697,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         {"core_nfs_running", core_nfs_running},
         {"core_nfs_failed", core_nfs_failed},
         {"service_ready", service_ready},
-        {"ready_for_ueransim", service_ready},
+        {"ready_for_ueransim", ue_validation_ready},
         {"last_error", err},
         {"last_update_at", iso_now()}
     }, true);
@@ -650,12 +772,16 @@ CoreBusinessLoad DeploymentOrchestratorService::compute_business_load_for_nfs(
 
     const double scale = 1.0 / static_cast<double>(nf_types.size());
     const double health_factor = service_probe_ok ? 1.0 : 0.45;
-    load.signaling_load = clamp01(load.signaling_load * scale * health_factor);
-    load.session_load = clamp01(load.session_load * scale * health_factor);
-    load.user_plane_load = clamp01(load.user_plane_load * scale * health_factor);
-    load.mobility_load = clamp01(load.mobility_load * scale * health_factor);
-    load.policy_load = clamp01(load.policy_load * scale * health_factor);
-    load.auth_load = clamp01(load.auth_load * scale * health_factor);
+    // Attenuate single-NF saturation so one NF does not easily show 100% in a dimension.
+    // 1 NF -> 0.60, 2 -> 0.70, 3 -> 0.80, 4 -> 0.90, >=5 -> 1.00
+    const double density_factor = 0.60 + 0.40 * std::min(1.0, (static_cast<double>(nf_types.size()) - 1.0) / 4.0);
+    const double final_factor = health_factor * density_factor;
+    load.signaling_load = clamp01(load.signaling_load * scale * final_factor);
+    load.session_load = clamp01(load.session_load * scale * final_factor);
+    load.user_plane_load = clamp01(load.user_plane_load * scale * final_factor);
+    load.mobility_load = clamp01(load.mobility_load * scale * final_factor);
+    load.policy_load = clamp01(load.policy_load * scale * final_factor);
+    load.auth_load = clamp01(load.auth_load * scale * final_factor);
     load.normalize_inplace();
     return load;
 }
@@ -1016,6 +1142,7 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "        mnc: 70\n";
         oss << "      s_nssai:\n";
         oss << "        - sst: 1\n";
+        oss << "          sd: '000001'\n";
         oss << "  security:\n";
         oss << "    integrity_order: [ NIA2, NIA1, NIA0 ]\n";
         oss << "    ciphering_order: [ NEA0, NEA1, NEA2 ]\n";
@@ -1044,6 +1171,7 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "    client:\n";
         oss << "      upf:\n";
         oss << "        - address: " << (upf_ip.empty() ? local_ip : upf_ip) << "\n";
+        oss << "          port: 8805\n";
         oss << "  gtpc:\n";
         oss << "    server:\n";
         oss << "      - address: " << local_ip << "\n";
@@ -1154,6 +1282,7 @@ std::string DeploymentOrchestratorService::render_nf_config(
             oss << "        - uri: " << nrf_uri << "\n";
             oss << "          s_nssai:\n";
             oss << "            sst: 1\n";
+            oss << "            sd: '000001'\n";
         }
         return oss.str();
     }

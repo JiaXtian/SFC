@@ -129,10 +129,10 @@ curl -X POST http://localhost:8080/api/v1/sfc/plan \
 
 ### 动态仿真控制
 ```bash
-# 启动动态仿真（默认5s）
+# 启动动态仿真（默认15s）
 curl -X POST http://localhost:8080/api/v1/topology/dynamic/start \
   -H "Content-Type: application/json" \
-  -d '{"sampling_interval_sec":5,"simulation_speed":1.0,"enable_faults":true}'
+  -d '{"sampling_interval_sec":15,"simulation_speed":1.0,"enable_faults":true}'
 
 # 单步推进
 curl -X POST http://localhost:8080/api/v1/topology/dynamic/step

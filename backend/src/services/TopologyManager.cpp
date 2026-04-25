@@ -19,7 +19,7 @@ TopologyManager::TopologyManager() {
     current_topology_.metadata.altitude_km = 0.0;
     current_topology_.metadata.inclination_deg = 0.0;
     current_topology_.metadata.topology_version = 0;
-    current_topology_.metadata.sampling_interval_sec = 5.0;
+    current_topology_.metadata.sampling_interval_sec = 15.0;
     current_topology_.metadata.sim_time = "";
     current_topology_.metadata.timestamp = "1970-01-01T00:00:00Z";
 }
@@ -42,7 +42,7 @@ Topology TopologyManager::generate_walker_delta(
     topo.metadata.altitude_km = altitude_km;
     topo.metadata.inclination_deg = inclination_deg;
     topo.metadata.topology_version = 0;
-    topo.metadata.sampling_interval_sec = 5.0;
+    topo.metadata.sampling_interval_sec = 15.0;
     
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);

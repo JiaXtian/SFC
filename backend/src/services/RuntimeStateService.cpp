@@ -394,7 +394,7 @@ bool RuntimeStateService::parse_topology_json(const nlohmann::json& root, Topolo
     parsed.metadata.altitude_km = meta ? json_number(*meta, "altitude_km", 0.0) : 0.0;
     parsed.metadata.inclination_deg = meta ? json_number(*meta, "inclination_deg", 53.0) : 53.0;
     parsed.metadata.topology_version = meta ? json_int(*meta, "topology_version", 0) : 0;
-    parsed.metadata.sampling_interval_sec = meta ? json_number(*meta, "sampling_interval_sec", 5.0) : 5.0;
+    parsed.metadata.sampling_interval_sec = meta ? json_number(*meta, "sampling_interval_sec", 15.0) : 15.0;
     parsed.metadata.sim_time = meta ? json_string(*meta, "sim_time", "") : "";
     parsed.metadata.timestamp = meta ? json_string(*meta, "timestamp", "") : "";
 

@@ -42,7 +42,7 @@ export default function DynamicPanel() {
   } = useStore()
 
   const [busy, setBusy] = useState(false)
-  const [intervalSec, setIntervalSec] = useState(5)
+  const [intervalSec, setIntervalSec] = useState(15)
   const [speed, setSpeed] = useState(1)
   const [selectedTraceKey, setSelectedTraceKey] = useState('')
   const [sessions, setSessions] = useState<any[]>([])
@@ -55,12 +55,14 @@ export default function DynamicPanel() {
         if (!mounted) return
         setSimulationStatus({
           running: !!res.running,
-          sampling_interval_sec: Number(res.sampling_interval_sec ?? 5),
+          sampling_interval_sec: Math.max(10, Math.min(30, Number(res.sampling_interval_sec ?? 15))),
           simulation_speed: Number(res.simulation_speed ?? 1),
           topology_version: Number(res.topology_version ?? 0),
           sim_time: String(res.sim_time ?? ''),
           metrics: res.metrics ?? null,
         })
+        setIntervalSec(Math.max(10, Math.min(30, Number(res.sampling_interval_sec ?? 15))))
+        setSpeed(Math.max(0.1, Math.min(20, Number(res.simulation_speed ?? 1))))
       })
       .catch(() => {})
     return () => { mounted = false }
@@ -202,8 +204,8 @@ export default function DynamicPanel() {
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-1">
             <div className="text-[10px] text-slate-400">采样周期(s)</div>
-            <input type="number" min={1} max={30} step={1} value={intervalSec}
-              onChange={e => setIntervalSec(Math.max(1, Math.min(30, Number(e.target.value) || 5)))}
+            <input type="number" min={10} max={30} step={1} value={intervalSec}
+              onChange={e => setIntervalSec(Math.max(10, Math.min(30, Number(e.target.value) || 15)))}
               className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
           </label>
           <label className="space-y-1">

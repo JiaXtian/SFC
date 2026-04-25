@@ -31,7 +31,7 @@ public:
     ~DynamicSimulationService();
 
     bool start(
-        double sampling_interval_sec = 5.0,
+        double sampling_interval_sec = 15.0,
         double simulation_speed = 1.0,
         bool enable_faults = false,
         double node_fault_prob_per_tick = 0.0,

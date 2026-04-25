@@ -468,7 +468,7 @@ export function useAutoDynamics() {
           }
         }
 
-        if (resAccRef.current >= Math.max(1, ad.resource_update_sec)) {
+        if (resAccRef.current >= Math.max(10, ad.resource_update_sec)) {
           resAccRef.current = 0
           syncResources()
         }

@@ -53,9 +53,20 @@ export SFC_SATELLITE_IMAGE_AMD64=ghcr.io/<your-org>/sfc-open5gs-satellite:v0.1.0
 5. 执行 UERANSIM 验证：
 
 ```bash
+API_BASE=http://127.0.0.1:18080/api/v1 \
+# 可直接传 JWT，或依赖脚本默认账号自动登录（admin/123456）
+# API_TOKEN=<jwt_token> \
+STRICT_PDU_SESSION=1 \
 UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
 ./scripts/verify_ueransim_smoke.sh
 ```
+
+说明：
+- 脚本默认使用 `SST=1`、`SD=000001` 与 Open5GS 对接
+- 未设置 `API_BASE` 时，脚本会自动探测 `18080/8080` 两个本地端口
+- 默认仅验证 `ready_for_ueransim=true`；如需强制测试 `service_ready=true` 的部署，可设置 `ALLOW_SERVICE_READY_FALLBACK=1`
+- 可选开启 `STRICT_PDU_SESSION=1`，要求 UE 注册后必须在 `PDU_WAIT_SEC` 内完成 PDU 会话日志验证
+- 如你自定义切片，可显式设置 `UERANSIM_SST/UERANSIM_SD`
 
 ## 5. 验收最小清单
 
@@ -65,6 +76,7 @@ UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
 - `core_nfs_running == core_nfs_total`
 - `service_ready=true`
 - UERANSIM 脚本输出 `[OK] UERANSIM smoke verification passed`
+- 资源采样间隔配置在 `10-30s`（默认 `15s`），并能驱动 CPU/MEM/DISK 与核心网业务负载同步刷新
 
 ## 6. 常见问题
 

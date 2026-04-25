@@ -127,7 +127,7 @@ export function useBootstrapRuntime() {
         const status = statusRes.value ?? {}
         setSimulationStatus({
           running: Boolean(status?.running),
-          sampling_interval_sec: toNumber(status?.sampling_interval_sec ?? 5, 5),
+          sampling_interval_sec: toNumber(status?.sampling_interval_sec ?? 15, 15),
           simulation_speed: toNumber(status?.simulation_speed ?? 1, 1),
           topology_version: toNumber(status?.topology_version ?? 0, 0),
           sim_time: String(status?.sim_time ?? ''),
@@ -138,7 +138,7 @@ export function useBootstrapRuntime() {
       if (configRes.status === 'fulfilled') {
         const cfg = configRes.value ?? {}
         setAutoDynamics({
-          resource_update_sec: Math.max(1, Math.min(60, toNumber(cfg?.resource_sampling_interval_sec ?? 5, 5))),
+          resource_update_sec: Math.max(10, Math.min(30, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
           time_scale: Math.max(0.1, Math.min(20, toNumber(cfg?.simulation_speed ?? 1, 1))),
         })
       }
