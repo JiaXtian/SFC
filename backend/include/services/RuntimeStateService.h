@@ -36,6 +36,7 @@ class RuntimeStateService {
     nlohmann::json list_runtime_events(int limit) const;
     bool clear_runtime_events();
 
+    bool clear_topology();
     bool clear_deployments();
 
   private:
@@ -52,4 +53,3 @@ class RuntimeStateService {
 };
 
 }  // namespace sfc
-

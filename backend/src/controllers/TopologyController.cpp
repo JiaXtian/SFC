@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -164,10 +165,10 @@ void TopologyController::generateTopology(
             return;
         }
         
-        int total_sats = 576;
-        int num_planes = 24;
-        double altitude = 550.0;
-        double inclination = 53.0;
+        int total_sats = json->get("total_sats", json->get("total_satellites", 576)).asInt();
+        int num_planes = json->get("num_planes", 24).asInt();
+        double altitude = json->get("altitude_km", json->get("altitude", 550.0)).asDouble();
+        double inclination = json->get("inclination_deg", json->get("inclination", 53.0)).asDouble();
         bool force_replace = json_bool(*json, "force_replace", false);
         std::string constellation_template = json->get("constellation_template", "").asString();
 
@@ -188,9 +189,6 @@ void TopologyController::generateTopology(
             if (constellation_template.empty()) {
                 constellation_template = meta.get("template_id", "").asString();
             }
-        } else {
-            total_sats = json->get("total_sats", 576).asInt();
-            num_planes = json->get("num_planes", 24).asInt();
         }
 
         const bool has_nodes = json->isMember("nodes") && (*json)["nodes"].isArray() && (*json)["nodes"].size() > 0;
@@ -377,9 +375,26 @@ void TopologyController::generateTopology(
                     );
                 }
             }
-            g_runtime_state_service->save_topology(topology, constellation_template);
-            g_runtime_state_service->clear_deployments();
-            g_runtime_state_service->clear_runtime_events();
+            const bool cleared_topology = g_runtime_state_service->clear_topology();
+            const bool saved_topology = cleared_topology && g_runtime_state_service->save_topology(topology, constellation_template);
+            const bool cleared_deployments = g_runtime_state_service->clear_deployments();
+            const bool cleared_events = g_runtime_state_service->clear_runtime_events();
+            Topology persisted_check;
+            std::string persisted_template;
+            const bool reloaded_topology = saved_topology &&
+                g_runtime_state_service->load_topology(&persisted_check, &persisted_template);
+            const bool persisted_match = reloaded_topology &&
+                persisted_check.nodes.size() == topology.nodes.size() &&
+                persisted_check.links.size() == topology.links.size();
+            if (!saved_topology || !cleared_deployments || !cleared_events || !persisted_match) {
+                std::ostringstream oss;
+                oss << "runtime_state_persist_failed"
+                    << " save_topology=" << (saved_topology ? "true" : "false")
+                    << " clear_deployments=" << (cleared_deployments ? "true" : "false")
+                    << " clear_events=" << (cleared_events ? "true" : "false")
+                    << " persisted_match=" << (persisted_match ? "true" : "false");
+                throw std::runtime_error(oss.str());
+            }
             const nlohmann::json evt = {
                 {"type", "topology_replaced"},
                 {"sim_time", topology.metadata.timestamp},
@@ -388,6 +403,7 @@ void TopologyController::generateTopology(
                 {"total_nodes", topology.nodes.size()},
                 {"total_links", topology.links.size()},
                 {"rolled_back_deployments", rolled_back_deployments},
+                {"persisted", true},
                 {"message", "Topology replaced and deployments cleared"}
             };
             WSHandler::broadcast_json(evt);

@@ -227,6 +227,10 @@ bool RuntimeStateService::clear_runtime_events() {
     return exec_sql("DELETE FROM runtime_events", nullptr, &stderr_out);
 }
 
+bool RuntimeStateService::clear_topology() {
+    return set_state_json("topology_snapshot", nlohmann::json::object());
+}
+
 bool RuntimeStateService::clear_deployments() {
     return set_state_json("deployments", nlohmann::json::array());
 }

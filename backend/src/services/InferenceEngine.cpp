@@ -1166,7 +1166,11 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
 
     const bool realtime_mode = request.realtime_mode;
     const int req_topk = std::max(1, request.topk);
-    const int target_feasible_count = realtime_mode
+    const int min_return_topk_floor = realtime_mode
+        ? candidate_tuning_.realtime_return_topk_floor
+        : candidate_tuning_.offline_return_topk_floor;
+    const int effective_return_topk = std::max(1, std::max(request.topk, min_return_topk_floor));
+    int target_feasible_count = realtime_mode
         ? std::min(
             std::max(
                 candidate_tuning_.realtime_target_min,
@@ -1181,6 +1185,11 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             ),
             candidate_tuning_.offline_target_cap
           );
+    const int diversified_target_cap = std::max(
+        effective_return_topk,
+        std::max(effective_return_topk + 4, effective_return_topk * 2)
+    );
+    target_feasible_count = std::max(1, std::min(target_feasible_count, diversified_target_cap));
 
     int hard_attempt_cap = request.max_planning_attempts > 0
         ? request.max_planning_attempts
@@ -1228,6 +1237,10 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     );
     int attempts_done = 0;
     bool stop_search = false;
+    const int actor_attempt_cap = std::max(
+        1,
+        request.realtime_mode ? 6 : std::max(12, effective_return_topk * 3)
+    );
 
     std::vector<double> relax_levels = candidate_tuning_.reliability_relax_levels;
     if (relax_levels.empty()) {
@@ -1281,18 +1294,21 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
                 break;
             }
             attempts_done += 1;
+            const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
+            const bool disable_actor_policy = attempts_done > actor_attempt_cap;
             DeploymentCandidate candidate = generate_single_deployment(
                 planning_request,
                 topology,
                 static_cast<int>(relax_idx) * level_attempts + k,
                 node_embeddings,
                 node_id_to_idx,
-                decision_trace ? &single_trace : nullptr
+                capture_attempt_trace ? &single_trace : nullptr,
+                disable_actor_policy
             );
             if (candidate.deployed_nodes.empty()) continue;
 
-            if (decision_trace && trace_steps.size() < kMaxTraceAttempts) {
+            if (capture_attempt_trace) {
                 trace_steps.push_back({
                     {"attempt_id", static_cast<int>(relax_idx) * level_attempts + k},
                     {"relax_factor", relax_factor},
@@ -1347,18 +1363,21 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             if (budget_exceeded()) break;
             if (hard_attempt_cap > 0 && attempts_done >= hard_attempt_cap) break;
             attempts_done += 1;
+            const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
+            const bool disable_actor_policy = attempts_done > actor_attempt_cap;
             DeploymentCandidate candidate = generate_single_deployment(
                 request,
                 topology,
                 seed_base + extra,
                 node_embeddings,
                 node_id_to_idx,
-                decision_trace ? &single_trace : nullptr
+                capture_attempt_trace ? &single_trace : nullptr,
+                disable_actor_policy
             );
             if (candidate.deployed_nodes.empty()) continue;
 
-            if (decision_trace && trace_steps.size() < kMaxTraceAttempts) {
+            if (capture_attempt_trace) {
                 trace_steps.push_back({
                     {"attempt_id", seed_base + extra},
                     {"relax_factor", 1.0},
@@ -1392,10 +1411,6 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         if (a.score != b.score) return a.score > b.score;
         return a.total_latency_ms < b.total_latency_ms;
     });
-    const int min_return_topk_floor = realtime_mode
-        ? candidate_tuning_.realtime_return_topk_floor
-        : candidate_tuning_.offline_return_topk_floor;
-    const int effective_return_topk = std::max(1, std::max(request.topk, min_return_topk_floor));
     if (static_cast<int>(feasible_candidates.size()) > effective_return_topk) {
         feasible_candidates.resize(static_cast<size_t>(effective_return_topk));
     }
@@ -1417,6 +1432,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         (*decision_trace)["effective_relax_levels"] = relax_levels;
         (*decision_trace)["effective_min_attempt_floor"] = min_attempt_floor;
         (*decision_trace)["effective_min_budget_floor_ms"] = min_budget_floor;
+        (*decision_trace)["actor_attempt_cap"] = actor_attempt_cap;
     }
 
     if (!feasible_candidates.empty()) {
@@ -1446,10 +1462,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     int seed,
     const std::vector<float>& node_embeddings,
     const std::unordered_map<std::string, int64_t>& node_id_to_idx,
-    nlohmann::json* candidate_trace
+    nlohmann::json* candidate_trace,
+    bool disable_actor_policy
 ) {
     DeploymentCandidate candidate;
     candidate.score = 0.9 - seed * 0.1;
+    const bool trace_enabled = candidate_trace != nullptr;
     if (candidate_trace) {
         *candidate_trace = {
             {"seed", seed},
@@ -1523,17 +1541,20 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     // 迭代放置每个VNF
     for (size_t i = 0; i < request.vnfs.size(); ++i) {
         const auto& vnf = request.vnfs[i];
-        nlohmann::json step_trace = {
-            {"vnf_index", static_cast<int>(i)},
-            {"vnf_name", vnf.name},
-            {"core_nf", vnf.name},
-            {"nf_type", vnf.nf_type.empty() ? vnf.name : vnf.nf_type},
-            {"nf_role", vnf.nf_role},
-            {"prev_node", prev_node},
-            {"remaining_latency_before", remaining_latency},
-            {"accumulated_latency_before", accumulated_latency},
-            {"accumulated_reliability_before", accumulated_reliability}
-        };
+        nlohmann::json step_trace = nlohmann::json::object();
+        if (trace_enabled) {
+            step_trace = {
+                {"vnf_index", static_cast<int>(i)},
+                {"vnf_name", vnf.name},
+                {"core_nf", vnf.name},
+                {"nf_type", vnf.nf_type.empty() ? vnf.name : vnf.nf_type},
+                {"nf_role", vnf.nf_role},
+                {"prev_node", prev_node},
+                {"remaining_latency_before", remaining_latency},
+                {"accumulated_latency_before", accumulated_latency},
+                {"accumulated_reliability_before", accumulated_reliability}
+            };
+        }
         const double required_bandwidth_gbps = std::max(
             request.constraints.min_bandwidth_gbps,
             std::max(vnf.bw_in, vnf.bw_out)
@@ -1552,7 +1573,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             deployed_node_set,
             topology
         );
-        step_trace["pruned_candidate_count"] = static_cast<int>(candidates_set.size());
+        if (trace_enabled) {
+            step_trace["pruned_candidate_count"] = static_cast<int>(candidates_set.size());
+        }
 
         if (candidates_set.empty()) {
             spdlog::error("No feasible node for core NF {}: {}", i, vnf.name);
@@ -1565,14 +1588,16 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         }
 
         auto ranked_nodes = rank_nodes_by_cost(candidates_set, vnf, prev_node, topology);
-        nlohmann::json ranked_top = nlohmann::json::array();
-        for (size_t ridx = 0; ridx < std::min<size_t>(10, ranked_nodes.size()); ++ridx) {
-            ranked_top.push_back({
-                {"node", ranked_nodes[ridx].first},
-                {"heuristic_cost", ranked_nodes[ridx].second}
-            });
+        if (trace_enabled) {
+            nlohmann::json ranked_top = nlohmann::json::array();
+            for (size_t ridx = 0; ridx < std::min<size_t>(10, ranked_nodes.size()); ++ridx) {
+                ranked_top.push_back({
+                    {"node", ranked_nodes[ridx].first},
+                    {"heuristic_cost", ranked_nodes[ridx].second}
+                });
+            }
+            step_trace["ranked_candidates_top"] = ranked_top;
         }
-        step_trace["ranked_candidates_top"] = ranked_top;
         const int search_target = request.realtime_mode
             ? std::max(1, std::min(4, request.topk))
             : std::max(request.topk, 10);
@@ -1651,22 +1676,34 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             context_feature_dim_
         );
 
-        auto probs = run_actor_policy(node_embeddings, actor_candidate_indices, vnf_features, context_features);
-        if (probs.size() != actor_candidate_indices.size()) {
+        std::vector<float> probs;
+        if (disable_actor_policy) {
             probs.assign(actor_candidate_indices.size(), 0.0f);
-            if (!probs.empty()) {
-                probs[static_cast<size_t>(seed) % probs.size()] = 1.0f;
+            const size_t denom = std::max<size_t>(1, probs.size());
+            for (size_t p = 0; p < probs.size(); ++p) {
+                probs[p] = static_cast<float>((denom - p) / static_cast<double>(denom));
+            }
+        } else {
+            probs = run_actor_policy(node_embeddings, actor_candidate_indices, vnf_features, context_features);
+            if (probs.size() != actor_candidate_indices.size()) {
+                probs.assign(actor_candidate_indices.size(), 0.0f);
+                if (!probs.empty()) {
+                    probs[static_cast<size_t>(seed) % probs.size()] = 1.0f;
+                }
             }
         }
 
-        nlohmann::json actor_top = nlohmann::json::array();
-        for (size_t aidx = 0; aidx < std::min<size_t>(10, candidate_node_ids.size()); ++aidx) {
-            actor_top.push_back({
-                {"node", candidate_node_ids[aidx]},
-                {"actor_prob", aidx < probs.size() ? probs[aidx] : 0.0}
-            });
+        if (trace_enabled) {
+            step_trace["actor_mode"] = disable_actor_policy ? "heuristic_fastpath" : "onnx_policy";
+            nlohmann::json actor_top = nlohmann::json::array();
+            for (size_t aidx = 0; aidx < std::min<size_t>(10, candidate_node_ids.size()); ++aidx) {
+                actor_top.push_back({
+                    {"node", candidate_node_ids[aidx]},
+                    {"actor_prob", aidx < probs.size() ? probs[aidx] : 0.0}
+                });
+            }
+            step_trace["actor_candidates"] = actor_top;
         }
-        step_trace["actor_candidates"] = actor_top;
 
         std::vector<size_t> probe_order(probs.size());
         std::iota(probe_order.begin(), probe_order.end(), 0);
@@ -1680,17 +1717,19 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         std::stable_sort(probe_order.begin(), probe_order.end(), [&](size_t a, size_t b) {
             return probe_scores[a] > probe_scores[b];
         });
-        nlohmann::json actor_rank_top = nlohmann::json::array();
-        for (size_t pidx = 0; pidx < std::min<size_t>(10, probe_order.size()); ++pidx) {
-            const size_t probe_idx = probe_order[pidx];
-            actor_rank_top.push_back({
-                {"rank", static_cast<int>(pidx + 1)},
-                {"node", candidate_node_ids[probe_idx]},
-                {"actor_prob", probe_idx < probs.size() ? probs[probe_idx] : 0.0},
-                {"blended_score", probe_idx < probe_scores.size() ? probe_scores[probe_idx] : 0.0}
-            });
+        if (trace_enabled) {
+            nlohmann::json actor_rank_top = nlohmann::json::array();
+            for (size_t pidx = 0; pidx < std::min<size_t>(10, probe_order.size()); ++pidx) {
+                const size_t probe_idx = probe_order[pidx];
+                actor_rank_top.push_back({
+                    {"rank", static_cast<int>(pidx + 1)},
+                    {"node", candidate_node_ids[probe_idx]},
+                    {"actor_prob", probe_idx < probs.size() ? probs[probe_idx] : 0.0},
+                    {"blended_score", probe_idx < probe_scores.size() ? probe_scores[probe_idx] : 0.0}
+                });
+            }
+            step_trace["actor_ranking_top"] = actor_rank_top;
         }
-        step_trace["actor_ranking_top"] = actor_rank_top;
         const auto prev_probe_it = std::find(candidate_node_ids.begin(), candidate_node_ids.end(), prev_node);
         if (prev_probe_it != candidate_node_ids.end()) {
             const size_t prev_probe_idx = static_cast<size_t>(std::distance(candidate_node_ids.begin(), prev_probe_it));

@@ -183,7 +183,7 @@ export default function LeftPanel() {
       })
 
       try {
-        const topologyData = prepareTopologyForBackend(sats, links, type, planes)
+        const topologyData: any = prepareTopologyForBackend(sats, links, type, planes)
         topologyData.force_replace = true
         topologyData.metadata = {
           ...(topologyData.metadata ?? {}),
@@ -259,7 +259,7 @@ export default function LeftPanel() {
       setBackendTopologySynced(false)
 
       try {
-        const topologyData = {
+        const topologyData: any = {
           metadata: {
             total_sats: parsed.satellites.length,
             num_planes: planes,

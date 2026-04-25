@@ -502,11 +502,21 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     trim_latency_window_locked();
     total_decisions_ += 1;
 
-    const auto chosen_it = std::find_if(
+    auto chosen_it = std::find_if(
         response_candidates.begin(),
         response_candidates.end(),
         [](const DeploymentCandidate& c) { return c.satisfies_constraints; }
     );
+    const bool link_fault_reroute_only = trigger == "anchor_path_disconnected" && session.has_last_candidate;
+    if (link_fault_reroute_only) {
+        chosen_it = std::find_if(
+            response_candidates.begin(),
+            response_candidates.end(),
+            [&](const DeploymentCandidate& c) {
+                return c.satisfies_constraints && c.deployed_nodes == session.last_candidate.deployed_nodes;
+            }
+        );
+    }
     if (chosen_it != response_candidates.end()) {
         auto chosen = *chosen_it;
         chosen.per_vnf = ensure_per_vnf_filled(chosen, session.request);
@@ -515,6 +525,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         const bool changed = (!session.has_last_candidate) || (sig != session.last_candidate_signature);
         const std::string status = changed ? (session.has_last_candidate ? "redeployed" : "deployed") : "stable";
 
+        const bool nodes_changed = (!session.has_last_candidate) ||
+            (session.last_candidate.deployed_nodes != chosen.deployed_nodes);
         if (changed) {
             const std::string previous_allocation_id = session.active_resource_deployment_id;
             const bool had_previous_allocation = !previous_allocation_id.empty();
@@ -589,7 +601,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             auto updated_topology = res_mgr_->export_current_topology();
             topo_mgr_->save_current_topology(updated_topology);
 
-            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator) {
+            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator && nodes_changed) {
                 g_deployment_orchestrator->enqueue_deployment(
                     session.orchestration_deployment_id,
                     session.request.request_id,
@@ -606,7 +618,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             !session.orchestration_deployment_id.empty() &&
             g_deployment_orchestrator &&
             trigger != "session_start" &&
-            trigger != "topology_tick_bootstrap"
+            trigger != "topology_tick_bootstrap" &&
+            trigger != "anchor_path_disconnected"
         ) {
             // Fault-driven recomputation may keep the same placement. We still trigger orchestration
             // so container runtime can perform stop/start recovery on the selected satellites.
@@ -649,9 +662,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
 
     session.failures_total += 1;
     total_failures_ += 1;
-    const std::string pending_reason = response_candidates.empty()
-        ? "no_candidate"
-        : "no_deployable_candidate";
+    const std::string pending_reason = link_fault_reroute_only
+        ? "anchor_reroute_unavailable_without_reschedule"
+        : (response_candidates.empty() ? "no_candidate" : "no_deployable_candidate");
     session.pending_replanning = true;
     session.last_replanning_attempt_topology_version = session.last_topology_version;
     WSHandler::broadcast_json(trace_payload);

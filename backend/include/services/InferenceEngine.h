@@ -96,7 +96,8 @@ private:
         int seed,
         const std::vector<float>& node_embeddings,
         const std::unordered_map<std::string, int64_t>& node_id_to_idx,
-        nlohmann::json* candidate_trace = nullptr
+        nlohmann::json* candidate_trace = nullptr,
+        bool disable_actor_policy = false
     );
     
     std::vector<std::string> filter_candidate_nodes(

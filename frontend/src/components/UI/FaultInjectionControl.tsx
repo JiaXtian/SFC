@@ -115,7 +115,9 @@ export default function FaultInjectionControl() {
   const [simulationSpeed, setSimulationSpeed] = useState<number>(Math.max(0.1, Number(autoDynamics.time_scale || 1)))
 
   const [nodeFaultCatalog, setNodeFaultCatalog] = useState<string[]>([])
-  const [activeFaults, setActiveFaults] = useState<ActiveFault[]>([])
+  const [linkFaultCatalog, setLinkFaultCatalog] = useState<string[]>([])
+  const [activeNodeFaults, setActiveNodeFaults] = useState<NodeFault[]>([])
+  const [activeLinkFaults, setActiveLinkFaults] = useState<LinkFault[]>([])
   const [nowMs, setNowMs] = useState(Date.now())
 
   const [injectScope, setInjectScope] = useState<'single' | 'batch'>('single')
@@ -125,6 +127,10 @@ export default function FaultInjectionControl() {
   const [injectFaultType, setInjectFaultType] = useState('auto')
   const [injectDurationSec, setInjectDurationSec] = useState(20)
   const [injectOnlyActive, setInjectOnlyActive] = useState(true)
+  const [linkFaultSource, setLinkFaultSource] = useState('')
+  const [linkFaultTarget, setLinkFaultTarget] = useState('')
+  const [linkFaultType, setLinkFaultType] = useState('auto')
+  const [linkFaultDurationSec, setLinkFaultDurationSec] = useState(20)
 
   const [manualEntryInput, setManualEntryInput] = useState('')
   const [manualNodeIds, setManualNodeIds] = useState<string[]>([])
@@ -155,8 +161,13 @@ export default function FaultInjectionControl() {
       const nodeFaults = Array.isArray(status?.fault_catalog?.node)
         ? status.fault_catalog.node.map((x: any) => String(x))
         : []
+      const linkFaults = Array.isArray(status?.fault_catalog?.link)
+        ? status.fault_catalog.link.map((x: any) => String(x))
+        : []
       setNodeFaultCatalog(nodeFaults)
-      setActiveFaults(readNodeFaults(status))
+      setLinkFaultCatalog(linkFaults)
+      setActiveNodeFaults(readNodeFaults(status))
+      setActiveLinkFaults(readLinkFaults(status))
     } catch {
       // ignore transient failures
     } finally {
@@ -276,6 +287,42 @@ export default function FaultInjectionControl() {
     }
   }
 
+  const injectLinkFault = async () => {
+    setInjectingFaults(true)
+    try {
+      const source = linkFaultSource.trim()
+      const target = linkFaultTarget.trim()
+      if (!source || !target) throw new Error('请先输入链路两端卫星ID')
+      if (!satIdSet.has(source) || !satIdSet.has(target)) throw new Error('链路端点卫星ID不存在于当前星座')
+      if (source === target) throw new Error('链路端点不能相同')
+
+      const res = await apiClient.injectDynamicFaults({
+        entity_type: 'link',
+        action: 'inject',
+        source,
+        target,
+        fault_type: linkFaultType || 'auto',
+        ttl_ticks: secToTicks(Math.max(1, Math.min(3600, Number(linkFaultDurationSec || 1)))),
+        overwrite_existing: true,
+      })
+      const injected = Number(res?.injected ?? 0)
+      const skipped = Number(res?.skipped_existing ?? 0)
+      if (injected > 0) {
+        addToast(`已注入链路故障: ${source} ↔ ${target}`, 'success')
+      } else if (skipped > 0) {
+        addToast(`链路故障已存在: ${source} ↔ ${target}`, 'warning')
+      } else {
+        addToast('未注入链路故障（目标链路可能不存在）', 'warning')
+      }
+      await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
+    } catch (e: any) {
+      addToast(`链路故障注入失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setInjectingFaults(false)
+    }
+  }
+
   const removeFault = async (nodeId: string) => {
     setManagingFaults(true)
     try {
@@ -319,8 +366,53 @@ export default function FaultInjectionControl() {
     }
   }
 
+  const removeLinkFault = async (source: string, target: string) => {
+    setManagingFaults(true)
+    try {
+      const res = await apiClient.injectDynamicFaults({
+        entity_type: 'link',
+        action: 'remove',
+        source,
+        target,
+      })
+      const removed = Number(res?.removed ?? 0)
+      addToast(removed > 0 ? `已移除链路故障 ${source} ↔ ${target}` : `链路 ${source} ↔ ${target} 当前无故障`, removed > 0 ? 'success' : 'warning')
+      await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
+    } catch (e: any) {
+      addToast(`移除链路故障失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setManagingFaults(false)
+    }
+  }
+
+  const extendLinkFault = async (source: string, target: string) => {
+    setManagingFaults(true)
+    try {
+      const deltaSeconds = Math.max(1, Math.min(3600, Number(extendSeconds || 1)))
+      const res = await apiClient.injectDynamicFaults({
+        entity_type: 'link',
+        action: 'extend',
+        source,
+        target,
+        delta_seconds: deltaSeconds,
+      })
+      const extended = Number(res?.extended ?? 0)
+      addToast(
+        extended > 0 ? `已为链路 ${source} ↔ ${target} 延长 ${deltaSeconds}s` : `链路 ${source} ↔ ${target} 当前无故障`,
+        extended > 0 ? 'success' : 'warning',
+      )
+      await refreshStatus(true)
+      await syncTopologyAfterFaultMutation()
+    } catch (e: any) {
+      addToast(`延长链路故障失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setManagingFaults(false)
+    }
+  }
+
   const removeAllFaults = async () => {
-    const ids = activeFaults.map((f) => f.node_id).filter(Boolean)
+    const ids = activeNodeFaults.map((f) => f.node_id).filter(Boolean)
     if (ids.length === 0) {
       addToast('当前没有可移除的手动故障', 'info')
       return
@@ -342,14 +434,18 @@ export default function FaultInjectionControl() {
     }
   }
 
-  const liveRemaining = (fault: ActiveFault) => {
+  const liveRemaining = (fault: { remaining_sec: number; fetched_at_ms: number }) => {
     const elapsed = Math.max(0, (nowMs - fault.fetched_at_ms) / 1000)
     return Math.max(0, fault.remaining_sec - elapsed)
   }
 
-  const sortedFaults = useMemo(() => {
-    return [...activeFaults].sort((a, b) => liveRemaining(a) - liveRemaining(b))
-  }, [activeFaults, nowMs])
+  const sortedNodeFaults = useMemo(() => {
+    return [...activeNodeFaults].sort((a, b) => liveRemaining(a) - liveRemaining(b))
+  }, [activeNodeFaults, nowMs])
+
+  const sortedLinkFaults = useMemo(() => {
+    return [...activeLinkFaults].sort((a, b) => liveRemaining(a) - liveRemaining(b))
+  }, [activeLinkFaults, nowMs])
 
   return (
     <div
@@ -538,6 +634,56 @@ export default function FaultInjectionControl() {
           </button>
         </section>
 
+        <section className="rounded-xl p-2.5 border border-amber-500/35 bg-amber-900/10 space-y-2.5">
+          <div className="text-amber-100 inline-flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />链路故障注入
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              list="control-satellite-list"
+              value={linkFaultSource}
+              onChange={(e) => setLinkFaultSource(e.target.value)}
+              placeholder="链路源卫星ID"
+              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
+            />
+            <input
+              list="control-satellite-list"
+              value={linkFaultTarget}
+              onChange={(e) => setLinkFaultTarget(e.target.value)}
+              placeholder="链路宿卫星ID"
+              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              value={linkFaultType}
+              onChange={(e) => setLinkFaultType(e.target.value)}
+              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+            >
+              <option value="auto">故障类型: 自动匹配</option>
+              {linkFaultCatalog.map((ft) => <option key={ft} value={ft}>{linkFaultTypeLabel(ft)}</option>)}
+            </select>
+            <input
+              type="number"
+              min={1}
+              max={3600}
+              step={1}
+              value={linkFaultDurationSec}
+              onChange={(e) => setLinkFaultDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
+              placeholder="持续时间(s)"
+              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+            />
+          </div>
+          <button
+            disabled={injectingFaults}
+            onClick={injectLinkFault}
+            className="w-full h-9 rounded-lg text-amber-100 text-[13px] font-semibold disabled:opacity-60"
+            style={{ background: 'linear-gradient(135deg, rgba(217,119,6,0.84), rgba(146,64,14,0.82))', border: '1px solid rgba(253,224,71,0.45)' }}
+          >
+            {injectingFaults ? '注入中...' : '注入链路故障'}
+          </button>
+        </section>
+
         <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2">
           <div className="flex items-center justify-between">
             <div className="text-slate-200 inline-flex items-center gap-1.5">
@@ -555,7 +701,7 @@ export default function FaultInjectionControl() {
               <button
                 type="button"
                 onClick={removeAllFaults}
-                disabled={managingFaults || activeFaults.length === 0}
+                disabled={managingFaults || activeNodeFaults.length === 0}
                 className="h-7 px-2 rounded-md text-[11px] text-rose-100 bg-rose-900/40 border border-rose-800/70 disabled:opacity-60"
               >
                 全部移除
@@ -578,12 +724,12 @@ export default function FaultInjectionControl() {
           </div>
 
           <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
-            {sortedFaults.length === 0 && (
+            {sortedNodeFaults.length === 0 && (
               <div className="text-[11px] text-slate-500 rounded-lg border border-slate-700/60 bg-slate-900/25 px-2 py-2">
                 当前无手动注入故障
               </div>
             )}
-            {sortedFaults.map((f) => {
+            {sortedNodeFaults.map((f) => {
               const remain = liveRemaining(f)
               const remainLabel = remain > 0 ? `${remain.toFixed(0)}s` : '0s'
               const remainColor = remain <= 5 ? 'text-rose-300' : remain <= 15 ? 'text-amber-300' : 'text-emerald-300'
@@ -623,6 +769,56 @@ export default function FaultInjectionControl() {
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                     </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="pt-1.5 border-t border-slate-700/50 text-[11px] text-amber-200">链路故障列表</div>
+          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+            {sortedLinkFaults.length === 0 && (
+              <div className="text-[11px] text-slate-500 rounded-lg border border-slate-700/60 bg-slate-900/25 px-2 py-2">
+                当前无链路故障
+              </div>
+            )}
+            {sortedLinkFaults.map((f) => {
+              const remain = liveRemaining(f)
+              const remainLabel = remain > 0 ? `${remain.toFixed(0)}s` : '0s'
+              const remainColor = remain <= 5 ? 'text-rose-300' : remain <= 15 ? 'text-amber-300' : 'text-emerald-300'
+              return (
+                <div
+                  key={`${f.link_key}-${f.fault_type}`}
+                  className="rounded-lg border border-amber-700/50 bg-amber-900/10 px-2.5 py-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[12px] text-amber-100 font-mono">{f.source} ↔ {f.target}</div>
+                    <div className={`text-[11px] font-semibold ${remainColor}`}>{remainLabel}</div>
+                  </div>
+                  <div className="text-[11px] text-slate-300 mt-0.5">
+                    {linkFaultTypeLabel(f.fault_type)}
+                    <span className="text-slate-500"> · {f.injection_mode === 'manual' ? '手动注入' : f.injection_mode}</span>
+                  </div>
+                  <div className="flex items-center justify-end gap-2 mt-1.5">
+                    <button
+                      type="button"
+                      onClick={() => extendLinkFault(f.source, f.target)}
+                      disabled={managingFaults}
+                      className="h-7 px-2.5 rounded-md text-[11px] text-amber-100 bg-amber-900/30 border border-amber-800/60 disabled:opacity-60 inline-flex items-center gap-1"
+                      title={`延长 ${extendSeconds}s`}
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span className="font-mono">{extendSeconds}s</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeLinkFault(f.source, f.target)}
+                      disabled={managingFaults}
+                      className="h-7 w-7 rounded-md text-rose-100 bg-rose-900/35 border border-rose-800/65 disabled:opacity-60 inline-flex items-center justify-center"
+                      title="移除链路故障"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               )
