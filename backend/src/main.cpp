@@ -15,15 +15,22 @@
 #include "services/UserService.h"
 #include "services/RuntimeStateService.h"
 #include "services/DeploymentOrchestratorService.h"
+#include "services/DeploymentStateStore.h"
 #include <fstream>
 #include <filesystem>
 #include <vector>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <unordered_set>
 #include <chrono>
 #include <thread>
 #include <stdexcept>
+#include <limits>
+#include <cerrno>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
 
 using namespace drogon;
 using json = nlohmann::json;
@@ -219,6 +226,179 @@ std::string resolve_with_base(const std::filesystem::path& base_dir, const std::
     return (base_dir / p).lexically_normal().string();
 }
 
+std::string lower_ascii_copy(std::string s) {
+    for (auto& ch : s) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
+
+bool is_active_deployment_status(const std::string& raw_status) {
+    const std::string status = lower_ascii_copy(raw_status);
+    return !(status == "failed" || status == "rolled_back" || status == "rollbacked" || status == "deleted");
+}
+
+sfc::DeploymentCandidate candidate_from_deployment_record(const nlohmann::json& dep) {
+    sfc::DeploymentCandidate candidate{};
+    candidate.score = dep.value("score", 0.0);
+    candidate.total_latency_ms = dep.value("total_latency_ms", 0.0);
+    candidate.estimated_reliability = dep.value("estimated_reliability", 0.0);
+    candidate.bottleneck_bandwidth_gbps = dep.value("bottleneck_bandwidth_gbps", 0.0);
+    candidate.satisfies_constraints = dep.value("satisfies_constraints", true);
+    candidate.reason = dep.value("reason", std::string(""));
+
+    if (dep.contains("deployed_nodes") && dep["deployed_nodes"].is_array()) {
+        for (const auto& node : dep["deployed_nodes"]) {
+            if (node.is_string()) {
+                const auto id = node.get<std::string>();
+                if (!id.empty()) candidate.deployed_nodes.push_back(id);
+            }
+        }
+    }
+
+    const auto per = dep.contains("per_vnf") && dep["per_vnf"].is_array()
+        ? dep["per_vnf"]
+        : (dep.contains("per_core_nf") && dep["per_core_nf"].is_array() ? dep["per_core_nf"] : nlohmann::json::array());
+    std::unordered_set<std::string> node_set(candidate.deployed_nodes.begin(), candidate.deployed_nodes.end());
+    for (const auto& item : per) {
+        if (!item.is_object()) continue;
+        sfc::DeploymentCandidate::PerVNF pv{};
+        pv.vnf = item.value("vnf", std::string(""));
+        pv.core_nf = item.value("core_nf", pv.vnf);
+        pv.nf_type = item.value("nf_type", pv.core_nf.empty() ? pv.vnf : pv.core_nf);
+        pv.nf_role = item.value("nf_role", std::string(""));
+        pv.node = item.value("node", std::string(""));
+        pv.cpu_used = item.value("cpu_used", 0.0);
+        pv.mem_used = item.value("mem_used", 0.0);
+        pv.disk_used = item.value("disk_used", 0.0);
+        if (pv.node.empty()) continue;
+        candidate.per_vnf.push_back(pv);
+        node_set.insert(pv.node);
+    }
+    if (candidate.deployed_nodes.empty() && !node_set.empty()) {
+        candidate.deployed_nodes.assign(node_set.begin(), node_set.end());
+        std::sort(candidate.deployed_nodes.begin(), candidate.deployed_nodes.end());
+    }
+    return candidate;
+}
+
+int restore_active_deployments_after_boot() {
+    if (!sfc::g_deployment_orchestrator) return 0;
+    int queued = 0;
+    const nlohmann::json deployments = sfc::list_deployment_records();
+    if (!deployments.is_array()) return 0;
+
+    for (const auto& dep : deployments) {
+        if (!dep.is_object()) continue;
+        if (!is_active_deployment_status(dep.value("status", std::string("completed")))) continue;
+
+        const std::string deployment_id = dep.value(
+            "backend_deployment_id",
+            dep.value("deployment_id", std::string(""))
+        );
+        if (deployment_id.empty()) continue;
+
+        const auto candidate = candidate_from_deployment_record(dep);
+        if (candidate.deployed_nodes.empty() || candidate.per_vnf.empty()) continue;
+
+        const std::string request_id = dep.value(
+            "request_id",
+            dep.value("sfc_name", dep.value("name", deployment_id))
+        );
+        sfc::g_deployment_orchestrator->enqueue_deployment(
+            deployment_id,
+            request_id,
+            candidate,
+            {},
+            "bootstrap_restore",
+            "system_restart_restore"
+        );
+        queued += 1;
+    }
+    return queued;
+}
+
+void persist_runtime_snapshot_on_shutdown(const std::string& reason) {
+    if (!sfc::g_runtime_state_service) return;
+    if (!sfc::g_res_mgr || !sfc::g_topo_mgr) return;
+
+    sfc::Topology topo = sfc::g_res_mgr->export_current_topology();
+    if (topo.nodes.empty()) {
+        topo = sfc::g_topo_mgr->get_current_topology();
+    }
+    if (topo.nodes.empty()) {
+        spdlog::warn("Skip runtime snapshot persistence on shutdown: topology is empty (reason={})", reason);
+        return;
+    }
+    const bool ok = sfc::g_runtime_state_service->save_topology(topo, "");
+    spdlog::info(
+        "Shutdown snapshot persisted (reason={}): success={} nodes={} links={}",
+        reason,
+        ok ? "true" : "false",
+        topo.nodes.size(),
+        topo.links.size()
+    );
+}
+
+bool process_exists(pid_t pid) {
+    if (pid <= 0) return false;
+    if (::kill(pid, 0) == 0) return true;
+    return errno == EPERM;
+}
+
+bool acquire_instance_lock_file(const std::string& lock_file, std::string* err) {
+    constexpr int kMaxAttempts = 2;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        const int fd = ::open(lock_file.c_str(), O_RDWR | O_CREAT | O_EXCL, 0644);
+        if (fd >= 0) {
+            const std::string pid_line = std::to_string(::getpid()) + "\n";
+            (void)::write(fd, pid_line.data(), pid_line.size());
+            (void)::close(fd);
+            return true;
+        }
+
+        if (errno != EEXIST) {
+            if (err) *err = "create_lock_file_failed";
+            return false;
+        }
+
+        std::ifstream ifs(lock_file);
+        pid_t existing_pid = -1;
+        if (ifs.is_open()) {
+            long long raw = -1;
+            ifs >> raw;
+            if (raw > 0 && raw <= std::numeric_limits<pid_t>::max()) {
+                existing_pid = static_cast<pid_t>(raw);
+            }
+        }
+        if (process_exists(existing_pid) && existing_pid != ::getpid()) {
+            if (err) *err = "lock_held_by_pid_" + std::to_string(existing_pid);
+            return false;
+        }
+
+        // Stale lock file; remove and retry.
+        (void)::unlink(lock_file.c_str());
+    }
+
+    if (err) *err = "lock_retry_exhausted";
+    return false;
+}
+
+void release_instance_lock_file(const std::string& lock_file) {
+    std::ifstream ifs(lock_file);
+    pid_t existing_pid = -1;
+    if (ifs.is_open()) {
+        long long raw = -1;
+        ifs >> raw;
+        if (raw > 0 && raw <= std::numeric_limits<pid_t>::max()) {
+            existing_pid = static_cast<pid_t>(raw);
+        }
+    }
+    if (existing_pid == ::getpid() || !process_exists(existing_pid)) {
+        (void)::unlink(lock_file.c_str());
+    }
+}
+
 int main() {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
     
@@ -244,8 +424,25 @@ int main() {
     spdlog::info("==============================================");
     spdlog::info("  SFC Visualization Backend Starting...");
     spdlog::info("==============================================");
-    
+
+    std::string instance_lock_path;
+    bool instance_lock_acquired = false;
     try {
+        instance_lock_path = []() {
+            if (const char* v = std::getenv("SFC_BACKEND_INSTANCE_LOCK_FILE"); v && *v) {
+                return std::string(v);
+            }
+            return std::string("/tmp/sfc_runtime_backend.lock");
+        }();
+        std::string lock_err;
+        instance_lock_acquired = acquire_instance_lock_file(instance_lock_path, &lock_err);
+        if (!instance_lock_acquired) {
+            throw std::runtime_error(
+                "Another backend instance is already running (lock file: " + instance_lock_path + "). "
+                "Please stop the old process before starting a new one."
+            );
+        }
+
         // 创建全局服务实例
         sfc::g_topo_mgr = std::make_shared<sfc::TopologyManager>();
         sfc::g_res_mgr = std::make_shared<sfc::ResourceManager>();
@@ -355,6 +552,7 @@ int main() {
 
         double boot_sampling_interval_sec = 15.0;
         double boot_simulation_speed = 1.0;
+        bool boot_sim_should_run = true;
         if (const nlohmann::json control_config = sfc::g_runtime_state_service->load_control_config();
             control_config.is_object()) {
             if (control_config.contains("resource_sampling_interval_sec")) {
@@ -368,6 +566,9 @@ int main() {
                     0.1,
                     std::min(20.0, control_config.value("simulation_speed", 1.0))
                 );
+            }
+            if (control_config.contains("running") && control_config["running"].is_boolean()) {
+                boot_sim_should_run = control_config.value("running", true);
             }
         }
         if (!restored_topology) {
@@ -470,7 +671,7 @@ int main() {
             {Post}
         );
 
-        if (restored_topology) {
+        if (restored_topology && boot_sim_should_run) {
             const bool started = sfc::g_dynamic_sim->start(
                 boot_sampling_interval_sec,
                 boot_simulation_speed,
@@ -484,6 +685,24 @@ int main() {
                 boot_sampling_interval_sec,
                 boot_simulation_speed
             );
+        } else if (restored_topology) {
+            spdlog::info(
+                "Dynamic simulation remained paused from persisted state: interval={}s speed={}x",
+                boot_sampling_interval_sec,
+                boot_simulation_speed
+            );
+        }
+
+        if (restored_topology) {
+            const int restored_deployments = restore_active_deployments_after_boot();
+            if (restored_deployments > 0) {
+                spdlog::info(
+                    "Queued {} persisted deployment(s) for runtime restore after restart",
+                    restored_deployments
+                );
+            } else {
+                spdlog::info("No active persisted deployments to restore at startup");
+            }
         }
         
         spdlog::info("Server configured:");
@@ -498,13 +717,36 @@ int main() {
         spdlog::info("Starting server...");
         
         app().run();
+        const bool sim_was_running = sfc::g_dynamic_sim && sfc::g_dynamic_sim->is_running();
+        persist_runtime_snapshot_on_shutdown("app_run_exit");
+        if (sfc::g_runtime_state_service) {
+            nlohmann::json cfg = sfc::g_runtime_state_service->load_control_config();
+            if (!cfg.is_object()) cfg = nlohmann::json::object();
+            cfg["running"] = sim_was_running;
+            sfc::g_runtime_state_service->save_control_config(cfg);
+        }
+        if (sfc::g_dynamic_sim) {
+            sfc::g_dynamic_sim->stop(false);
+        }
         if (sfc::g_deployment_orchestrator) {
             sfc::g_deployment_orchestrator->stop();
         }
+        if (instance_lock_acquired) {
+            release_instance_lock_file(instance_lock_path);
+            instance_lock_acquired = false;
+        }
         
     } catch (const std::exception& e) {
+        persist_runtime_snapshot_on_shutdown("fatal_exception");
+        if (sfc::g_dynamic_sim) {
+            sfc::g_dynamic_sim->stop(false);
+        }
         if (sfc::g_deployment_orchestrator) {
             sfc::g_deployment_orchestrator->stop();
+        }
+        if (instance_lock_acquired) {
+            release_instance_lock_file(instance_lock_path);
+            instance_lock_acquired = false;
         }
         spdlog::critical("Fatal error: {}", e.what());
         return 1;

@@ -38,7 +38,7 @@ public:
         double link_fault_prob_per_tick = 0.0
     );
 
-    void stop();
+    void stop(bool persist_running_state = true);
     bool is_running() const;
 
     TopologySnapshot step_once();

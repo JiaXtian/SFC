@@ -153,7 +153,7 @@ DynamicSimulationService::DynamicSimulationService(
     rng_(std::random_device{}()) {}
 
 DynamicSimulationService::~DynamicSimulationService() {
-    stop();
+    stop(false);
 }
 
 const std::vector<std::string>& DynamicSimulationService::node_fault_catalog() {
@@ -240,7 +240,7 @@ bool DynamicSimulationService::start(
     return true;
 }
 
-void DynamicSimulationService::stop() {
+void DynamicSimulationService::stop(bool persist_running_state) {
     bool expected = true;
     if (!running_.compare_exchange_strong(expected, false)) {
         return;
@@ -248,7 +248,7 @@ void DynamicSimulationService::stop() {
     if (loop_thread_.joinable()) {
         loop_thread_.join();
     }
-    if (g_runtime_state_service) {
+    if (persist_running_state && g_runtime_state_service) {
         nlohmann::json cfg = g_runtime_state_service->load_control_config();
         if (!cfg.is_object()) cfg = nlohmann::json::object();
         cfg["running"] = false;
@@ -968,9 +968,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
 
     topo_mgr_->save_current_topology(snapshot.topology);
     res_mgr_->load_topology(snapshot.topology);
-    if (g_runtime_state_service) {
-        g_runtime_state_service->save_topology(snapshot.topology, "");
-    }
+    // Do NOT persist every dynamic tick to runtime_state.topology_snapshot.
+    // Topology snapshot persistence is handled by explicit control-plane actions
+    // (generate/import/delete/redeploy). Persisting here can cause cross-instance
+    // overwrite races when multiple backend processes are accidentally running.
     latest_snapshot_ = snapshot;
 
     if (emit_events) {
@@ -995,7 +996,12 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
 void DynamicSimulationService::run_loop() {
     while (running_.load()) {
         const auto sleep_ms = static_cast<int64_t>(sampling_interval_sec_ * 1000.0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::max<int64_t>(50, sleep_ms)));
+        int64_t remaining_ms = std::max<int64_t>(50, sleep_ms);
+        while (running_.load() && remaining_ms > 0) {
+            const int64_t slice_ms = std::min<int64_t>(200, remaining_ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(slice_ms));
+            remaining_ms -= slice_ms;
+        }
 
         if (!running_.load()) {
             break;

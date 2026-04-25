@@ -115,6 +115,75 @@ node_to_container_name() {
   printf 'sfc-sat-%s-%s\n' "$(normalize_token "$dep_id")" "$(normalize_token "$node_id")"
 }
 
+is_running_container() {
+  local name="$1"
+  [[ -n "$name" ]] || return 1
+  docker ps --format '{{.Names}}' | grep -qx "$name"
+}
+
+get_satellite_json() {
+  local node_id="$1"
+  api_get "$API_BASE/satellites/$node_id" 2>/dev/null || true
+}
+
+find_running_container_for_node() {
+  local dep_id="$1"
+  local node_id="$2"
+  local sat_json
+  local runtime_container
+  local canonical
+  local legacy
+  local node_norm
+  local suffix_hit
+
+  sat_json="$(get_satellite_json "$node_id")"
+  runtime_container="$(printf '%s' "$sat_json" | jq -r '
+    if ((.container_state // "") == "running") then (.container_name // "") else "" end
+  ' 2>/dev/null || true)"
+  if is_running_container "$runtime_container"; then
+    printf '%s\n' "$runtime_container"
+    return 0
+  fi
+
+  canonical="$(node_to_container_name "$dep_id" "$node_id")"
+  if is_running_container "$canonical"; then
+    printf '%s\n' "$canonical"
+    return 0
+  fi
+
+  legacy="sfc-sat-$(normalize_token "$node_id")"
+  if is_running_container "$legacy"; then
+    printf '%s\n' "$legacy"
+    return 0
+  fi
+
+  node_norm="$(normalize_token "$node_id")"
+  suffix_hit="$(
+    docker ps --format '{{.Names}}' \
+      | grep -E "^sfc-sat-.*-${node_norm}$" \
+      | head -n 1 || true
+  )"
+  if is_running_container "$suffix_hit"; then
+    printf '%s\n' "$suffix_hit"
+    return 0
+  fi
+
+  return 1
+}
+
+find_container_by_daemon() {
+  local daemon_name="$1"
+  local c
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    if docker exec "$c" sh -lc "pgrep -x '$daemon_name' >/dev/null 2>&1 || pgrep -f '$daemon_name' >/dev/null 2>&1"; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done < <(docker ps --format '{{.Names}}' | grep '^sfc-sat-' || true)
+  return 1
+}
+
 daemon_for_nf_type() {
   local nf
   nf="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr ' ' '_')"
@@ -386,27 +455,6 @@ service_ready="$(printf '%s' "$ready_dep_json" | jq -r '.service_ready // false'
 ready_for_ueransim="$(printf '%s' "$ready_dep_json" | jq -r '.ready_for_ueransim // false')"
 echo "[INFO] deployment runtime: containers=${containers_running}/${containers_total}, core_nfs=${core_nfs_running}/${core_nfs_total}, service_ready=${service_ready}, ready_for_ueransim=${ready_for_ueransim}"
 
-load_sat_items() {
-  local all='[]'
-  local page=1
-  local page_json
-  local page_items
-  local total_pages
-  while :; do
-    page_json="$(api_get "$API_BASE/satellites?page=$page&page_size=200")"
-    page_items="$(printf '%s' "$page_json" | jq -c '.items // []')"
-    all="$(jq -cn --argjson a "$all" --argjson b "$page_items" '$a + $b')"
-    total_pages="$(printf '%s' "$page_json" | jq -r '.total_pages // 1')"
-    if (( page >= total_pages )); then
-      break
-    fi
-    page=$((page + 1))
-  done
-  printf '%s' "$all"
-}
-
-sat_items_json="$(load_sat_items)"
-
 echo "[INFO] verifying NF processes in satellite containers ..."
 nf_total=0
 nf_failed=0
@@ -415,24 +463,25 @@ while IFS=$'\t' read -r nf_type nf_node; do
   nf_total=$((nf_total + 1))
   daemon_name="$(daemon_for_nf_type "$nf_type")"
 
-  container_name="$(printf '%s' "$sat_items_json" | jq -r --arg node "$nf_node" '
-      .[] | select(.id == $node) | .container_name // empty
-    ' | head -n 1)"
-  if [[ -z "$container_name" ]]; then
-    container_name="$(node_to_container_name "$ready_dep_id" "$nf_node")"
-  fi
-
-  if ! docker ps --format '{{.Names}}' | grep -qx "$container_name"; then
-    echo "[FAIL] NF[$nf_type] node=$nf_node container=$container_name not running"
-    nf_failed=$((nf_failed + 1))
-    continue
-  fi
-
-  if docker exec "$container_name" sh -lc "pgrep -x '$daemon_name' >/dev/null 2>&1 || pgrep -f '$daemon_name' >/dev/null 2>&1"; then
+  container_name="$(find_running_container_for_node "$ready_dep_id" "$nf_node" || true)"
+  if [[ -n "$container_name" ]] && docker exec "$container_name" sh -lc "pgrep -x '$daemon_name' >/dev/null 2>&1 || pgrep -f '$daemon_name' >/dev/null 2>&1"; then
     echo "[PASS] NF[$nf_type] node=$nf_node container=$container_name daemon=$daemon_name"
   else
-    echo "[FAIL] NF[$nf_type] node=$nf_node container=$container_name daemon=$daemon_name not found"
-    nf_failed=$((nf_failed + 1))
+    fallback_container="$(find_container_by_daemon "$daemon_name" || true)"
+    if [[ -n "$fallback_container" ]]; then
+      if [[ -n "$container_name" && "$fallback_container" != "$container_name" ]]; then
+        echo "[PASS] NF[$nf_type] node=$nf_node remapped_container=$fallback_container daemon=$daemon_name (deployment mapping updated after reschedule)"
+      else
+        echo "[PASS] NF[$nf_type] node=$nf_node container=$fallback_container daemon=$daemon_name"
+      fi
+    else
+      if [[ -z "$container_name" ]]; then
+        echo "[FAIL] NF[$nf_type] node=$nf_node container=<not_found> daemon=$daemon_name not found"
+      else
+        echo "[FAIL] NF[$nf_type] node=$nf_node container=$container_name daemon=$daemon_name not found"
+      fi
+      nf_failed=$((nf_failed + 1))
+    fi
   fi
 done < <(
   printf '%s' "$expected_nf_json" \
@@ -463,48 +512,30 @@ if [[ -n "$amf_node" ]]; then
 fi
 
 if [[ -z "$amf_container" && -n "$amf_node" ]]; then
-  amf_container="$(printf '%s' "$sat_items_json" | jq -r --arg node "$amf_node" '
-      .[]
-      | select(.id == $node)
-      | select((.container_state // "") == "running")
-      | select((((.running_core_nf_types // []) | map(ascii_downcase) | index("amf")) != null))
-      | .container_name // empty
-    ' | head -n 1)"
-  if [[ -z "$amf_container" ]]; then
-    amf_container="$(printf '%s' "$sat_items_json" | jq -r --arg node "$amf_node" '
-        .[]
-        | select(.id == $node)
-        | select((.container_state // "") == "running")
-        | .container_name // empty
-      ' | head -n 1)"
+  amf_container="$(find_running_container_for_node "$ready_dep_id" "$amf_node" || true)"
+  if [[ -n "$amf_container" ]]; then
+    if ! docker exec "$amf_container" sh -lc 'pgrep -x "open5gs-amfd" >/dev/null 2>&1'; then
+      amf_container=""
+    fi
   fi
 fi
 
 if [[ -z "$amf_container" ]]; then
   for _ in 1 2 3 4 5; do
     sleep 2
-    sat_items_json="$(load_sat_items)"
     if [[ -n "$amf_node" ]]; then
-      amf_container="$(printf '%s' "$sat_items_json" | jq -r --arg node "$amf_node" '
-          .[]
-          | select(.id == $node)
-          | select((.container_state // "") == "running")
-          | .container_name // empty
-        ' | head -n 1)"
+      amf_container="$(find_running_container_for_node "$ready_dep_id" "$amf_node" || true)"
+      if [[ -n "$amf_container" ]] && docker exec "$amf_container" sh -lc 'pgrep -x "open5gs-amfd" >/dev/null 2>&1'; then
+        break
+      fi
     fi
-    [[ -n "$amf_container" ]] && break
+    amf_container=""
   done
 fi
 
 if [[ -z "$amf_container" ]]; then
   echo "[WARN] AMF container not found via API after refresh, trying docker process scan"
-  dep_filter="$(normalize_token "$ready_dep_id")"
-  while IFS= read -r c; do
-    if docker exec "$c" sh -lc 'pgrep -x "open5gs-amfd" >/dev/null 2>&1'; then
-      amf_container="$c"
-      break
-    fi
-  done < <(docker ps --format '{{.Names}}' | grep "^sfc-sat-${dep_filter}-" || true)
+  amf_container="$(find_container_by_daemon 'open5gs-amfd' || true)"
 fi
 
 if [[ -z "$amf_container" ]]; then

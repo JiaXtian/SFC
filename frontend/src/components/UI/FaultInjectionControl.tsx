@@ -122,6 +122,7 @@ export default function FaultInjectionControl() {
 
   const [injectScope, setInjectScope] = useState<'single' | 'batch'>('single')
   const [injectMode, setInjectMode] = useState<'random' | 'manual'>('random')
+  const [injectEntityMode, setInjectEntityMode] = useState<'node' | 'link'>('node')
   const [injectNodeId, setInjectNodeId] = useState('')
   const [injectBatchCount, setInjectBatchCount] = useState(5)
   const [injectFaultType, setInjectFaultType] = useState('auto')
@@ -505,183 +506,189 @@ export default function FaultInjectionControl() {
 
         <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2.5">
           <div className="text-slate-200 inline-flex items-center gap-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />手动注入
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />手动故障注入
           </div>
 
           <div className="grid grid-cols-2 gap-2">
             <select
-              value={injectScope}
-              onChange={(e) => setInjectScope((e.target.value as 'single' | 'batch') || 'single')}
+              value={injectEntityMode}
+              onChange={(e) => setInjectEntityMode((e.target.value as 'node' | 'link') || 'node')}
               className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
             >
-              <option value="single">单颗卫星</option>
-              <option value="batch">批量卫星</option>
+              <option value="node">卫星节点故障</option>
+              <option value="link">链路故障</option>
             </select>
-            <select
-              value={injectFaultType}
-              onChange={(e) => setInjectFaultType(e.target.value)}
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
-            >
-              <option value="auto">故障类型: 自动匹配</option>
-              {nodeFaultCatalog.map((ft) => <option key={ft} value={ft}>{faultTypeLabel(ft)}</option>)}
-            </select>
+            {injectEntityMode === 'node' ? (
+              <select
+                value={injectFaultType}
+                onChange={(e) => setInjectFaultType(e.target.value)}
+                className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+              >
+                <option value="auto">故障类型: 自动匹配</option>
+                {nodeFaultCatalog.map((ft) => <option key={ft} value={ft}>{faultTypeLabel(ft)}</option>)}
+              </select>
+            ) : (
+              <select
+                value={linkFaultType}
+                onChange={(e) => setLinkFaultType(e.target.value)}
+                className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+              >
+                <option value="auto">故障类型: 自动匹配</option>
+                {linkFaultCatalog.map((ft) => <option key={ft} value={ft}>{linkFaultTypeLabel(ft)}</option>)}
+              </select>
+            )}
           </div>
 
-          <label className="block space-y-1">
-            <div className="text-slate-400 inline-flex items-center gap-1">
-              <Clock3 className="w-3.5 h-3.5 text-cyan-300" />故障注入时间（s）
-            </div>
-            <input
-              type="number"
-              min={1}
-              max={3600}
-              step={1}
-              value={injectDurationSec}
-              onChange={(e) => setInjectDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
-              placeholder="例如: 20（表示故障持续20秒）"
-              className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-orange-200"
-            />
-            <div className="text-[11px] text-slate-500">系统将自动按仿真采样周期换算并执行该持续时间。</div>
-          </label>
+          {injectEntityMode === 'node' ? (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={injectScope}
+                  onChange={(e) => setInjectScope((e.target.value as 'single' | 'batch') || 'single')}
+                  className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+                >
+                  <option value="single">单颗卫星</option>
+                  <option value="batch">批量卫星</option>
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  step={1}
+                  value={injectDurationSec}
+                  onChange={(e) => setInjectDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
+                  placeholder="持续时间(s)"
+                  className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+                />
+              </div>
 
-          {injectScope === 'single' ? (
-            <div className="space-y-1.5">
-              <input
-                list="control-satellite-list"
-                value={injectNodeId}
-                onChange={(e) => setInjectNodeId(e.target.value)}
-                placeholder="输入卫星ID（支持下拉选择）"
-                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
-              />
-              <div className="text-[11px] text-slate-500">支持输入、删除和重新编辑。</div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <select
-                value={injectMode}
-                onChange={(e) => setInjectMode((e.target.value as 'random' | 'manual') || 'random')}
-                className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
-              >
-                <option value="random">随机批量</option>
-                <option value="manual">手动列表</option>
-              </select>
-              {injectMode === 'random' ? (
-                <div className="grid grid-cols-2 gap-2">
+              {injectScope === 'single' ? (
+                <div className="space-y-1.5">
                   <input
-                    type="number"
-                    min={1}
-                    max={1000}
-                    value={injectBatchCount}
-                    onChange={(e) => setInjectBatchCount(Math.max(1, Math.min(1000, Number(e.target.value) || 1)))}
-                    className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+                    list="control-satellite-list"
+                    value={injectNodeId}
+                    onChange={(e) => setInjectNodeId(e.target.value)}
+                    placeholder="输入卫星ID（支持下拉选择）"
+                    className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
                   />
-                  <label className="inline-flex items-center gap-2 text-slate-300">
-                    <input type="checkbox" checked={injectOnlyActive} onChange={(e) => setInjectOnlyActive(e.target.checked)} className="accent-cyan-400" />
-                    仅活跃节点
-                  </label>
+                  <div className="text-[11px] text-slate-500">支持输入、删除和重新编辑。</div>
                 </div>
               ) : (
-                <div className="space-y-1.5">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      list="control-satellite-list"
-                      value={manualEntryInput}
-                      onChange={(e) => setManualEntryInput(e.target.value)}
-                      placeholder="输入卫星ID后添加，支持粘贴多个"
-                      className="flex-1 h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        addManualIds(manualEntryInput)
-                        setManualEntryInput('')
-                      }}
-                      className="h-9 px-3 rounded-lg text-cyan-100 bg-slate-800/70 border border-cyan-700/40 inline-flex items-center gap-1"
-                    >
-                      <Plus className="w-3.5 h-3.5" />添加
-                    </button>
-                  </div>
-                  <div className="text-[11px] text-slate-500">可一次粘贴多个ID（逗号/空格/换行分隔）。</div>
-                  <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-700/65 bg-slate-900/35 p-1.5 flex flex-wrap gap-1.5">
-                    {manualNodeIds.length === 0 && <div className="text-[11px] text-slate-500">尚未添加卫星ID</div>}
-                    {manualNodeIds.map((id) => (
-                      <span key={id} className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-cyan-100 bg-slate-800/70 border border-slate-600/60">
-                        {id}
+                <div className="space-y-2">
+                  <select
+                    value={injectMode}
+                    onChange={(e) => setInjectMode((e.target.value as 'random' | 'manual') || 'random')}
+                    className="w-full h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
+                  >
+                    <option value="random">随机批量</option>
+                    <option value="manual">手动列表</option>
+                  </select>
+                  {injectMode === 'random' ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        value={injectBatchCount}
+                        onChange={(e) => setInjectBatchCount(Math.max(1, Math.min(1000, Number(e.target.value) || 1)))}
+                        className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+                      />
+                      <label className="inline-flex items-center gap-2 text-slate-300">
+                        <input type="checkbox" checked={injectOnlyActive} onChange={(e) => setInjectOnlyActive(e.target.checked)} className="accent-cyan-400" />
+                        仅活跃节点
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          list="control-satellite-list"
+                          value={manualEntryInput}
+                          onChange={(e) => setManualEntryInput(e.target.value)}
+                          placeholder="输入卫星ID后添加，支持粘贴多个"
+                          className="flex-1 h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-cyan-200 font-mono"
+                        />
                         <button
                           type="button"
-                          onClick={() => setManualNodeIds((prev) => prev.filter((x) => x !== id))}
-                          className="text-slate-400 hover:text-rose-300"
-                          aria-label={`remove-${id}`}
+                          onClick={() => {
+                            addManualIds(manualEntryInput)
+                            setManualEntryInput('')
+                          }}
+                          className="h-9 px-3 rounded-lg text-cyan-100 bg-slate-800/70 border border-cyan-700/40 inline-flex items-center gap-1"
                         >
-                          <X className="w-3 h-3" />
+                          <Plus className="w-3.5 h-3.5" />添加
                         </button>
-                      </span>
-                    ))}
-                  </div>
+                      </div>
+                      <div className="text-[11px] text-slate-500">可一次粘贴多个ID（逗号/空格/换行分隔）。</div>
+                      <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-700/65 bg-slate-900/35 p-1.5 flex flex-wrap gap-1.5">
+                        {manualNodeIds.length === 0 && <div className="text-[11px] text-slate-500">尚未添加卫星ID</div>}
+                        {manualNodeIds.map((id) => (
+                          <span key={id} className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-cyan-100 bg-slate-800/70 border border-slate-600/60">
+                            {id}
+                            <button
+                              type="button"
+                              onClick={() => setManualNodeIds((prev) => prev.filter((x) => x !== id))}
+                              className="text-slate-400 hover:text-rose-300"
+                              aria-label={`remove-${id}`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
+
+              <button
+                disabled={injectingFaults}
+                onClick={injectSpecificFault}
+                className="w-full h-9 rounded-lg text-rose-100 text-[13px] font-semibold disabled:opacity-60"
+                style={{ background: 'linear-gradient(135deg, rgba(185,28,28,0.84), rgba(127,29,29,0.82))', border: '1px solid rgba(251,146,60,0.45)' }}
+              >
+                {injectingFaults ? '注入中...' : '注入节点故障'}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  list="control-satellite-list"
+                  value={linkFaultSource}
+                  onChange={(e) => setLinkFaultSource(e.target.value)}
+                  placeholder="链路源卫星ID"
+                  className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
+                />
+                <input
+                  list="control-satellite-list"
+                  value={linkFaultTarget}
+                  onChange={(e) => setLinkFaultTarget(e.target.value)}
+                  placeholder="链路宿卫星ID"
+                  className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
+                />
+              </div>
+              <input
+                type="number"
+                min={1}
+                max={3600}
+                step={1}
+                value={linkFaultDurationSec}
+                onChange={(e) => setLinkFaultDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
+                placeholder="持续时间(s)"
+                className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
+              />
+              <button
+                disabled={injectingFaults}
+                onClick={injectLinkFault}
+                className="w-full h-9 rounded-lg text-amber-100 text-[13px] font-semibold disabled:opacity-60"
+                style={{ background: 'linear-gradient(135deg, rgba(217,119,6,0.84), rgba(146,64,14,0.82))', border: '1px solid rgba(253,224,71,0.45)' }}
+              >
+                {injectingFaults ? '注入中...' : '注入链路故障'}
+              </button>
+            </>
           )}
-
-          <button
-            disabled={injectingFaults}
-            onClick={injectSpecificFault}
-            className="w-full h-9 rounded-lg text-rose-100 text-[13px] font-semibold disabled:opacity-60"
-            style={{ background: 'linear-gradient(135deg, rgba(185,28,28,0.84), rgba(127,29,29,0.82))', border: '1px solid rgba(251,146,60,0.45)' }}
-          >
-            {injectingFaults ? '注入中...' : '注入故障'}
-          </button>
-        </section>
-
-        <section className="rounded-xl p-2.5 border border-amber-500/35 bg-amber-900/10 space-y-2.5">
-          <div className="text-amber-100 inline-flex items-center gap-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />链路故障注入
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <input
-              list="control-satellite-list"
-              value={linkFaultSource}
-              onChange={(e) => setLinkFaultSource(e.target.value)}
-              placeholder="链路源卫星ID"
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
-            />
-            <input
-              list="control-satellite-list"
-              value={linkFaultTarget}
-              onChange={(e) => setLinkFaultTarget(e.target.value)}
-              placeholder="链路宿卫星ID"
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-100 font-mono"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <select
-              value={linkFaultType}
-              onChange={(e) => setLinkFaultType(e.target.value)}
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-slate-200"
-            >
-              <option value="auto">故障类型: 自动匹配</option>
-              {linkFaultCatalog.map((ft) => <option key={ft} value={ft}>{linkFaultTypeLabel(ft)}</option>)}
-            </select>
-            <input
-              type="number"
-              min={1}
-              max={3600}
-              step={1}
-              value={linkFaultDurationSec}
-              onChange={(e) => setLinkFaultDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))}
-              placeholder="持续时间(s)"
-              className="h-9 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-amber-200"
-            />
-          </div>
-          <button
-            disabled={injectingFaults}
-            onClick={injectLinkFault}
-            className="w-full h-9 rounded-lg text-amber-100 text-[13px] font-semibold disabled:opacity-60"
-            style={{ background: 'linear-gradient(135deg, rgba(217,119,6,0.84), rgba(146,64,14,0.82))', border: '1px solid rgba(253,224,71,0.45)' }}
-          >
-            {injectingFaults ? '注入中...' : '注入链路故障'}
-          </button>
         </section>
 
         <section className="rounded-xl p-2.5 border border-slate-700/60 bg-slate-900/25 space-y-2">

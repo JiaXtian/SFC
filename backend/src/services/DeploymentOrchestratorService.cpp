@@ -259,11 +259,20 @@ void DeploymentOrchestratorService::enqueue_deployment(
 
     const int containers_total = static_cast<int>(unique_nf_types(task.candidate.deployed_nodes).size());
     const int core_nfs_total = static_cast<int>(task.candidate.per_vnf.size());
-    const nlohmann::json patch = {
+    const nlohmann::json candidate_json = task.candidate.to_json();
+    nlohmann::json patch = {
         {"orchestration_phase", "queued"},
         {"orchestration_progress", 5},
         {"orchestration_mode", mode},
         {"orchestration_trigger", trigger},
+        {"deployed_nodes", candidate_json.value("deployed_nodes", nlohmann::json::array())},
+        {"per_vnf", candidate_json.value("per_vnf", nlohmann::json::array())},
+        {"per_core_nf", candidate_json.value("per_core_nf", nlohmann::json::array())},
+        {"total_latency_ms", candidate_json.value("total_latency_ms", 0.0)},
+        {"link_details", candidate_json.value("link_details", nlohmann::json::array())},
+        {"estimated_reliability", candidate_json.value("estimated_reliability", 0.0)},
+        {"bottleneck_bandwidth_gbps", candidate_json.value("bottleneck_bandwidth_gbps", 0.0)},
+        {"reason", candidate_json.value("reason", std::string(""))},
         {"containers_total", containers_total},
         {"containers_running", 0},
         {"containers_failed", 0},

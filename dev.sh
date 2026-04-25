@@ -30,6 +30,7 @@ is_running() {
 stop_one() {
   local name="$1"
   local pid_file="$2"
+  local wait_loops="${3:-20}"
   if ! is_running "${pid_file}"; then
     rm -f "${pid_file}"
     echo "${name} not running"
@@ -39,7 +40,7 @@ stop_one() {
   local pid
   pid="$(cat "${pid_file}")"
   kill "${pid}" 2>/dev/null || true
-  for _ in {1..20}; do
+  for _ in $(seq 1 "${wait_loops}"); do
     if ! kill -0 "${pid}" 2>/dev/null; then
       rm -f "${pid_file}"
       echo "stopped ${name} (pid=${pid})"
@@ -237,7 +238,7 @@ start_all() {
 stop_all() {
   stop_one "frontend-control" "${FRONTEND_CONTROL_PID_FILE}"
   stop_one "frontend-main" "${FRONTEND_MAIN_PID_FILE}"
-  stop_one "backend" "${BACKEND_PID_FILE}"
+  stop_one "backend" "${BACKEND_PID_FILE}" 150
   status_all
 }
 

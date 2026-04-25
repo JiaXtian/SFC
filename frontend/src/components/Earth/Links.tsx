@@ -207,6 +207,24 @@ export default function Links() {
     return out
   }, [groups.selected, satMap])
 
+  const faultLines = useMemo(() => {
+    const out: Array<{ key: string; points: [number, number, number][]; link: RenderLink }> = []
+    groups.fault.forEach((l, i) => {
+      const a = satMap.get(l.source)
+      const b = satMap.get(l.target)
+      if (!a || !b) return
+      out.push({
+        key: `fault-${l.source}-${l.target}-${i}`,
+        points: [
+          toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z),
+          toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
+        ],
+        link: l,
+      })
+    })
+    return out
+  }, [groups.fault, satMap])
+
   useEffect(() => {
     return () => {
       meshes.intra?.geometry.dispose()
@@ -300,12 +318,35 @@ export default function Links() {
         <lineSegments
           geometry={meshes.fault.geometry}
           frustumCulled={false}
-          raycast={raycastNormalLink}
-          onClick={(e) => handleLinkPick(meshes.fault, e)}
-        >
-          <lineBasicMaterial color="#facc15" transparent opacity={Math.max(0.72, display.linkOpacity)} depthWrite={false} />
-        </lineSegments>
+          visible={false}
+        />
       )}
+
+      {faultLines.map((item) => (
+        <group
+          key={item.key}
+          onClick={(e: any) => {
+            e.stopPropagation()
+            setSelectedLink(item.link as any)
+            setSelectedSatellite(null)
+          }}
+        >
+          <Line
+            points={item.points}
+            color="#fde047"
+            lineWidth={4.8}
+            transparent
+            opacity={Math.max(0.86, display.linkOpacity)}
+          />
+          <Line
+            points={item.points}
+            color="#f59e0b"
+            lineWidth={11.5}
+            transparent
+            opacity={0.42}
+          />
+        </group>
+      ))}
 
       {/* Deployed SFC links: static white thick glow */}
       {highlightedLines.map(item => (

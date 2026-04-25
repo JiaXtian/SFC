@@ -601,14 +601,13 @@ void TopologyController::getSatellites(
     std::function<void(const HttpResponsePtr&)>&& callback
 ) {
     try {
-        Topology topology;
-        bool loaded_from_db = false;
-        if (g_runtime_state_service) {
-            std::string ignored_template;
-            loaded_from_db = g_runtime_state_service->load_topology(&topology, &ignored_template);
-        }
-        if (!loaded_from_db) {
+        Topology topology = g_res_mgr->export_current_topology();
+        if (topology.nodes.empty()) {
             topology = g_topo_mgr->get_current_topology();
+        }
+        if (topology.nodes.empty() && g_runtime_state_service) {
+            std::string ignored_template;
+            (void)g_runtime_state_service->load_topology(&topology, &ignored_template);
         }
 
         const bool legacy = req->getParameter("legacy") == "1";
