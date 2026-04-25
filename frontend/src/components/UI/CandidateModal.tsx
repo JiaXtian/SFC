@@ -168,6 +168,9 @@ export default function CandidateModal() {
         request_id: requestId,
         candidate_index: sel,
         candidate: cand,
+        custom_nf_bindings: Array.isArray((requestPayload as any)?.custom_nf_bindings)
+          ? (requestPayload as any).custom_nf_bindings
+          : [],
         sfc_name: sfcName || requestId,
         source_node: sourceNode,
         destination_node: destinationNode,

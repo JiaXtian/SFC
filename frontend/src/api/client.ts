@@ -138,6 +138,7 @@ class APIClient {
     request_id: string; 
     candidate_index: number;
     candidate: any; // 完整的候选方案
+    custom_nf_bindings?: string[][];
     sfc_name?: string;
     source_node?: string;
     destination_node?: string;

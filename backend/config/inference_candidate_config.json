@@ -1,0 +1,44 @@
+{
+  "general": {
+    "global_min_attempt_floor": 220
+  },
+  "offline": {
+    "target_feasible_min": 24,
+    "target_feasible_multiplier": 5,
+    "target_feasible_cap": 128,
+    "default_attempt_cap": 900,
+    "min_attempt_cap": 360,
+    "default_time_budget_ms": 8500,
+    "min_time_budget_ms": 3200
+  },
+  "realtime": {
+    "target_feasible_min": 4,
+    "target_feasible_multiplier": 2,
+    "target_feasible_cap": 12,
+    "default_attempt_cap": 64,
+    "min_attempt_cap": 24,
+    "default_time_budget_ms": 850,
+    "min_time_budget_ms": 380
+  },
+  "attempts": {
+    "strict_base": 72,
+    "strict_per_target": 10,
+    "relaxed_base": 56,
+    "relaxed_per_target": 8,
+    "extra_base": 120,
+    "extra_per_target": 16
+  },
+  "reliability_relaxation": {
+    "disable_when_min_reliability_below": 0.55,
+    "min_reliability_floor": 0.45,
+    "levels": [1.0, 0.98, 0.95, 0.92, 0.88, 0.84, 0.8, 0.74, 0.68, 0.62]
+  },
+  "trace": {
+    "max_attempts_offline": 18,
+    "max_attempts_realtime": 10
+  },
+  "returning": {
+    "offline_min_return_topk": 6,
+    "realtime_min_return_topk": 1
+  }
+}

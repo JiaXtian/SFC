@@ -216,6 +216,30 @@ backend/
 }
 ```
 
+### 候选策略搜索调优（重点）
+
+推理引擎会额外读取候选搜索配置文件：
+
+- 默认路径优先级（按顺序查找）：
+1. 环境变量 `SFC_CANDIDATE_SEARCH_CONFIG` 指定路径
+2. `backend/config/inference_candidate_config.json`
+3. 其他兼容相对路径（`config/...`、`../backend/config/...`）
+
+- 已提供默认文件：`backend/config/inference_candidate_config.json`
+
+该文件可直接修改，用于控制：
+- 离线/实时模式的目标可行候选数量
+- 最小尝试次数与默认尝试上限
+- 最小搜索时间预算与默认时间预算
+- 严格/放宽阶段尝试次数
+- 可靠性放宽等级（`levels`）
+- 最终返回候选条数下限（`returning.offline_min_return_topk` / `returning.realtime_min_return_topk`）
+
+说明：
+- 对于离线规划（`realtime_mode=false`），即使前端传入较小 `max_planning_attempts` 或 `planning_time_budget_ms`，引擎也会按该配置文件中的最小下限进行保护，避免 12 网元场景“搜索过早截止”。
+- 对于返回条数，如果前端请求 `topk` 过小（例如 `topk=1`），后端会按 `returning.offline_min_return_topk` 保护下限，避免“只返回 1 条候选”导致可选空间过小。
+- 当前默认已放宽长链路约束：总跳数硬限制约为 `50`，并降低可靠性预筛剪枝强度，优先保证 12 网元链可产出可部署候选。
+
 ## 🔍 日志
 
 服务日志默认输出到控制台：

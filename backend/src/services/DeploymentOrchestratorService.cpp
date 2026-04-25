@@ -43,6 +43,8 @@ constexpr int kSbiPortUdr = 7782;
 constexpr int kSbiPortPcf = 7783;
 constexpr int kSbiPortNssf = 7784;
 constexpr int kSbiPortScp = 7785;
+constexpr int kSbiPortBsf = 7786;
+constexpr int kSbiPortSepp = 7787;
 
 double clamp01(double v) {
     if (v < 0.0) return 0.0;
@@ -756,6 +758,8 @@ CoreBusinessLoad DeploymentOrchestratorService::compute_business_load_for_nfs(
         if (nf == "pcf") return {0.50, 0.70, 0.10, 0.30, 1.00, 0.40};
         if (nf == "nssf") return {0.50, 0.42, 0.08, 0.76, 0.80, 0.20};
         if (nf == "scp") return {0.80, 0.56, 0.22, 0.28, 0.52, 0.30};
+        if (nf == "bsf") return {0.48, 0.68, 0.10, 0.36, 0.88, 0.38};
+        if (nf == "sepp") return {0.86, 0.60, 0.18, 0.34, 0.72, 0.94};
         return {0.40, 0.40, 0.20, 0.30, 0.30, 0.30};
     };
 
@@ -1003,6 +1007,8 @@ std::string DeploymentOrchestratorService::daemon_for_nf_type(const std::string&
     if (nf == "pcf") return "open5gs-pcfd";
     if (nf == "nssf") return "open5gs-nssfd";
     if (nf == "scp") return "open5gs-scpd";
+    if (nf == "bsf") return "open5gs-bsfd";
+    if (nf == "sepp") return "open5gs-seppd";
     return "open5gs-" + nf + "d";
 }
 
@@ -1018,6 +1024,8 @@ std::string DeploymentOrchestratorService::nf_type_to_3gpp(const std::string& nf
     if (nf == "pcf") return "PCF";
     if (nf == "nssf") return "NSSF";
     if (nf == "scp") return "SCP";
+    if (nf == "bsf") return "BSF";
+    if (nf == "sepp") return "SEPP";
     std::string up = nf;
     for (auto& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     return up;
@@ -1034,6 +1042,8 @@ int DeploymentOrchestratorService::sbi_port_for_nf_type(const std::string& nf_ty
     if (nf == "pcf") return kSbiPortPcf;
     if (nf == "nssf") return kSbiPortNssf;
     if (nf == "scp") return kSbiPortScp;
+    if (nf == "bsf") return kSbiPortBsf;
+    if (nf == "sepp") return kSbiPortSepp;
     return kSbiPortNrf;
 }
 
@@ -1295,6 +1305,31 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "      - address: " << local_ip << "\n";
         oss << "        port: " << sbi_port << "\n";
         append_sbi_client(oss, true);
+        return oss.str();
+    }
+
+    if (nf == "bsf") {
+        append_common_header(oss, "bsf");
+        oss << "bsf:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        return oss.str();
+    }
+
+    if (nf == "sepp") {
+        append_common_header(oss, "sepp");
+        oss << "sepp:\n";
+        oss << "  sbi:\n";
+        oss << "    server:\n";
+        oss << "      - address: " << local_ip << "\n";
+        oss << "        port: " << sbi_port << "\n";
+        append_sbi_client(oss, false);
+        oss << "  n32:\n";
+        oss << "    server:\n";
+        oss << "      - sender: sepp.localdomain\n";
         return oss.str();
     }
 

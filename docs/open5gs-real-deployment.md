@@ -51,6 +51,17 @@
 
 ## 2. Open5GS 卫星容器镜像
 
+### 2.1 当前 SFC 模板与网元集合
+
+系统策略模板已收敛为 1 个完整链路模板：
+- `SA-Full-12`
+- 网元顺序：`nrf, ausf, udm, udr, amf, smf, upf, pcf, nssf, scp, bsf, sepp`
+
+同时支持“自定义 SFC”：
+- 可按需增删/调整网元参数
+- 管理员可配置“同星绑定组”，将指定网元强制部署到同一颗卫星
+- 前端会提示是否缺少基础可服务网元与是否缺少完整 12 网元
+
 默认镜像：`ghcr.io/open5gs/open5gs:latest`。
 
 可按架构显式指定：
@@ -125,6 +136,8 @@ VERIFY_TIMEOUT_SEC=120 \
 - 默认切片参数：`SST=1`、`SD=000001`（可通过 `UERANSIM_SST/UERANSIM_SD` 覆盖）
 - 脚本会自动向 `sfc-open5gs-mongo` 写入/更新测试订阅数据（IMSI/KEY/OPC/APN）
 - 脚本会先强制验证注册成功；可通过 `STRICT_PDU_SESSION=1` 强制要求在 `PDU_WAIT_SEC` 内出现 PDU 会话建立成功日志。
+- 若日志出现 `TUN allocation failure [Open failure /dev/net/tun]`，脚本会给出警告提示：
+  在 macOS Docker Desktop 下常见于容器缺少 TUN 设备，不影响本脚本的控制面注册/PDU 信令验证结论。
 
 ## 4. 银河麒麟 V10(x86) 迁移清单
 

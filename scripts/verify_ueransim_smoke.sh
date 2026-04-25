@@ -129,6 +129,8 @@ daemon_for_nf_type() {
     pcf) echo "open5gs-pcfd" ;;
     nssf) echo "open5gs-nssfd" ;;
     scp) echo "open5gs-scpd" ;;
+    bsf) echo "open5gs-bsfd" ;;
+    sepp) echo "open5gs-seppd" ;;
     *) echo "open5gs-${nf}d" ;;
   esac
 }
@@ -452,6 +454,15 @@ amf_node="$(printf '%s' "$expected_nf_json" | jq -r '
 
 amf_container=""
 if [[ -n "$amf_node" ]]; then
+  canonical_amf_container="$(node_to_container_name "$ready_dep_id" "$amf_node")"
+  if docker ps --format '{{.Names}}' | grep -qx "$canonical_amf_container"; then
+    if docker exec "$canonical_amf_container" sh -lc 'pgrep -x "open5gs-amfd" >/dev/null 2>&1'; then
+      amf_container="$canonical_amf_container"
+    fi
+  fi
+fi
+
+if [[ -z "$amf_container" && -n "$amf_node" ]]; then
   amf_container="$(printf '%s' "$sat_items_json" | jq -r --arg node "$amf_node" '
       .[]
       | select(.id == $node)
@@ -640,6 +651,11 @@ else
     exit 1
   fi
   echo "[WARN] UE registered but no PDU session success log within ${PDU_WAIT_SEC}s (set STRICT_PDU_SESSION=1 to enforce)"
+fi
+
+if docker exec "$UE_CONTAINER" sh -lc "test -f /tmp/ue.log && grep -Eiq 'TUN allocation failure|Open failure /dev/net/tun' /tmp/ue.log"; then
+  echo "[WARN] UE data-plane TUN device is unavailable in container (/dev/net/tun)."
+  echo "[WARN] On macOS Docker Desktop this is often expected; control-plane registration/PDU-signaling result is still valid."
 fi
 
 echo "[OK] UERANSIM smoke verification passed"

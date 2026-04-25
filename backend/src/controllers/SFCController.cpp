@@ -16,6 +16,7 @@
 #include <limits>
 #include <cmath>
 #include <cctype>
+#include <optional>
 #include <nlohmann/json.hpp>
 
 namespace sfc {
@@ -36,6 +37,10 @@ void sync_deployments_from_db_locked() {
 
         if (!item.contains("strategy_mode")) {
             item["strategy_mode"] = "single_request";
+            normalized = true;
+        }
+        if (!item.contains("custom_nf_bindings")) {
+            item["custom_nf_bindings"] = nlohmann::json::array();
             normalized = true;
         }
         if (!item.contains("progress")) {
@@ -224,6 +229,123 @@ static std::string normalize_nf_type(const std::string& raw) {
         else out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
     }
     return out;
+}
+
+static std::vector<std::vector<std::string>> parse_custom_nf_bindings(const Json::Value& bindings_json) {
+    std::vector<std::vector<std::string>> groups;
+    if (!bindings_json.isArray()) return groups;
+
+    for (const auto& group_json : bindings_json) {
+        if (!group_json.isArray()) continue;
+        std::vector<std::string> group;
+        std::unordered_set<std::string> seen;
+        for (const auto& item : group_json) {
+            if (!item.isString()) continue;
+            std::string token = normalize_nf_type(item.asString());
+            if (token.empty()) continue;
+            if (seen.insert(token).second) {
+                group.push_back(token);
+            }
+        }
+        if (group.size() >= 2) {
+            groups.push_back(std::move(group));
+        }
+    }
+    return groups;
+}
+
+static std::optional<size_t> resolve_binding_member_index(
+    const std::string& token,
+    const std::unordered_map<std::string, size_t>& index_by_name,
+    const std::unordered_map<std::string, std::vector<size_t>>& indexes_by_type,
+    std::string* err
+) {
+    auto by_name = index_by_name.find(token);
+    if (by_name != index_by_name.end()) {
+        return by_name->second;
+    }
+    auto by_type = indexes_by_type.find(token);
+    if (by_type != indexes_by_type.end()) {
+        if (by_type->second.size() == 1) {
+            return by_type->second.front();
+        }
+        if (err) *err = "ambiguous_nf_type_in_binding:" + token;
+        return std::nullopt;
+    }
+    if (err) *err = "unknown_nf_in_binding:" + token;
+    return std::nullopt;
+}
+
+static bool apply_custom_nf_bindings(
+    DeploymentCandidate* candidate,
+    const std::vector<std::vector<std::string>>& groups,
+    std::string* err
+) {
+    if (!candidate) return false;
+    if (groups.empty()) return true;
+
+    std::unordered_map<std::string, size_t> index_by_name;
+    std::unordered_map<std::string, std::vector<size_t>> indexes_by_type;
+    for (size_t i = 0; i < candidate->per_vnf.size(); ++i) {
+        const auto& pv = candidate->per_vnf[i];
+        const std::string core_nf = normalize_nf_type(pv.core_nf.empty() ? pv.vnf : pv.core_nf);
+        const std::string vnf = normalize_nf_type(pv.vnf);
+        const std::string nf_type = normalize_nf_type(pv.nf_type.empty() ? core_nf : pv.nf_type);
+
+        if (!core_nf.empty()) index_by_name.emplace(core_nf, i);
+        if (!vnf.empty()) index_by_name.emplace(vnf, i);
+        if (!nf_type.empty()) indexes_by_type[nf_type].push_back(i);
+    }
+
+    std::unordered_set<size_t> seen_member_indexes;
+    bool placement_changed = false;
+    for (const auto& group : groups) {
+        std::vector<size_t> resolved;
+        resolved.reserve(group.size());
+        for (const auto& token : group) {
+            std::string local_err;
+            const auto idx = resolve_binding_member_index(token, index_by_name, indexes_by_type, &local_err);
+            if (!idx.has_value()) {
+                if (err) *err = local_err;
+                return false;
+            }
+            if (std::find(resolved.begin(), resolved.end(), *idx) != resolved.end()) {
+                continue;
+            }
+            if (seen_member_indexes.find(*idx) != seen_member_indexes.end()) {
+                if (err) *err = "nf_binding_overlap:" + token;
+                return false;
+            }
+            resolved.push_back(*idx);
+            seen_member_indexes.insert(*idx);
+        }
+        if (resolved.size() < 2) continue;
+        const std::string anchor_node = candidate->per_vnf[resolved.front()].node;
+        if (anchor_node.empty()) {
+            if (err) *err = "binding_anchor_node_empty";
+            return false;
+        }
+        for (size_t k = 1; k < resolved.size(); ++k) {
+            if (candidate->per_vnf[resolved[k]].node != anchor_node) {
+                placement_changed = true;
+            }
+            candidate->per_vnf[resolved[k]].node = anchor_node;
+        }
+    }
+
+    std::vector<std::string> ordered_nodes;
+    std::unordered_set<std::string> seen_nodes;
+    for (const auto& pv : candidate->per_vnf) {
+        if (pv.node.empty()) continue;
+        if (seen_nodes.insert(pv.node).second) {
+            ordered_nodes.push_back(pv.node);
+        }
+    }
+    candidate->deployed_nodes = std::move(ordered_nodes);
+    if (placement_changed) {
+        candidate->link_details.clear();
+    }
+    return true;
 }
 
 static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw) {
@@ -552,13 +674,21 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
     request.constraints.min_bandwidth_gbps = std::max(0.01, request.constraints.min_bandwidth_gbps);
-    request.constraints.min_reliability = std::max(0.72, std::min(0.995, request.constraints.min_reliability));
+    request.constraints.min_reliability = std::max(0.45, std::min(0.995, request.constraints.min_reliability));
 
     double reliability_cap = 0.95;
-    if (request.vnfs.size() >= 4) {
-        reliability_cap = 0.88;
+    if (request.vnfs.size() >= 12) {
+        reliability_cap = 0.60;
+    } else if (request.vnfs.size() >= 10) {
+        reliability_cap = 0.64;
+    } else if (request.vnfs.size() >= 8) {
+        reliability_cap = 0.68;
+    } else if (request.vnfs.size() >= 6) {
+        reliability_cap = 0.72;
+    } else if (request.vnfs.size() >= 4) {
+        reliability_cap = 0.78;
     } else if (request.vnfs.size() >= 2) {
-        reliability_cap = 0.91;
+        reliability_cap = 0.86;
     }
     if (request.constraints.min_reliability > reliability_cap) {
         spdlog::warn(
@@ -957,6 +1087,21 @@ void SFCController::deploy(
                 }
             }
         }
+
+        const auto custom_bindings = parse_custom_nf_bindings((*json).get("custom_nf_bindings", Json::arrayValue));
+        if (!custom_bindings.empty()) {
+            std::string binding_err;
+            if (!apply_custom_nf_bindings(&candidate, custom_bindings, &binding_err)) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "Invalid custom_nf_bindings";
+                error["details"] = binding_err;
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+        }
         
         // 生成部署ID
         auto now = std::chrono::system_clock::now();
@@ -1002,6 +1147,7 @@ void SFCController::deploy(
         dep_json["bottleneck_bandwidth_gbps"] = candidate.bottleneck_bandwidth_gbps;
         dep_json["estimated_reliability"] = candidate.estimated_reliability;
         dep_json["strategy_mode"] = "single_request";
+        dep_json["custom_nf_bindings"] = nlohmann::json::array();
         dep_json["sfc_name"] = (*json).get("sfc_name", request_id).asString();
         dep_json["source_node"] = (*json).get("source_node", "").asString();
         dep_json["destination_node"] = (*json).get("destination_node", "").asString();
@@ -1076,6 +1222,15 @@ void SFCController::deploy(
         }
         dep_json["per_vnf"] = per_vnf_json;
         dep_json["per_core_nf"] = per_vnf_json;
+        if (!custom_bindings.empty()) {
+            nlohmann::json groups_json = nlohmann::json::array();
+            for (const auto& group : custom_bindings) {
+                nlohmann::json one = nlohmann::json::array();
+                for (const auto& token : group) one.push_back(token);
+                groups_json.push_back(one);
+            }
+            dep_json["custom_nf_bindings"] = std::move(groups_json);
+        }
 
         nlohmann::json links_json = nlohmann::json::array();
         for (const auto& ld : candidate.link_details) {

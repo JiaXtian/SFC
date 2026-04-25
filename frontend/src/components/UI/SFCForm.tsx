@@ -13,6 +13,7 @@ import {
   Radar,
 } from 'lucide-react'
 import { apiClient } from '@/api/client'
+import { useAuth } from '@/auth/AuthContext'
 import { useStore } from '@/store/useStore'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
 import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
@@ -28,6 +29,8 @@ const vnfTemplates = {
   nrf: { cpu: 1.1, mem: 2.2, bw_in: 0.15, bw_out: 0.15, disk: 8 },
   nssf: { cpu: 1.1, mem: 2.0, bw_in: 0.15, bw_out: 0.15, disk: 8 },
   scp: { cpu: 1.3, mem: 2.6, bw_in: 0.2, bw_out: 0.2, disk: 10 },
+  bsf: { cpu: 1.2, mem: 2.4, bw_in: 0.16, bw_out: 0.16, disk: 8 },
+  sepp: { cpu: 1.4, mem: 2.8, bw_in: 0.2, bw_out: 0.2, disk: 10 },
 }
 
 type VNFTemplateName = keyof typeof vnfTemplates
@@ -46,16 +49,16 @@ interface VNFConfig {
 
 const sfcTemplates = [
   {
-    name: 'SA-Standard-9',
-    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 260, min_bandwidth_gbps: 1.0, min_reliability: 0.84 },
-  },
-  {
-    name: 'SA-Enhanced-10',
-    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 280, min_bandwidth_gbps: 1.0, min_reliability: 0.83 },
+    name: 'SA-Full-12',
+    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp', 'bsf', 'sepp'] as VNFTemplateName[],
+    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.82 },
   },
 ]
+
+const UE_READY_REQUIRED_NFS: VNFTemplateName[] = ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf']
+const FULL_CHAIN_REQUIRED_NFS: VNFTemplateName[] = ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp', 'bsf', 'sepp']
+
+const normalizeNfType = (v: string) => String(v || '').trim().toLowerCase().replace(/[-\s]+/g, '_')
 
 function InfoHint({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
@@ -105,6 +108,8 @@ function FoldHeader({
 }
 
 export default function SFCForm() {
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
   const { setCandidateResult, addToast, openSystemPopup, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
 
   const [mode, setMode] = useState<'template' | 'custom'>('template')
@@ -114,14 +119,24 @@ export default function SFCForm() {
   const [customSFC, setCustomSFC] = useState({
     name: '自定义SFC',
     vnfs: [
-      { type: 'amf', name: 'AMF-1', ...vnfTemplates.amf },
-      { type: 'smf', name: 'SMF-2', ...vnfTemplates.smf },
-      { type: 'upf', name: 'UPF-3', ...vnfTemplates.upf },
+      { type: 'nrf', name: 'NRF-1', ...vnfTemplates.nrf },
+      { type: 'ausf', name: 'AUSF-2', ...vnfTemplates.ausf },
+      { type: 'udm', name: 'UDM-3', ...vnfTemplates.udm },
+      { type: 'udr', name: 'UDR-4', ...vnfTemplates.udr },
+      { type: 'amf', name: 'AMF-5', ...vnfTemplates.amf },
+      { type: 'smf', name: 'SMF-6', ...vnfTemplates.smf },
+      { type: 'upf', name: 'UPF-7', ...vnfTemplates.upf },
+      { type: 'pcf', name: 'PCF-8', ...vnfTemplates.pcf },
+      { type: 'nssf', name: 'NSSF-9', ...vnfTemplates.nssf },
+      { type: 'scp', name: 'SCP-10', ...vnfTemplates.scp },
+      { type: 'bsf', name: 'BSF-11', ...vnfTemplates.bsf },
+      { type: 'sepp', name: 'SEPP-12', ...vnfTemplates.sepp },
     ] as VNFConfig[],
-    constraints: { max_latency_ms: 180, min_bandwidth_gbps: 1.0, min_reliability: 0.88 },
+    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.82 },
     topk: 1,
     optimize: 'latency',
   })
+  const [bindingGroups, setBindingGroups] = useState<Array<{ id: string; members: number[] }>>([])
 
   const sessionRealtimeConfig = {
     max_planning_attempts: 20,
@@ -150,6 +165,30 @@ export default function SFCForm() {
   )
   const satelliteIds = useMemo(() => satellites.map(s => s.id), [satellites])
 
+  const customNfTypes = useMemo(
+    () => Array.from(new Set(customSFC.vnfs.map(v => normalizeNfType(v.type)))),
+    [customSFC.vnfs]
+  )
+  const missingUeReadyNfs = useMemo(
+    () => UE_READY_REQUIRED_NFS.filter(t => !customNfTypes.includes(t)),
+    [customNfTypes]
+  )
+  const missingFullChainNfs = useMemo(
+    () => FULL_CHAIN_REQUIRED_NFS.filter(t => !customNfTypes.includes(t)),
+    [customNfTypes]
+  )
+
+  useEffect(() => {
+    setBindingGroups(prev =>
+      prev
+        .map(g => ({
+          ...g,
+          members: Array.from(new Set(g.members.filter((idx) => idx >= 0 && idx < customSFC.vnfs.length))),
+        }))
+        .filter(g => g.members.length > 0)
+    )
+  }, [customSFC.vnfs.length])
+
   const addVNF = () => {
     setCustomSFC(prev => {
       const idx = prev.vnfs.length + 1
@@ -162,6 +201,16 @@ export default function SFCForm() {
 
   const removeVNF = (index: number) => {
     setCustomSFC(prev => ({ ...prev, vnfs: prev.vnfs.filter((_, i) => i !== index) }))
+    setBindingGroups(prev =>
+      prev
+        .map(g => ({
+          ...g,
+          members: g.members
+            .filter(m => m !== index)
+            .map(m => (m > index ? m - 1 : m)),
+        }))
+        .filter(g => g.members.length > 0)
+    )
   }
 
   const updateVNFType = (index: number, value: VNFTemplateName) => {
@@ -180,6 +229,27 @@ export default function SFCForm() {
       next[index] = { ...next[index], [field]: value }
       return { ...prev, vnfs: next }
     })
+  }
+
+  const addBindingGroup = () => {
+    setBindingGroups(prev => [...prev, { id: `bind-${Date.now()}-${prev.length + 1}`, members: [] }])
+  }
+
+  const removeBindingGroup = (id: string) => {
+    setBindingGroups(prev => prev.filter(g => g.id !== id))
+  }
+
+  const toggleBindingMember = (groupId: string, memberIndex: number) => {
+    setBindingGroups(prev =>
+      prev.map(g => {
+        if (g.id !== groupId) return g
+        const exists = g.members.includes(memberIndex)
+        const members = exists
+          ? g.members.filter(m => m !== memberIndex)
+          : [...g.members, memberIndex].sort((a, b) => a - b)
+        return { ...g, members }
+      })
+    )
   }
 
   const renderScoreSection = () => (
@@ -255,6 +325,35 @@ export default function SFCForm() {
       openSystemPopup('参数校验失败', 'source_node 与 destination_node 不能相同。', 'warning')
       return
     }
+    if (mode === 'custom') {
+      if (missingUeReadyNfs.length > 0) {
+        openSystemPopup(
+          '必要网元缺失',
+          `当前自定义链路缺少基础可服务网元：${missingUeReadyNfs.map(v => v.toUpperCase()).join('、')}。\n请补齐后再生成部署策略。`,
+          'warning'
+        )
+        return
+      }
+
+      if (isAdmin && bindingGroups.length > 0) {
+        const usedMembers = new Set<number>()
+        for (const group of bindingGroups) {
+          const uniqueMembers = Array.from(new Set(group.members))
+          if (uniqueMembers.length < 2) {
+            openSystemPopup('绑定组配置错误', '每个同星绑定组至少需要选择 2 个网元。', 'warning')
+            return
+          }
+          for (const m of uniqueMembers) {
+            if (usedMembers.has(m)) {
+              const nfName = customSFC.vnfs[m]?.name || `#${m + 1}`
+              openSystemPopup('绑定组配置错误', `网元 ${nfName} 同时出现在多个绑定组，请只保留在一个组内。`, 'warning')
+              return
+            }
+            usedMembers.add(m)
+          }
+        }
+      }
+    }
 
     setBusy(true)
     try {
@@ -276,6 +375,16 @@ export default function SFCForm() {
 
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
+      const customBindingPayload =
+        mode === 'custom' && isAdmin
+          ? bindingGroups
+              .map(group =>
+                Array.from(new Set(group.members))
+                  .map(idx => sfc.vnfs[idx]?.name?.trim() || `core-nf-${idx + 1}`)
+                  .filter(Boolean)
+              )
+              .filter(group => group.length >= 2)
+          : []
       const coreNfs = sfc.vnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
@@ -307,6 +416,7 @@ export default function SFCForm() {
         topk: sfc.topk || 1,
         max_planning_attempts: sessionRealtimeConfig.max_planning_attempts,
         planning_time_budget_ms: sessionRealtimeConfig.planning_time_budget_ms,
+        custom_nf_bindings: customBindingPayload,
         ...(enableCustomWeights
           ? {
               score_weights: {
@@ -694,6 +804,66 @@ export default function SFCForm() {
               ))}
             </div>
           </div>
+
+          <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
+            <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold mb-1.5">完整性检查</div>
+            <div className="text-[11px] leading-relaxed">
+              {missingUeReadyNfs.length === 0 ? (
+                <div className="text-emerald-300">基础可服务网元已齐全（可用于 UE 基础验证）。</div>
+              ) : (
+                <div className="text-amber-300">
+                  缺少基础可服务网元：{missingUeReadyNfs.map(v => v.toUpperCase()).join('、')}
+                </div>
+              )}
+              {missingFullChainNfs.length === 0 ? (
+                <div className="text-emerald-300 mt-1">12 种完整核心网网元已齐全。</div>
+              ) : (
+                <div className="text-slate-300 mt-1">
+                  当前未包含完整 12 网元，还缺少：{missingFullChainNfs.map(v => v.toUpperCase()).join('、')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {isAdmin && (
+            <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold">同星绑定组（管理员）</div>
+                <button onClick={addBindingGroup} className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition hover:bg-white/5" style={{ color: '#67e8f9' }}>
+                  <Plus className="w-3 h-3" /> 新增绑定组
+                </button>
+              </div>
+              <div className="text-[10px] text-slate-400 leading-relaxed mb-2">同一绑定组内的网元会在部署时强制绑定到同一颗卫星。</div>
+              <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
+                {bindingGroups.map((group, groupIndex) => (
+                  <div key={group.id} className="p-2 rounded-lg" style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)' }}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="text-[10px] text-cyan-100 font-semibold">绑定组 #{groupIndex + 1}</div>
+                      <button onClick={() => removeBindingGroup(group.id)} className="p-1 rounded hover:bg-red-900/30 transition">
+                        <Trash2 className="w-3.5 h-3.5 text-slate-500 hover:text-red-400" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {customSFC.vnfs.map((vnf, idx) => {
+                        const checked = group.members.includes(idx)
+                        return (
+                          <label key={`${group.id}-${idx}`} className="flex items-center gap-1.5 text-[10px] cursor-pointer">
+                            <input type="checkbox" checked={checked} onChange={() => toggleBindingMember(group.id, idx)} />
+                            <span className={checked ? 'text-cyan-200' : 'text-slate-300'}>
+                              {vnf.name || `${String(vnf.type).toUpperCase()}-${idx + 1}`}
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+                {bindingGroups.length === 0 && (
+                  <div className="text-[10px] text-slate-500">未配置绑定组，默认允许网元跨卫星分散部署。</div>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-3 gap-2">
             <div>

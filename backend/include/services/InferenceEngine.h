@@ -9,6 +9,42 @@
 
 namespace sfc {
 
+struct CandidateSearchTuning {
+    int offline_target_min = 16;
+    int offline_target_multiplier = 4;
+    int offline_target_cap = 96;
+    int realtime_target_min = 4;
+    int realtime_target_multiplier = 2;
+    int realtime_target_cap = 12;
+
+    int strict_attempt_base = 72;
+    int strict_attempt_per_target = 10;
+    int relaxed_attempt_base = 56;
+    int relaxed_attempt_per_target = 8;
+    int extra_attempt_base = 120;
+    int extra_attempt_per_target = 16;
+
+    int offline_default_attempt_cap = 520;
+    int offline_min_attempt_cap = 260;
+    int realtime_default_attempt_cap = 64;
+    int realtime_min_attempt_cap = 24;
+
+    double offline_default_time_budget_ms = 5200.0;
+    double offline_min_time_budget_ms = 2200.0;
+    double realtime_default_time_budget_ms = 850.0;
+    double realtime_min_time_budget_ms = 380.0;
+
+    double relax_disable_min_reliability = 0.55;
+    double relax_min_reliability_floor = 0.45;
+    std::vector<double> reliability_relax_levels = {1.0, 0.98, 0.95, 0.92, 0.88, 0.84, 0.80, 0.74, 0.68, 0.62};
+
+    int trace_attempts_offline = 18;
+    int trace_attempts_realtime = 10;
+
+    int offline_return_topk_floor = 6;
+    int realtime_return_topk_floor = 1;
+};
+
 class InferenceEngine {
 public:
     InferenceEngine(const std::string& gnn_model_path,
@@ -32,6 +68,8 @@ private:
     size_t vnf_feature_dim_ = 8;
     size_t context_feature_dim_ = 48;
     size_t node_embedding_dim_ = 192;
+    CandidateSearchTuning candidate_tuning_;
+    std::string candidate_tuning_config_path_;
     
     std::pair<std::vector<float>, std::vector<int64_t>> prepare_graph_inputs(const Topology& topology);
     std::vector<float> run_gnn_encoder(

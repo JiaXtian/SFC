@@ -10,8 +10,10 @@
 #include <cstdint>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 
 namespace sfc {
@@ -245,10 +247,209 @@ constexpr double kHopPenaltyMs = 2.5;
 constexpr double kPathSofteningExponent = 0.40;
 constexpr double kExcessHopReliabilityPenalty = 0.9993;
 constexpr double kFutureStepReliabilityDecay = 0.9995;
-constexpr int kTargetDeploymentHops = 30;
-constexpr int kHardTotalHopLimit = 30;
+constexpr int kTargetDeploymentHops = 50;
+constexpr int kHardTotalHopLimit = 50;
 constexpr int kMinLegHopCap = 3;
-constexpr int kMaxLegHopCap = 10;
+constexpr int kMaxLegHopCap = 14;
+
+CandidateSearchTuning default_candidate_search_tuning() {
+    return CandidateSearchTuning{};
+}
+
+int read_int_with_bounds(
+    const nlohmann::json& obj,
+    const char* key,
+    int current,
+    int lo,
+    int hi
+) {
+    if (!obj.is_object() || !obj.contains(key)) return current;
+    const auto& v = obj.at(key);
+    if (!v.is_number_integer() && !v.is_number_unsigned()) return current;
+    const int parsed = v.get<int>();
+    return std::max(lo, std::min(hi, parsed));
+}
+
+double read_double_with_bounds(
+    const nlohmann::json& obj,
+    const char* key,
+    double current,
+    double lo,
+    double hi
+) {
+    if (!obj.is_object() || !obj.contains(key)) return current;
+    const auto& v = obj.at(key);
+    if (!v.is_number()) return current;
+    const double parsed = v.get<double>();
+    return std::max(lo, std::min(hi, parsed));
+}
+
+std::vector<double> read_relax_levels_with_bounds(
+    const nlohmann::json& obj,
+    const char* key,
+    const std::vector<double>& current,
+    double lo,
+    double hi
+) {
+    if (!obj.is_object() || !obj.contains(key)) return current;
+    const auto& arr = obj.at(key);
+    if (!arr.is_array()) return current;
+    std::vector<double> out;
+    out.reserve(arr.size());
+    for (const auto& item : arr) {
+        if (!item.is_number()) continue;
+        const double v = std::max(lo, std::min(hi, item.get<double>()));
+        out.push_back(v);
+    }
+    if (out.empty()) return current;
+    std::sort(out.begin(), out.end(), std::greater<double>());
+    out.erase(std::unique(out.begin(), out.end(), [](double a, double b) {
+        return std::abs(a - b) <= 1e-6;
+    }), out.end());
+    if (out.front() < 0.999) {
+        out.insert(out.begin(), 1.0);
+    } else {
+        out.front() = 1.0;
+    }
+    return out;
+}
+
+std::vector<std::filesystem::path> build_candidate_tuning_paths(const std::string& actor_model_path) {
+    std::vector<std::filesystem::path> out;
+    const auto push = [&](const std::filesystem::path& p) {
+        if (p.empty()) return;
+        const auto normalized = std::filesystem::absolute(p).lexically_normal();
+        if (std::find(out.begin(), out.end(), normalized) == out.end()) {
+            out.push_back(normalized);
+        }
+    };
+
+    if (const char* env = std::getenv("SFC_CANDIDATE_SEARCH_CONFIG"); env && *env) {
+        push(std::filesystem::path(env));
+    }
+    push(std::filesystem::path("config/inference_candidate_config.json"));
+    push(std::filesystem::path("inference_candidate_config.json"));
+    push(std::filesystem::path("../config/inference_candidate_config.json"));
+    push(std::filesystem::path("backend/config/inference_candidate_config.json"));
+    push(std::filesystem::path("../backend/config/inference_candidate_config.json"));
+
+    if (!actor_model_path.empty()) {
+        const auto actor = std::filesystem::path(actor_model_path).lexically_normal();
+        const auto actor_parent = actor.parent_path();
+        if (!actor_parent.empty()) {
+            push(actor_parent / "inference_candidate_config.json");
+            // models/exported/actor.onnx -> project root -> backend/config/...
+            push(actor_parent / "../../backend/config/inference_candidate_config.json");
+            push(actor_parent / "../../../backend/config/inference_candidate_config.json");
+        }
+    }
+
+    return out;
+}
+
+CandidateSearchTuning load_candidate_search_tuning(
+    const std::string& actor_model_path,
+    std::string* loaded_path
+) {
+    auto tuning = default_candidate_search_tuning();
+    if (loaded_path) loaded_path->clear();
+
+    const auto candidates = build_candidate_tuning_paths(actor_model_path);
+    for (const auto& path : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec) || ec) continue;
+
+        try {
+            std::ifstream ifs(path);
+            if (!ifs.is_open()) continue;
+            nlohmann::json j;
+            ifs >> j;
+            if (!j.is_object()) continue;
+
+            const auto general = j.value("general", nlohmann::json::object());
+            const auto offline = j.value("offline", nlohmann::json::object());
+            const auto realtime = j.value("realtime", nlohmann::json::object());
+            const auto attempts = j.value("attempts", nlohmann::json::object());
+            const auto reliability = j.value("reliability_relaxation", nlohmann::json::object());
+            const auto trace = j.value("trace", nlohmann::json::object());
+            const auto returning = j.value("returning", nlohmann::json::object());
+
+            tuning.offline_target_min = read_int_with_bounds(offline, "target_feasible_min", tuning.offline_target_min, 1, 256);
+            tuning.offline_target_multiplier = read_int_with_bounds(offline, "target_feasible_multiplier", tuning.offline_target_multiplier, 1, 32);
+            tuning.offline_target_cap = read_int_with_bounds(offline, "target_feasible_cap", tuning.offline_target_cap, 1, 512);
+            tuning.offline_default_attempt_cap = read_int_with_bounds(offline, "default_attempt_cap", tuning.offline_default_attempt_cap, 0, 100000);
+            tuning.offline_min_attempt_cap = read_int_with_bounds(offline, "min_attempt_cap", tuning.offline_min_attempt_cap, 0, 100000);
+            tuning.offline_default_time_budget_ms = read_double_with_bounds(offline, "default_time_budget_ms", tuning.offline_default_time_budget_ms, 0.0, 120000.0);
+            tuning.offline_min_time_budget_ms = read_double_with_bounds(offline, "min_time_budget_ms", tuning.offline_min_time_budget_ms, 0.0, 120000.0);
+
+            tuning.realtime_target_min = read_int_with_bounds(realtime, "target_feasible_min", tuning.realtime_target_min, 1, 64);
+            tuning.realtime_target_multiplier = read_int_with_bounds(realtime, "target_feasible_multiplier", tuning.realtime_target_multiplier, 1, 16);
+            tuning.realtime_target_cap = read_int_with_bounds(realtime, "target_feasible_cap", tuning.realtime_target_cap, 1, 128);
+            tuning.realtime_default_attempt_cap = read_int_with_bounds(realtime, "default_attempt_cap", tuning.realtime_default_attempt_cap, 0, 100000);
+            tuning.realtime_min_attempt_cap = read_int_with_bounds(realtime, "min_attempt_cap", tuning.realtime_min_attempt_cap, 0, 100000);
+            tuning.realtime_default_time_budget_ms = read_double_with_bounds(realtime, "default_time_budget_ms", tuning.realtime_default_time_budget_ms, 0.0, 120000.0);
+            tuning.realtime_min_time_budget_ms = read_double_with_bounds(realtime, "min_time_budget_ms", tuning.realtime_min_time_budget_ms, 0.0, 120000.0);
+
+            tuning.strict_attempt_base = read_int_with_bounds(attempts, "strict_base", tuning.strict_attempt_base, 1, 100000);
+            tuning.strict_attempt_per_target = read_int_with_bounds(attempts, "strict_per_target", tuning.strict_attempt_per_target, 1, 100000);
+            tuning.relaxed_attempt_base = read_int_with_bounds(attempts, "relaxed_base", tuning.relaxed_attempt_base, 1, 100000);
+            tuning.relaxed_attempt_per_target = read_int_with_bounds(attempts, "relaxed_per_target", tuning.relaxed_attempt_per_target, 1, 100000);
+            tuning.extra_attempt_base = read_int_with_bounds(attempts, "extra_base", tuning.extra_attempt_base, 1, 100000);
+            tuning.extra_attempt_per_target = read_int_with_bounds(attempts, "extra_per_target", tuning.extra_attempt_per_target, 1, 100000);
+
+            tuning.relax_disable_min_reliability = read_double_with_bounds(
+                reliability, "disable_when_min_reliability_below", tuning.relax_disable_min_reliability, 0.30, 0.99
+            );
+            tuning.relax_min_reliability_floor = read_double_with_bounds(
+                reliability, "min_reliability_floor", tuning.relax_min_reliability_floor, 0.30, 0.99
+            );
+            tuning.reliability_relax_levels = read_relax_levels_with_bounds(
+                reliability, "levels", tuning.reliability_relax_levels, 0.30, 1.0
+            );
+
+            tuning.trace_attempts_offline = read_int_with_bounds(trace, "max_attempts_offline", tuning.trace_attempts_offline, 0, 1000);
+            tuning.trace_attempts_realtime = read_int_with_bounds(trace, "max_attempts_realtime", tuning.trace_attempts_realtime, 0, 1000);
+            tuning.offline_return_topk_floor = read_int_with_bounds(
+                returning, "offline_min_return_topk", tuning.offline_return_topk_floor, 1, 64
+            );
+            tuning.realtime_return_topk_floor = read_int_with_bounds(
+                returning, "realtime_min_return_topk", tuning.realtime_return_topk_floor, 1, 32
+            );
+
+            const int min_attempt_floor = read_int_with_bounds(general, "global_min_attempt_floor", -1, 0, 100000);
+            if (min_attempt_floor >= 0) {
+                tuning.offline_min_attempt_cap = std::max(tuning.offline_min_attempt_cap, min_attempt_floor);
+                tuning.realtime_min_attempt_cap = std::max(tuning.realtime_min_attempt_cap, min_attempt_floor);
+            }
+
+            if (tuning.offline_target_cap < tuning.offline_target_min) {
+                tuning.offline_target_cap = tuning.offline_target_min;
+            }
+            if (tuning.realtime_target_cap < tuning.realtime_target_min) {
+                tuning.realtime_target_cap = tuning.realtime_target_min;
+            }
+            if (tuning.offline_default_attempt_cap > 0 && tuning.offline_default_attempt_cap < tuning.offline_min_attempt_cap) {
+                tuning.offline_default_attempt_cap = tuning.offline_min_attempt_cap;
+            }
+            if (tuning.realtime_default_attempt_cap > 0 && tuning.realtime_default_attempt_cap < tuning.realtime_min_attempt_cap) {
+                tuning.realtime_default_attempt_cap = tuning.realtime_min_attempt_cap;
+            }
+            if (tuning.offline_default_time_budget_ms > 0.0 && tuning.offline_default_time_budget_ms < tuning.offline_min_time_budget_ms) {
+                tuning.offline_default_time_budget_ms = tuning.offline_min_time_budget_ms;
+            }
+            if (tuning.realtime_default_time_budget_ms > 0.0 && tuning.realtime_default_time_budget_ms < tuning.realtime_min_time_budget_ms) {
+                tuning.realtime_default_time_budget_ms = tuning.realtime_min_time_budget_ms;
+            }
+
+            if (loaded_path) *loaded_path = path.string();
+            return tuning;
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to parse candidate tuning config {}: {}", path.string(), e.what());
+        }
+    }
+
+    return tuning;
+}
 
 struct PathMetrics {
     double latency_ms = 0.0;
@@ -275,8 +476,8 @@ int compute_hop_cap(size_t remaining_vnfs, int accumulated_hops = 0) {
 }
 
 int compute_relaxed_hop_cap(int hop_cap) {
-    if (hop_cap <= 0) return kMaxLegHopCap + 4;
-    return std::min(hop_cap + 3, kMaxLegHopCap + 4);
+    if (hop_cap <= 0) return kMaxLegHopCap + 6;
+    return std::min(hop_cap + 5, kMaxLegHopCap + 6);
 }
 
 std::string make_local_path_cache_key(const std::string& node_id, int hop_cap) {
@@ -298,16 +499,16 @@ double soften_path_reliability(double raw_reliability, int hops) {
 }
 
 double effective_reliability_target(double request_min_reliability, int estimated_hops) {
-    const double base = clamp01(std::max(0.70, request_min_reliability));
+    const double base = clamp01(std::max(0.45, request_min_reliability));
     if (estimated_hops <= 0) return base;
-    // For common practical paths (<=30 hops), moderately relax reliability target to
+    // For practical long paths (<=50 hops), relax reliability target to
     // avoid over-pruning while still keeping reliability as a hard factor.
     if (estimated_hops <= kTargetDeploymentHops) {
-        const int extra = std::max(0, estimated_hops - 8);
-        const double relax = std::max(0.84, 1.0 - 0.0045 * static_cast<double>(extra));
-        return std::max(0.76, std::min(base, base * relax));
+        const int extra = std::max(0, estimated_hops - 6);
+        const double relax = std::max(0.58, 1.0 - 0.0085 * static_cast<double>(extra));
+        return std::max(0.45, std::min(base, base * relax));
     }
-    return base;
+    return std::max(0.45, base * 0.58);
 }
 
 int estimate_total_hops(
@@ -603,6 +804,32 @@ InferenceEngine::InferenceEngine(
     memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault))
 {
     spdlog::info("Initializing InferenceEngine");
+    candidate_tuning_ = load_candidate_search_tuning(actor_model_path, &candidate_tuning_config_path_);
+    if (!candidate_tuning_config_path_.empty()) {
+        spdlog::info("Loaded candidate tuning config: {}", candidate_tuning_config_path_);
+    } else {
+        spdlog::warn("Candidate tuning config not found, using built-in defaults");
+    }
+    spdlog::info(
+        "Candidate tuning: offline[target_min={} x{} cap={} min_attempt={} default_attempt={} min_budget_ms={} default_budget_ms={} min_return_topk={}], "
+        "realtime[target_min={} x{} cap={} min_attempt={} default_attempt={} min_budget_ms={} default_budget_ms={} min_return_topk={}]",
+        candidate_tuning_.offline_target_min,
+        candidate_tuning_.offline_target_multiplier,
+        candidate_tuning_.offline_target_cap,
+        candidate_tuning_.offline_min_attempt_cap,
+        candidate_tuning_.offline_default_attempt_cap,
+        candidate_tuning_.offline_min_time_budget_ms,
+        candidate_tuning_.offline_default_time_budget_ms,
+        candidate_tuning_.offline_return_topk_floor,
+        candidate_tuning_.realtime_target_min,
+        candidate_tuning_.realtime_target_multiplier,
+        candidate_tuning_.realtime_target_cap,
+        candidate_tuning_.realtime_min_attempt_cap,
+        candidate_tuning_.realtime_default_attempt_cap,
+        candidate_tuning_.realtime_min_time_budget_ms,
+        candidate_tuning_.realtime_default_time_budget_ms,
+        candidate_tuning_.realtime_return_topk_floor
+    );
     
     session_options_.SetIntraOpNumThreads(num_threads);
     session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -938,15 +1165,46 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     }
 
     const bool realtime_mode = request.realtime_mode;
+    const int req_topk = std::max(1, request.topk);
     const int target_feasible_count = realtime_mode
-        ? std::max(1, std::min(4, request.topk))
-        : std::max(request.topk, 10);
-    const int hard_attempt_cap = request.max_planning_attempts > 0
+        ? std::min(
+            std::max(
+                candidate_tuning_.realtime_target_min,
+                req_topk * candidate_tuning_.realtime_target_multiplier
+            ),
+            candidate_tuning_.realtime_target_cap
+          )
+        : std::min(
+            std::max(
+                candidate_tuning_.offline_target_min,
+                req_topk * candidate_tuning_.offline_target_multiplier
+            ),
+            candidate_tuning_.offline_target_cap
+          );
+
+    int hard_attempt_cap = request.max_planning_attempts > 0
         ? request.max_planning_attempts
-        : (realtime_mode ? std::max(16, target_feasible_count * 6) : 0);
-    const double planning_time_budget_ms = request.planning_time_budget_ms > 0.0
+        : (realtime_mode ? candidate_tuning_.realtime_default_attempt_cap : candidate_tuning_.offline_default_attempt_cap);
+    const int min_attempt_floor = realtime_mode
+        ? candidate_tuning_.realtime_min_attempt_cap
+        : candidate_tuning_.offline_min_attempt_cap;
+    if (hard_attempt_cap > 0) {
+        hard_attempt_cap = std::max(hard_attempt_cap, min_attempt_floor);
+    } else if (min_attempt_floor > 0) {
+        hard_attempt_cap = min_attempt_floor;
+    }
+
+    double planning_time_budget_ms = request.planning_time_budget_ms > 0.0
         ? request.planning_time_budget_ms
-        : (realtime_mode ? 450.0 : 0.0);
+        : (realtime_mode ? candidate_tuning_.realtime_default_time_budget_ms : candidate_tuning_.offline_default_time_budget_ms);
+    const double min_budget_floor = realtime_mode
+        ? candidate_tuning_.realtime_min_time_budget_ms
+        : candidate_tuning_.offline_min_time_budget_ms;
+    if (planning_time_budget_ms > 0.0) {
+        planning_time_budget_ms = std::max(planning_time_budget_ms, min_budget_floor);
+    } else if (min_budget_floor > 0.0) {
+        planning_time_budget_ms = min_budget_floor;
+    }
     const auto search_start = std::chrono::steady_clock::now();
     auto elapsed_ms = [&]() -> double {
         return static_cast<double>(
@@ -965,12 +1223,17 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     fallback_candidates.reserve(std::max(1, target_feasible_count * 3));
     std::unordered_set<std::string> seen_signatures;
     nlohmann::json trace_steps = nlohmann::json::array();
-    const size_t kMaxTraceAttempts = realtime_mode ? 6 : 12;
+    const size_t kMaxTraceAttempts = static_cast<size_t>(
+        std::max(0, realtime_mode ? candidate_tuning_.trace_attempts_realtime : candidate_tuning_.trace_attempts_offline)
+    );
     int attempts_done = 0;
     bool stop_search = false;
 
-    std::vector<double> relax_levels = {1.0, 0.98, 0.95, 0.92, 0.88, 0.85};
-    if (request.constraints.min_reliability <= 0.75) {
+    std::vector<double> relax_levels = candidate_tuning_.reliability_relax_levels;
+    if (relax_levels.empty()) {
+        relax_levels = {1.0};
+    }
+    if (request.constraints.min_reliability <= candidate_tuning_.relax_disable_min_reliability) {
         relax_levels = {1.0};
     }
 
@@ -978,7 +1241,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         const double relax_factor = relax_levels[relax_idx];
         SFCRequest planning_request = request;
         planning_request.constraints.min_reliability = std::max(
-            0.72,
+            candidate_tuning_.relax_min_reliability_floor,
             std::min(request.constraints.min_reliability, request.constraints.min_reliability * relax_factor)
         );
         if (relax_factor < 0.999) {
@@ -992,8 +1255,14 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
 
         const bool strict_phase = relax_idx == 0;
         int level_attempts = strict_phase
-            ? std::max(target_feasible_count * 8, 48)
-            : std::max(target_feasible_count * 6, 36);
+            ? std::max(
+                target_feasible_count * candidate_tuning_.strict_attempt_per_target,
+                candidate_tuning_.strict_attempt_base
+              )
+            : std::max(
+                target_feasible_count * candidate_tuning_.relaxed_attempt_per_target,
+                candidate_tuning_.relaxed_attempt_base
+              );
         if (hard_attempt_cap > 0) {
             const int remaining_attempts = hard_attempt_cap - attempts_done;
             if (remaining_attempts <= 0) {
@@ -1061,7 +1330,10 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     }
 
     if (!stop_search && static_cast<int>(feasible_candidates.size()) < target_feasible_count) {
-        int extra_attempts = std::max(target_feasible_count * 12, 80);
+        int extra_attempts = std::max(
+            target_feasible_count * candidate_tuning_.extra_attempt_per_target,
+            candidate_tuning_.extra_attempt_base
+        );
         const int seed_base = static_cast<int>(relax_levels.size()) * 1000;
         if (hard_attempt_cap > 0) {
             extra_attempts = std::min(extra_attempts, std::max(0, hard_attempt_cap - attempts_done));
@@ -1120,8 +1392,12 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         if (a.score != b.score) return a.score > b.score;
         return a.total_latency_ms < b.total_latency_ms;
     });
-    if (static_cast<int>(feasible_candidates.size()) > request.topk) {
-        feasible_candidates.resize(static_cast<size_t>(request.topk));
+    const int min_return_topk_floor = realtime_mode
+        ? candidate_tuning_.realtime_return_topk_floor
+        : candidate_tuning_.offline_return_topk_floor;
+    const int effective_return_topk = std::max(1, std::max(request.topk, min_return_topk_floor));
+    if (static_cast<int>(feasible_candidates.size()) > effective_return_topk) {
+        feasible_candidates.resize(static_cast<size_t>(effective_return_topk));
     }
 
     if (decision_trace) {
@@ -1135,6 +1411,12 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         (*decision_trace)["planning_time_budget_ms"] = planning_time_budget_ms;
         (*decision_trace)["planning_elapsed_ms"] = elapsed_ms();
         (*decision_trace)["stopped_by_budget"] = budget_exceeded();
+        (*decision_trace)["candidate_tuning_config_path"] = candidate_tuning_config_path_;
+        (*decision_trace)["effective_request_topk"] = req_topk;
+        (*decision_trace)["effective_return_topk"] = effective_return_topk;
+        (*decision_trace)["effective_relax_levels"] = relax_levels;
+        (*decision_trace)["effective_min_attempt_floor"] = min_attempt_floor;
+        (*decision_trace)["effective_min_budget_floor_ms"] = min_budget_floor;
     }
 
     if (!feasible_candidates.empty()) {
@@ -1145,8 +1427,8 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         if (a.score != b.score) return a.score > b.score;
         return a.total_latency_ms < b.total_latency_ms;
     });
-    if (static_cast<int>(fallback_candidates.size()) > request.topk) {
-        fallback_candidates.resize(static_cast<size_t>(request.topk));
+    if (static_cast<int>(fallback_candidates.size()) > effective_return_topk) {
+        fallback_candidates.resize(static_cast<size_t>(effective_return_topk));
     }
 
     if (fallback_candidates.empty()) {
@@ -1975,7 +2257,7 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
     auto pass = [&](bool enforce_dest_budget, double delay_relax_factor) {
         std::vector<std::string> pass_candidates;
         pass_candidates.reserve(topology.nodes.size());
-        const double reliability_threshold_factor = enforce_dest_budget ? 0.72 : 0.52;
+        const double reliability_threshold_factor = enforce_dest_budget ? 0.55 : 0.35;
         for (size_t idx = 0; idx < topology.nodes.size(); ++idx) {
             const auto& node = topology.nodes[idx];
             if (node.cpu_available < vnf.cpu ||
@@ -2145,7 +2427,7 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
             if (projected_total_hops > kHardTotalHopLimit) {
                 continue;
             }
-            if (optimistic_rel + 1e-9 < request.constraints.min_reliability * 0.45) {
+            if (optimistic_rel + 1e-9 < request.constraints.min_reliability * 0.30) {
                 continue;
             }
 

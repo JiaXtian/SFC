@@ -70,6 +70,7 @@ UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
 
 ## 5. 验收最小清单
 
+- 模板使用 `SA-Full-12`，并确认 12 种核心网网元（含 `BSF/SEPP`）均可拉起
 - 部署涉及卫星容器成功启动，未涉及卫星容器保持停止
 - 容器命名满足：`sfc-sat-<deployment_id>-<satellite_node_id>`
 - `containers_running == containers_total`
@@ -83,3 +84,4 @@ UERANSIM_IMAGE=docker.io/free5gc/ueransim:latest \
 - 镜像拉取慢或失败：优先检查企业网络策略、代理和 DNS
 - x86 节点上误用 arm64 镜像：确认设置了 `SFC_SATELLITE_IMAGE_AMD64`
 - UERANSIM 无法接入：先确认部署状态 `ready_for_ueransim=true` 再执行脚本
+- UE 日志出现 `/dev/net/tun` 错误：在 macOS Docker Desktop 上常见，不影响控制面注册与 PDU 信令冒烟结论；在麒麟生产环境建议开启 TUN 设备能力
