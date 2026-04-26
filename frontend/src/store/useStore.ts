@@ -822,6 +822,71 @@ function mergeLinksForContinuousMotion(current: LinkData[], incoming: any[]): Li
   })
 }
 
+function toFinite(v: any, fallback = 0): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function hasSameNodeSet(current: SatelliteData[], incoming: any[]): boolean {
+  if (!Array.isArray(current) || !Array.isArray(incoming)) return false
+  if (current.length === 0 || incoming.length === 0) return false
+  if (current.length !== incoming.length) return false
+  const ids = new Set(current.map((s: any) => String(s?.id ?? '')).filter(Boolean))
+  if (ids.size !== current.length) return false
+  for (const src of incoming as any[]) {
+    const id = String(src?.id ?? '')
+    if (!id || !ids.has(id)) return false
+  }
+  return true
+}
+
+function hasSameLinkSet(current: LinkData[], incoming: any[]): boolean {
+  if (!Array.isArray(current) || !Array.isArray(incoming)) return false
+  if (current.length === 0 || incoming.length === 0) return false
+  if (current.length !== incoming.length) return false
+  const edgeSet = new Set<string>()
+  current.forEach((l: any) => {
+    const a = String(l?.source ?? '')
+    const b = String(l?.target ?? '')
+    if (!a || !b) return
+    edgeSet.add(a < b ? `${a}|${b}` : `${b}|${a}`)
+  })
+  if (edgeSet.size !== current.length) return false
+  for (const src of incoming as any[]) {
+    const a = String(src?.source ?? '')
+    const b = String(src?.target ?? '')
+    if (!a || !b) return false
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`
+    if (!edgeSet.has(key)) return false
+  }
+  return true
+}
+
+function orbitalLayoutChanged(current: SatelliteData[], incoming: any[]): boolean {
+  if (!Array.isArray(current) || !Array.isArray(incoming) || current.length === 0 || incoming.length === 0) return true
+  const byId = new Map<string, any>()
+  current.forEach((sat: any) => byId.set(String(sat?.id ?? ''), sat))
+  let checked = 0
+  for (const src of incoming as any[]) {
+    const id = String(src?.id ?? '')
+    const cur = byId.get(id)
+    if (!cur) return true
+    const cOp: any = cur?.orbital_params ?? {}
+    const nOp: any = src?.orbital_params ?? {}
+    const samePlane = toFinite(cOp.plane, -1) === toFinite(nOp.plane, -1)
+    const samePos = toFinite(cOp.position_in_plane, -1) === toFinite(nOp.position_in_plane, -1)
+    const sameRaan = Math.abs(toFinite(cOp.raan, 0) - toFinite(nOp.raan, 0)) <= 1e-6
+    const sameAlt = Math.abs(toFinite(cOp.altitude_km, 0) - toFinite(nOp.altitude_km, 0)) <= 1e-6
+    const cIncl = toFinite(cOp.inclination ?? cOp.inclination_deg, 0)
+    const nIncl = toFinite(nOp.inclination ?? nOp.inclination_deg, 0)
+    const sameIncl = Math.abs(cIncl - nIncl) <= 1e-6
+    if (!(samePlane && samePos && sameRaan && sameAlt && sameIncl)) return true
+    checked += 1
+    if (checked >= 32) break
+  }
+  return false
+}
+
 export const useStore = create<Store>((set, get) => ({
   satellites: [],
   links: [],
@@ -1074,17 +1139,20 @@ export const useStore = create<Store>((set, get) => ({
 
     set((s) => {
       const nodeCount = Array.isArray(nodes) ? nodes.length : 0
-      const largeTopology = nodeCount >= 3000
-      const continuousRealtime =
+      const sameNodes = hasSameNodeSet(s.satellites, Array.isArray(nodes) ? nodes : [])
+      const sameLinks = hasSameLinkSet(s.links, Array.isArray(links) ? links : [])
+      const layoutChanged = sameNodes ? orbitalLayoutChanged(s.satellites, Array.isArray(nodes) ? nodes : []) : true
+      const preserveVisualMotion =
         s.simulation.view_mode === 'realtime' &&
-        s.autoDynamics.enabled &&
-        s.autoDynamics.playing &&
+        sameNodes &&
+        sameLinks &&
+        !layoutChanged &&
         s.satellites.length > 0 &&
         s.links.length > 0
-      const mergedNodes = continuousRealtime && !largeTopology
+      const mergedNodes = preserveVisualMotion
         ? mergeNodesForContinuousMotion(s.satellites, Array.isArray(nodes) ? nodes : [])
         : nodes
-      const mergedLinks = continuousRealtime && !largeTopology
+      const mergedLinks = preserveVisualMotion
         ? mergeLinksForContinuousMotion(s.links, Array.isArray(links) ? links : [])
         : links
       const frame: TopologyHistoryFrame | null =

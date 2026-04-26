@@ -169,7 +169,78 @@ export default function FaultInjectionControl() {
   const syncTopologyAfterFaultMutation = async () => {
     try {
       const topo = await apiClient.getTopology()
-      useStore.getState().applyTopologySnapshot(topo)
+      const topology = topo?.topology ?? topo
+      const nodes = Array.isArray(topology?.nodes) ? topology.nodes : []
+      const links = Array.isArray(topology?.links) ? topology.links : []
+      useStore.setState((prev) => {
+        const nodeMap = new Map<string, any>()
+        nodes.forEach((n: any) => nodeMap.set(String(n?.id ?? ''), n))
+        const nextSatellites = prev.satellites.map((sat: any) => {
+          const src = nodeMap.get(String(sat?.id ?? ''))
+          if (!src) return sat
+          return {
+            ...sat,
+            cpu_total: Number(src.cpu_total ?? sat.cpu_total),
+            cpu_available: Number(src.cpu_available ?? sat.cpu_available),
+            mem_total: Number(src.mem_total ?? sat.mem_total),
+            mem_available: Number(src.mem_available ?? sat.mem_available),
+            disk_total: Number(src.disk_total ?? sat.disk_total),
+            disk_available: Number(src.disk_available ?? sat.disk_available),
+            core_network_load: Number(src.core_network_load ?? sat.core_network_load ?? 0),
+            core_business_load: {
+              signaling_load: Number(src.core_business_load?.signaling_load ?? sat.core_business_load?.signaling_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+              session_load: Number(src.core_business_load?.session_load ?? sat.core_business_load?.session_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+              user_plane_load: Number(src.core_business_load?.user_plane_load ?? sat.core_business_load?.user_plane_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+              mobility_load: Number(src.core_business_load?.mobility_load ?? sat.core_business_load?.mobility_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+              policy_load: Number(src.core_business_load?.policy_load ?? sat.core_business_load?.policy_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+              auth_load: Number(src.core_business_load?.auth_load ?? sat.core_business_load?.auth_load ?? src.core_network_load ?? sat.core_network_load ?? 0),
+            },
+            status: String(src.status ?? sat.status ?? 'active'),
+            fault_tag: String(src.fault_tag ?? sat.fault_tag ?? ''),
+            container_name: String(src.container_name ?? sat.container_name ?? ''),
+            container_state: String(src.container_state ?? sat.container_state ?? 'stopped'),
+            running_core_nf_types: Array.isArray(src.running_core_nf_types)
+              ? src.running_core_nf_types.map((x: any) => String(x))
+              : (Array.isArray(sat.running_core_nf_types) ? sat.running_core_nf_types : []),
+            running_core_nf_count: Number(src.running_core_nf_count ?? sat.running_core_nf_count ?? 0),
+            service_probe_ok: Boolean(src.service_probe_ok ?? sat.service_probe_ok ?? false),
+            deployed_sfc_names: Array.isArray(src.deployed_sfc_names)
+              ? src.deployed_sfc_names.map((x: any) => String(x))
+              : (Array.isArray(sat.deployed_sfc_names) ? sat.deployed_sfc_names : []),
+            deployed_core_nf_types: Array.isArray(src.deployed_core_nf_types)
+              ? src.deployed_core_nf_types.map((x: any) => String(x))
+              : (Array.isArray(sat.deployed_core_nf_types) ? sat.deployed_core_nf_types : []),
+            deployed_vnf_count: Number(src.deployed_vnf_count ?? sat.deployed_vnf_count ?? 0),
+          }
+        })
+
+        const linkMap = new Map<string, any>()
+        links.forEach((l: any) => {
+          const a = String(l?.source ?? '')
+          const b = String(l?.target ?? '')
+          if (!a || !b) return
+          linkMap.set(`${a}|${b}`, l)
+          linkMap.set(`${b}|${a}`, l)
+        })
+        const nextLinks = prev.links.map((l: any) => {
+          const src = linkMap.get(`${String(l?.source ?? '')}|${String(l?.target ?? '')}`)
+          if (!src) return l
+          const resourceStatus = String(src.status ?? l.__resource_status ?? l.status ?? 'active')
+          return {
+            ...l,
+            bandwidth_gbps: Number(src.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
+            bandwidth_available_gbps: Number(src.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0),
+            reliability: Number(src.reliability ?? src.link_reliability ?? l.reliability ?? 0.999),
+            fault_tag: String(src.fault_tag ?? l.fault_tag ?? ''),
+            __resource_status: resourceStatus,
+            __resource_status_seed: resourceStatus,
+          }
+        })
+        return {
+          satellites: nextSatellites,
+          links: nextLinks,
+        }
+      })
       window.dispatchEvent(new Event('satellite-table-refresh'))
     } catch {
       // ignore transient sync failures

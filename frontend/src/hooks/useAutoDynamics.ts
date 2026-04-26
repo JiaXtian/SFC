@@ -309,8 +309,10 @@ export function useAutoDynamics() {
         resAccRef.current += dtReal
 
         if (posAccRef.current >= posInterval) {
-          const stepReal = posAccRef.current
-          posAccRef.current = 0
+          // Avoid large visual jumps when main thread is briefly blocked by network/state updates.
+          const stepRealCap = satCount >= 5000 ? 0.28 : (satCount >= 3000 ? 0.24 : 0.18)
+          const stepReal = Math.min(posAccRef.current, stepRealCap)
+          posAccRef.current = Math.max(0, posAccRef.current - stepReal)
           const elapsedSec = ad.elapsed_sec + stepReal * Math.max(0.1, ad.time_scale)
 
           if (ad.elapsed_sec === 0) {
