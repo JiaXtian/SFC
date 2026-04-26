@@ -1,4 +1,4 @@
-import { Globe, Grid3x3, Zap, Map as MapIcon, Stars, Orbit } from 'lucide-react'
+import { Globe, Grid3x3, Zap, Map as MapIcon, Stars, Orbit, Search } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import React, { useMemo, useState } from 'react'
 import FPSBadge from './FPSBadge'
@@ -141,32 +141,6 @@ export default function BottomHub() {
           subtitle={display.rotationSpeed === 0 ? '关闭' : `${display.rotationSpeed}x`}
         />
 
-        <div
-          className="ml-1 px-2 h-[34px] rounded-full flex items-center gap-1.5"
-          style={{
-            background: 'rgba(7, 12, 20, 0.52)',
-            border: '1px solid rgba(118, 145, 171, 0.2)',
-            backdropFilter: 'blur(8px)',
-          }}
-        >
-          <input
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') runSearch()
-            }}
-            placeholder="搜索卫星ID"
-            className="w-28 h-6 px-2 rounded-md bg-slate-900/65 border border-slate-700/70 text-[10px] text-cyan-100 placeholder:text-slate-500 outline-none"
-          />
-          <button
-            type="button"
-            onClick={runSearch}
-            className="h-6 px-2 rounded-md text-[10px] text-cyan-100 bg-cyan-500/15 border border-cyan-500/35"
-          >
-            搜索
-          </button>
-        </div>
-
         {display.showLinks && (
           <div
             className="ml-1 px-2.5 h-[34px] rounded-full flex items-center gap-2"
@@ -188,6 +162,41 @@ export default function BottomHub() {
             />
           </div>
         )}
+
+        <div
+          className="ml-1 px-2 h-[34px] rounded-full flex items-center gap-1"
+          style={{
+            background: 'rgba(2, 6, 12, 0.58)',
+            border: '1px solid rgba(118, 145, 171, 0.2)',
+            backdropFilter: 'blur(8px)',
+          }}
+        >
+          <input
+            list="sat-search-list"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') runSearch()
+            }}
+            autoComplete="on"
+            placeholder="搜索卫星节点"
+            className="w-32 h-6 px-2 rounded-md bg-black/35 border-0 text-[10px] text-cyan-100 placeholder:text-slate-500 outline-none"
+          />
+          <button
+            type="button"
+            onClick={runSearch}
+            title="搜索卫星"
+            className="w-6 h-6 rounded-md bg-black/35 border-0 text-cyan-100 inline-flex items-center justify-center"
+          >
+            <Search size={12} />
+          </button>
+        </div>
+
+        <datalist id="sat-search-list">
+          {satellites.slice(0, 8000).map((sat: any) => (
+            <option key={String(sat?.id ?? '')} value={String(sat?.id ?? '')} />
+          ))}
+        </datalist>
 
         <FPSBadge />
       </div>

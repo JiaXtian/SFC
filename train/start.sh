@@ -274,6 +274,6 @@ fi
 echo -e "\n=========================================="
 echo "  训练指标: logs/training_metrics.json"
 echo "  模型导出: models/exported"
-echo "  C++测试结果: results/final_results.json"
-echo "  科研图表: results/plots"
+echo "  推理引擎测试结果: results/final_results.json"
+echo "  结果图表: results/plots"
 echo "=========================================="

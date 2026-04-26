@@ -1,2 +1,0 @@
-epoch,epsilon,train_success_rate,train_sla_satisfaction_rate,train_full_sla_satisfaction_rate,train_avg_algorithm_latency_ms,train_avg_episode_delay_ms,val_success_rate,val_sla_satisfaction_rate,val_full_sla_satisfaction_rate,val_avg_algorithm_latency_ms,val_avg_episode_delay_ms,train_total_requests,val_total_requests
-1,0.28,0.0,0.0,0.0,0.0,0.0,12.5,12.5,12.5,75.43407943762759,9.025375,1,8

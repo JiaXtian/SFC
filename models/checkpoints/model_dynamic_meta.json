@@ -1,9 +1,0 @@
-{
-  "context_dim": 48,
-  "vnf_feature_dim": 8,
-  "history_window": 0,
-  "best_actor_checkpoint": "models/checkpoints/model_dynamic_best.pth",
-  "best_gnn_checkpoint": "models/checkpoints/gnn_dynamic_best.pth",
-  "final_actor_checkpoint": "models/checkpoints/model_dynamic_final.pth",
-  "final_gnn_checkpoint": "models/checkpoints/gnn_dynamic_final.pth"
-}
