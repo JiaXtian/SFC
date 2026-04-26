@@ -373,10 +373,23 @@ function remapSelectedSatellite(selectedSatellite: SatelliteData | null, satelli
   return null
 }
 
-function buildAdjacency(links: LinkData[]): PathGraph {
+function isSatelliteDown(sat: SatelliteData | undefined): boolean {
+  const status = String((sat as any)?.status ?? 'active').trim().toLowerCase()
+  const faultTag = String((sat as any)?.fault_tag ?? '').trim()
+  return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
+}
+
+function buildAdjacency(links: LinkData[], satellites: SatelliteData[]): PathGraph {
+  const downNodes = new Set<string>()
+  satellites.forEach((sat: any) => {
+    const id = String(sat?.id ?? '')
+    if (!id) return
+    if (isSatelliteDown(sat as SatelliteData)) downNodes.add(id)
+  })
   const adj = new Map<string, string[]>()
   const linkMap = new Map<string, LinkData>()
   links.forEach((l) => {
+    if (downNodes.has(l.source) || downNodes.has(l.target)) return
     const status = (l as any).status ?? 'active'
     const avail = Number((l as any).bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0)
     if (status === 'down' || avail <= 0) return
@@ -942,7 +955,7 @@ export const useStore = create<Store>((set, get) => ({
   clearDeployments: () => set({ deployments: [], highlightedDeploymentIds: [] }),
   refreshDeploymentPaths: () => set((s) => {
     if (s.deployments.length === 0) return s
-    const graph = buildAdjacency(s.links)
+    const graph = buildAdjacency(s.links, s.satellites)
     const topoV = Number(s.simulation.topology_version || s.topologyVersion || 0)
     let stateChanged = false
     const nextDeployments = s.deployments.map((dep) => {
@@ -1198,7 +1211,7 @@ export const useStore = create<Store>((set, get) => ({
       path_transition_until: undefined,
     }
 
-    const rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links))
+    const rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links, s.satellites))
     const hasExisting = !!existing
     const deployments = hasExisting
       ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))

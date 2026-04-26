@@ -18,6 +18,12 @@ type RenderLink = {
   bandwidth_available_gbps?: number
 }
 
+function isNodeFault(sat: any): boolean {
+  const status = String(sat?.status ?? 'active').trim().toLowerCase()
+  const faultTag = String(sat?.fault_tag ?? '').trim()
+  return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
+}
+
 function toXYZ(x: number, y: number, z: number): [number, number, number] {
   return [x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U]
 }
@@ -97,21 +103,28 @@ export default function Links() {
     const selected: RenderLink[] = []
 
     for (const link of links as any[]) {
+      const srcSat = satMap.get(String(link?.source ?? ''))
+      const dstSat = satMap.get(String(link?.target ?? ''))
+      const endpointDown = isNodeFault(srcSat) || isNodeFault(dstSat)
+      if (endpointDown) continue
+
       const key = `${link.source}|${link.target}`
       const isSelected = selectedKey.has(key)
       const status = String(link?.status ?? 'active')
-      const hasFaultTag = String(link?.fault_tag ?? '').trim().length > 0
+      const faultTag = String(link?.fault_tag ?? '').trim()
+      const hasFaultTag = faultTag.length > 0
+      const showAsFaultLink = hasFaultTag && faultTag !== 'endpoint_node_fault'
       if (status === 'down' && !hasFaultTag) continue
       if (!display.showLinks && !isSelected) continue
 
       if (isSelected) selected.push(link)
-      else if (hasFaultTag) fault.push(link)
+      else if (showAsFaultLink) fault.push(link)
       else if (link.link_type === 'intra_orbit') normalIntra.push(link)
       else normalInter.push(link)
     }
 
     return { normalIntra, normalInter, fault, selected }
-  }, [links, display.showLinks, selectedKey])
+  }, [links, satMap, display.showLinks, selectedKey])
 
   const meshes = useMemo(() => {
     const make = (items: RenderLink[]) => {
@@ -142,13 +155,16 @@ export default function Links() {
       const src = String(l?.source ?? '')
       const dst = String(l?.target ?? '')
       if (!src || !dst) return
+      const srcSat = satMap.get(src)
+      const dstSat = satMap.get(dst)
+      if (isNodeFault(srcSat) || isNodeFault(dstSat)) return
       const status = String(l?.status ?? 'active')
       if (status === 'down') return
       set.add(`${src}|${dst}`)
       set.add(`${dst}|${src}`)
     })
     return set
-  }, [links])
+  }, [links, satMap])
 
   const highlightedLines = useMemo(() => {
     const out: Array<{
@@ -374,7 +390,8 @@ export default function Links() {
 
       {selectedLines.map(item => {
         const linkType = String((item.link as any)?.link_type ?? 'inter_orbit')
-        const hasFaultTag = String((item.link as any)?.fault_tag ?? '').trim().length > 0
+        const faultTag = String((item.link as any)?.fault_tag ?? '').trim()
+        const hasFaultTag = faultTag.length > 0 && faultTag !== 'endpoint_node_fault'
         const selectedCore = hasFaultTag
           ? '#fde047'
           : (linkType === 'intra_orbit' ? '#6ee7b7' : '#c4b5fd')

@@ -526,7 +526,7 @@ export default function SystemMessagePanel() {
     <div
       className="absolute left-0 z-20 pointer-events-auto flex transition-all duration-300"
       style={{
-        top: 'calc(44px * var(--ui-scale, 0))',
+        top: '44px',
         bottom: '0',
         width: collapsed ? 32 : 'clamp(320px, 21vw, 470px)',
       }}
@@ -544,12 +544,12 @@ export default function SystemMessagePanel() {
 
       {!collapsed && (
         <div
-          className="h-full w-full p-3 flex flex-col rounded-r-2xl"
+          className="h-full w-full p-3 flex flex-col overflow-hidden"
           style={{
             background: 'transparent',
-            borderTop: '1px solid rgba(112,168,208,0.28)',
-            borderRight: '1px solid rgba(112,168,208,0.28)',
-            borderBottom: '1px solid rgba(112,168,208,0.28)',
+            borderTop: '1px solid rgba(87, 126, 160, 0.24)',
+            borderRight: '1px solid rgba(87, 126, 160, 0.24)',
+            borderBottom: '1px solid rgba(87, 126, 160, 0.24)',
             backdropFilter: 'blur(16px)',
           }}
         >

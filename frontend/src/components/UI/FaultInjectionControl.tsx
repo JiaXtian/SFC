@@ -409,7 +409,7 @@ export default function FaultInjectionControl() {
 
   return (
     <div
-      className="rounded-2xl p-3 h-full flex flex-col"
+      className="rounded-2xl p-3 h-full min-h-0 flex flex-col overflow-hidden"
       style={{
         background: 'linear-gradient(160deg, rgba(11,17,30,0.78), rgba(8,13,24,0.66))',
         border: '1px solid rgba(112,168,208,0.28)',
@@ -444,7 +444,7 @@ export default function FaultInjectionControl() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto pr-1 space-y-2.5">
+      <div className="flex-1 min-h-0 flex flex-col gap-2.5">
         <div className="grid grid-cols-12 gap-2.5">
           <section className="col-span-12 xl:col-span-6 p-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 space-y-2">
             <div className="text-[12px] text-cyan-100 font-semibold inline-flex items-center gap-1.5">
@@ -561,13 +561,13 @@ export default function FaultInjectionControl() {
           </section>
         </div>
 
-        <div className="grid grid-cols-12 gap-2.5">
-          <section className="col-span-12 xl:col-span-6 p-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25">
+        <div className="grid grid-cols-12 gap-2.5 flex-1 min-h-0">
+          <section className="col-span-12 xl:col-span-6 p-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 h-full min-h-0 flex flex-col">
             <div className="flex items-center justify-between mb-2">
               <div className="text-[12px] text-cyan-100 font-semibold">当前卫星节点故障</div>
               <button type="button" onClick={removeAllNodeFaults} disabled={managingFaults || sortedNodeFaults.length === 0} className="h-7 px-2 rounded-md text-[11px] text-slate-200 bg-slate-800/70 border border-slate-700/70 disabled:opacity-60">清空节点故障</button>
             </div>
-            <div className="max-h-[340px] overflow-auto rounded-lg border border-slate-700/65">
+            <div className="flex-1 min-h-0 overflow-auto rounded-lg border border-slate-700/65">
               <table className="w-full text-[11px]">
                 <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-400">
                   <tr>
@@ -608,12 +608,12 @@ export default function FaultInjectionControl() {
             </div>
           </section>
 
-          <section className="col-span-12 xl:col-span-6 p-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25">
+          <section className="col-span-12 xl:col-span-6 p-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 h-full min-h-0 flex flex-col">
             <div className="flex items-center justify-between mb-2">
               <div className="text-[12px] text-cyan-100 font-semibold">当前卫星链路故障</div>
               <button type="button" onClick={removeAllLinkFaults} disabled={managingFaults || sortedLinkFaults.length === 0} className="h-7 px-2 rounded-md text-[11px] text-slate-200 bg-slate-800/70 border border-slate-700/70 disabled:opacity-60">清空链路故障</button>
             </div>
-            <div className="max-h-[340px] overflow-auto rounded-lg border border-slate-700/65">
+            <div className="flex-1 min-h-0 overflow-auto rounded-lg border border-slate-700/65">
               <table className="w-full text-[11px]">
                 <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-400">
                   <tr>
