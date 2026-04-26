@@ -133,7 +133,6 @@ export default function SFCForm() {
       { type: 'sepp', name: 'SEPP-12', ...vnfTemplates.sepp },
     ] as VNFConfig[],
     constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.82 },
-    topk: 1,
     optimize: 'latency',
   })
   const [bindingGroups, setBindingGroups] = useState<Array<{ id: string; members: number[] }>>([])
@@ -148,19 +147,18 @@ export default function SFCForm() {
     destination_node: DEFAULT_DESTINATION_NODE,
   })
 
-  const [templateAdvanced, setTemplateAdvanced] = useState({ topk: 1, optimize: 'latency' })
+  const [templateAdvanced, setTemplateAdvanced] = useState({ optimize: 'latency' })
   const [enableCustomWeights, setEnableCustomWeights] = useState(false)
   const [scoreWeights, setScoreWeights] = useState({
     latency: 0.45,
     resource: 0.1,
     reliability: 0.25,
     bandwidth: 0.2,
-    dispersion: 0.0,
   })
   const [busy, setBusy] = useState(false)
 
   const scoreWeightSum = useMemo(
-    () => scoreWeights.latency + scoreWeights.resource + scoreWeights.reliability + scoreWeights.bandwidth + scoreWeights.dispersion,
+    () => scoreWeights.latency + scoreWeights.resource + scoreWeights.reliability + scoreWeights.bandwidth,
     [scoreWeights]
   )
   const satelliteIds = useMemo(() => satellites.map(s => s.id), [satellites])
@@ -257,7 +255,7 @@ export default function SFCForm() {
       <label className="flex items-center gap-2 text-[10px] text-slate-300 cursor-pointer">
         <input type="checkbox" checked={enableCustomWeights} onChange={e => setEnableCustomWeights(e.target.checked)} />
         自定义评分权重
-        <InfoHint text="启用后按时延/资源/可靠性/带宽/分散度加权评分，权重总和需为 1。" />
+        <InfoHint text="启用后按时延/资源/可靠性/带宽加权评分，权重总和需为 1。" />
       </label>
 
       {enableCustomWeights && (
@@ -267,13 +265,9 @@ export default function SFCForm() {
             ['resource', '资源权重'],
             ['reliability', '可靠性权重'],
             ['bandwidth', '带宽权重'],
-            ['dispersion', '分散度权重'],
           ].map(([key, label]) => (
-            <div key={key} className={key === 'dispersion' ? 'col-span-2' : ''}>
-              <div className="text-[10px] text-slate-500 mb-1 flex items-center gap-1">
-                {label}
-                {key === 'dispersion' && <InfoHint text="分散度=已部署卫星数/核心网网元数。权重越高越鼓励跨星分散部署。" />}
-              </div>
+            <div key={key}>
+              <div className="text-[10px] text-slate-500 mb-1">{label}</div>
               <input
                 type="number"
                 step="0.01"
@@ -368,7 +362,6 @@ export default function SFCForm() {
                 ...vnfTemplates[type],
               })),
               constraints: selectedTpl.constraints,
-              topk: templateAdvanced.topk,
               optimize: templateAdvanced.optimize,
             }
           : customSFC
@@ -413,7 +406,7 @@ export default function SFCForm() {
         vnfs: coreNfs,
         constraints: sfc.constraints,
         optimize: optimizeMode,
-        topk: sfc.topk || 1,
+        topk: 1,
         max_planning_attempts: sessionRealtimeConfig.max_planning_attempts,
         planning_time_budget_ms: sessionRealtimeConfig.planning_time_budget_ms,
         custom_nf_bindings: customBindingPayload,
@@ -424,7 +417,6 @@ export default function SFCForm() {
                 resource: scoreWeights.resource,
                 reliability: scoreWeights.reliability,
                 bandwidth: scoreWeights.bandwidth,
-                dispersion: scoreWeights.dispersion,
               },
             }
           : {}),
@@ -438,7 +430,7 @@ export default function SFCForm() {
               resource: scoreWeights.resource,
               reliability: scoreWeights.reliability,
               bandwidth: scoreWeights.bandwidth,
-              dispersion: scoreWeights.dispersion,
+              dispersion: 0,
             }
           : optimizeMode === 'resource'
             ? { latency: 0.2, resource: 0.4, reliability: 0.25, bandwidth: 0.15, dispersion: 0 }
@@ -504,7 +496,7 @@ export default function SFCForm() {
         sourceNode: result.source_node || trafficEndpoints.source_node,
         destinationNode: result.destination_node || trafficEndpoints.destination_node,
         topologyVersion: Number(result.topology_version ?? topologyVersion),
-        requestedTopk: sfc.topk || 1,
+        requestedTopk: 1,
         warning: result.warning || '',
         fallbackOnly: false,
         deployableCount: typeof result.deployable_count === 'number' ? result.deployable_count : feasible.length,
@@ -517,7 +509,7 @@ export default function SFCForm() {
                 resource: scoreWeights.resource,
                 reliability: scoreWeights.reliability,
                 bandwidth: scoreWeights.bandwidth,
-                dispersion: scoreWeights.dispersion,
+                dispersion: 0,
               }
             : null,
           vnfCount: payload.core_nfs.length,
@@ -531,10 +523,10 @@ export default function SFCForm() {
       })
 
       addToast(`生成 ${finalCandidates.length} 个候选方案`, 'success')
-      if (result.warning || finalCandidates.length < (sfc.topk || 1)) {
+      if (result.warning) {
         openSystemPopup(
           '候选方案提示',
-          toChineseFailureText(result.warning || `仅生成 ${finalCandidates.length} 个可行方案，少于请求的 Top-${sfc.topk || 1}。`),
+          toChineseFailureText(result.warning),
           'warning',
         )
       }
@@ -686,18 +678,6 @@ export default function SFCForm() {
             </div>
 
             <div className="mt-2 space-y-2">
-              <div>
-                <div className="text-[10px] text-slate-500 mb-1">Top-K 候选方案数</div>
-                <input
-                  type="number"
-                  min="1"
-                  max="10"
-                  value={templateAdvanced.topk}
-                  onChange={e => setTemplateAdvanced(prev => ({ ...prev, topk: parseInt(e.target.value) || 1 }))}
-                  className="w-full px-3 py-1.5 rounded-lg text-xs"
-                  style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
-                />
-              </div>
               <div>
                 <div className="text-[10px] text-slate-500 mb-1">优化目标</div>
                 <select
@@ -917,18 +897,6 @@ export default function SFCForm() {
             </div>
 
             <div className="mt-2 space-y-2">
-              <div>
-                <div className="text-[10px] text-slate-500 mb-1">Top-K 候选方案数</div>
-                <input
-                  type="number"
-                  min="1"
-                  max="10"
-                  value={customSFC.topk}
-                  onChange={e => setCustomSFC(prev => ({ ...prev, topk: parseInt(e.target.value) || 1 }))}
-                  className="w-full px-3 py-1.5 rounded-lg text-xs"
-                  style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
-                />
-              </div>
               <div>
                 <div className="text-[10px] text-slate-500 mb-1">优化目标</div>
                 <select

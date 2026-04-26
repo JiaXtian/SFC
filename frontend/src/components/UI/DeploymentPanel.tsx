@@ -128,7 +128,7 @@ export default function DeploymentPanel() {
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-2.5 space-y-2">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2.5 py-2 space-y-1.5">
         {sortedDeployments.map(dep => {
           const isExpanded  = expanded === dep.deployment_id
           const isHL        = highlightedDeploymentIds.includes(dep.deployment_id)
@@ -146,10 +146,10 @@ export default function DeploymentPanel() {
                 background: isHL ? 'rgba(125,211,252,0.14)' : 'rgba(9,18,31,0.32)',
                 border: isHL ? '1px solid rgba(125,211,252,0.42)' : '1px solid rgba(100,130,155,0.2)',
               }}>
-              <div className="px-3 py-2.5">
+              <div className="px-2.5 py-2">
                 <div className="flex items-center gap-2 mb-1.5">
                   <StatusIcon s={dep.status} />
-                  <span className="flex-1 text-[13px] font-semibold text-white truncate">{sfcLabel}</span>
+                  <span className="flex-1 text-[12px] font-semibold text-white truncate">{sfcLabel}</span>
                   
                   {/* 关键：眼睛图标切换高亮 */}
                   <button onClick={() => toggleHighlight(dep)} title={isHL ? "取消高亮" : "在地球上高亮显示"}
@@ -171,13 +171,13 @@ export default function DeploymentPanel() {
                   )}
                 </div>
 
-                <div className="flex items-center justify-between text-[11px]">
+                <div className="flex items-center justify-between text-[10px]">
                   <span className={`${lc} font-medium`}>{lbl}</span>
                   <span className="text-gray-600 font-mono">{dep.total_latency_ms?.toFixed(1)}ms</span>
                   <span className="text-gray-700">{new Date(dep.deployed_at).toLocaleTimeString('zh',{hour:'2-digit',minute:'2-digit'})}</span>
                 </div>
                 {(typeof dep.inference_latency_ms === 'number' || ((dep as any).strategy_mode === 'session_continuous' && typeof (dep as any).topology_version_bound === 'number')) && (
-                  <div className="mt-1 flex items-center justify-between text-[10px] font-mono">
+                  <div className="mt-1 flex items-center justify-between text-[9px] font-mono">
                     <span className="text-cyan-300">
                       {typeof dep.inference_latency_ms === 'number' ? `推理时延 ${dep.inference_latency_ms.toFixed(1)}ms` : '-'}
                     </span>
@@ -191,28 +191,28 @@ export default function DeploymentPanel() {
 
                 <div className="flex flex-wrap gap-1 mt-1.5">
                   {dep.satisfies_constraints === false && (
-                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold" style={{ background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(248,113,113,0.35)', color: '#fda4af' }}>
+                    <span className="px-2 py-0.5 rounded text-[9px] font-semibold" style={{ background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(248,113,113,0.35)', color: '#fda4af' }}>
                       约束未满足（等待重算）
                     </span>
                   )}
                   {dep.source_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[10px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
+                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
                       入口 {dep.source_node}
                     </span>
                   )}
                   {dep.destination_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[10px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
+                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
                       出口 {dep.destination_node}
                     </span>
                   )}
                   {dep.deployed_nodes.slice(0,4).map(n => (
-                    <span key={n} className="px-2 py-0.5 rounded font-mono text-[10px]"
+                    <span key={n} className="px-2 py-0.5 rounded font-mono text-[9px]"
                       style={{ background: 'rgba(0,255,136,0.12)', border: '1px solid rgba(0,255,136,0.25)', color: '#00ff88' }}>
                       {n.length > 18 ? n.slice(0,18)+'…' : n}
                     </span>
                   ))}
                   {dep.deployed_nodes.length > 4 && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[10px] text-gray-500">+{dep.deployed_nodes.length - 4}</span>
+                    <span className="px-2 py-0.5 rounded font-mono text-[9px] text-gray-500">+{dep.deployed_nodes.length - 4}</span>
                   )}
                 </div>
               </div>
@@ -220,33 +220,33 @@ export default function DeploymentPanel() {
               {isExpanded && (
                 <div className="px-3 pb-3 space-y-2" style={{ borderTop: '1px solid rgba(100,100,120,0.08)' }}>
                   {dep.satisfies_constraints === false && (
-                  <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
-                      <div className="text-[12px] text-rose-300 font-semibold mb-1">等待可部署方案</div>
+                    <div className="mt-2 rounded-lg p-2.5" style={{ background: 'rgba(127,29,29,0.2)', border: '1px solid rgba(248,113,113,0.28)' }}>
+                      <div className="text-[11px] text-rose-300 font-semibold mb-1">等待可部署方案</div>
                       <div className="space-y-0.5">
                         {(toChineseFailureList(dep.violation_details).length > 0
                           ? toChineseFailureList(dep.violation_details)
                           : ['当前候选不满足SLA硬约束，系统正在持续路径重算/重调度']
                         ).map((reason, idx) => (
-                          <div key={idx} className="text-[11px] text-rose-100">- {reason}</div>
+                          <div key={idx} className="text-[10px] text-rose-100">- {reason}</div>
                         ))}
                       </div>
                     </div>
                   )}
                   <div className="mt-2">
-                    <div className="text-[12px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
+                    <div className="text-[11px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
                     <div className="space-y-1">
                       {dep.per_vnf?.map((v, i) => (
-                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px]"
+                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10px]"
                           style={{ background: 'rgba(15,23,42,0.28)', border: '1px solid rgba(100,130,155,0.2)' }}>
                           <div className="flex items-center gap-2">
-                            <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[9px] font-bold"
+                            <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[8px] font-bold"
                               style={{ background: 'rgba(0,255,136,0.2)', color: '#00ff88' }}>{i+1}</span>
                             <span className="font-medium text-gray-300">{(v as any).core_nf ?? v.vnf}</span>
-                            <span className="text-[10px] text-cyan-300">{(v as any).nf_type ?? '-'}</span>
+                            <span className="text-[9px] text-cyan-300">{(v as any).nf_type ?? '-'}</span>
                             <span className="text-gray-700">→</span>
                             <span className="font-mono text-green-400">{v.node}</span>
                           </div>
-                          <div className="flex gap-2 text-[10px] text-gray-500">
+                          <div className="flex gap-2 text-[9px] text-gray-500">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>
@@ -258,8 +258,8 @@ export default function DeploymentPanel() {
 
                   {dep.link_details && dep.link_details.length > 0 && (
                     <div>
-                      <div className="text-[12px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
-                      <div className="mb-1.5 text-[10px] text-green-400 font-mono">
+                      <div className="text-[11px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">链路 ({dep.link_details.length} 跳)</div>
+                      <div className="mb-1.5 text-[9px] text-green-400 font-mono">
                         路径总时延: {dep.link_details.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0).toFixed(2)}ms
                       </div>
                       <div className="space-y-1">
@@ -275,7 +275,7 @@ export default function DeploymentPanel() {
                           const otherPct = clampPercent(totalBw > 1e-9 ? (otherUsedBw / totalBw) * 100 : 0)
                           const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps`
                           return (
-                            <div key={i} className="px-2 py-1 rounded text-[11px]"
+                            <div key={i} className="px-2 py-1 rounded text-[10px]"
                               style={{ background: 'rgba(15,23,42,0.3)', border: '1px solid rgba(100,130,155,0.18)' }}>
                               <div className="flex items-center justify-between">
                                 <span className="font-mono text-green-400">
@@ -287,7 +287,7 @@ export default function DeploymentPanel() {
                                 <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
                               </div>
                               <div className="mt-1.5" title={hoverText}>
-                                <div className="flex items-center justify-between text-[10px] mb-1">
+                                <div className="flex items-center justify-between text-[9px] mb-1">
                                   <span className="text-cyan-300">链路占用分布</span>
                                   <span className="text-cyan-300 font-mono">{usedPct.toFixed(1)}%</span>
                                 </div>
@@ -310,7 +310,7 @@ export default function DeploymentPanel() {
                                   />
                                 </div>
                               </div>
-                              <div className="mt-1 text-[10px] text-cyan-300 font-mono" title={hoverText}>
+                              <div className="mt-1 text-[9px] text-cyan-300 font-mono" title={hoverText}>
                                 SFC需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
                               </div>
                             </div>
@@ -322,7 +322,7 @@ export default function DeploymentPanel() {
                           onClick={() =>
                             setExpandedLinks(prev => ({ ...prev, [dep.deployment_id]: !prev[dep.deployment_id] }))
                           }
-                          className="mt-1.5 text-[12px] font-medium text-green-400 hover:text-green-300 transition"
+                          className="mt-1.5 text-[11px] font-medium text-green-400 hover:text-green-300 transition"
                         >
                           {expandedLinks[dep.deployment_id] ? '收起链路明细' : `展开全部链路 (+${dep.link_details.length - 8})`}
                         </button>

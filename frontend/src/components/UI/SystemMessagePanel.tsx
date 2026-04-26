@@ -4,6 +4,14 @@ import { useStore } from '@/store/useStore'
 import { toChineseFailureText } from '@/utils/failureText'
 import { buildSfcLabelMaps, formatSfcSeq, resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
+function extractSfcLabel(raw: string): string {
+  const m = /\bSFC-(\d{1,})\b/i.exec(String(raw ?? ''))
+  if (!m) return ''
+  const seq = Number(m[1])
+  if (!Number.isFinite(seq) || seq <= 0) return ''
+  return formatSfcSeq(seq)
+}
+
 function faultTypeLabel(tag: string): string {
   const map: Record<string, string> = {
     power_failure: '供电故障',
@@ -34,6 +42,41 @@ function triggerLabel(trigger: string): string {
     case 'unlabeled': return '状态变化触发'
     default: return '策略调整'
   }
+}
+
+function phaseLabel(raw: string): string {
+  const v = String(raw ?? '').trim().toLowerCase()
+  const map: Record<string, string> = {
+    queued: '排队中',
+    pending: '等待中',
+    preparing: '准备中',
+    starting: '启动中',
+    starting_containers: '容器启动中',
+    starting_core_nfs: '网元启动中',
+    health_check: '健康检查中',
+    running: '运行中',
+    ready: '已就绪',
+    degraded: '降级运行',
+    rollback: '回滚中',
+    rolled_back: '已回滚',
+    failed: '失败',
+  }
+  return map[v] ?? (raw || '未知')
+}
+
+function deploymentStatusLabel(raw: string): string {
+  const v = String(raw ?? '').trim().toLowerCase()
+  const map: Record<string, string> = {
+    completed: '已部署',
+    in_progress: '部署中',
+    'in-progress': '部署中',
+    running: '运行中',
+    degraded: '降级运行',
+    rolled_back: '已回滚',
+    rollback_failed: '回滚失败',
+    failed: '失败',
+  }
+  return map[v] ?? (raw || '未知')
 }
 
 function short(text: string, max = 52) {
@@ -109,7 +152,9 @@ export default function SystemMessagePanel() {
       if (rid && !byRequest.has(rid)) byRequest.set(rid, label)
     })
 
-    const resolveSfcLabel = (ids?: { sessionId?: string; requestId?: string; deploymentId?: string }) => {
+    const resolveSfcLabel = (ids?: { sessionId?: string; requestId?: string; deploymentId?: string; sfcName?: string }) => {
+      const fromName = extractSfcLabel(String(ids?.sfcName ?? ''))
+      if (fromName) return fromName
       const sid = String(ids?.sessionId ?? '')
       const rid = String(ids?.requestId ?? '')
       const did = String(ids?.deploymentId ?? '')
@@ -124,12 +169,13 @@ export default function SystemMessagePanel() {
         const time = compactTime(String(e.sim_time ?? ''))
         if (e.type === 'fault_event') {
           const nodeId = String(e.raw?.entity_id ?? '')
+          const entityType = String(e.raw?.entity_type ?? 'node')
           const fault = faultTypeLabel(String(e.raw?.fault_type ?? e.raw?.reason ?? 'unknown'))
           return {
             id: e.id,
             time,
             tone: 'warn',
-            title: '节点故障注入',
+            title: entityType === 'link' ? '链路故障注入' : '节点故障注入',
             text: short(`${nodeId} 出现${fault}`),
           }
         }
@@ -150,7 +196,7 @@ export default function SystemMessagePanel() {
         if (e.type === 'reschedule_trigger') {
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid, sfcName: String((e.raw as any)?.sfc_name ?? '') })
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           return {
             id: e.id,
@@ -163,7 +209,7 @@ export default function SystemMessagePanel() {
 
         if (e.type === 'recovery_event' && String(e.raw?.entity_type ?? '') === 'session') {
           const sid = String(e.raw?.entity_id ?? '')
-          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: String(e.raw?.request_id ?? '') })
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: String(e.raw?.request_id ?? ''), sfcName: String(e.raw?.sfc_name ?? '') })
           const trig = triggerLabel(String(e.raw?.trigger ?? ''))
           const ok = Boolean(e.raw?.success)
           return {
@@ -192,7 +238,7 @@ export default function SystemMessagePanel() {
           const trig = String((e.raw as any)?.trigger ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid, sfcName: String((e.raw as any)?.sfc_name ?? '') })
           const deployable = Number((e.raw as any)?.deployable_count ?? 0)
           const returned = Number((e.raw as any)?.returned_topk ?? 0)
           const isBootstrap = ['session_start', 'topology_tick_bootstrap', 'manual_initial_candidate'].includes(trig)
@@ -255,7 +301,7 @@ export default function SystemMessagePanel() {
           const st = String((e.raw as any)?.status ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid })
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid, sfcName: String((e.raw as any)?.sfc_name ?? '') })
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           if (st === 'redeployed') {
             return {
@@ -305,12 +351,31 @@ export default function SystemMessagePanel() {
           return null
         }
 
+        if (e.type === 'path_recompute_trigger') {
+          const sid = String((e.raw as any)?.session_id ?? '')
+          const rid = String((e.raw as any)?.request_id ?? '')
+          const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid, sfcName: String((e.raw as any)?.sfc_name ?? '') })
+          const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
+          return {
+            id: e.id,
+            time,
+            tone: 'warn',
+            title: '路径重算触发',
+            text: short(`${sfcLabel} 因${trig}启动路径重算`),
+          }
+        }
+
         if (e.type === 'deployment_update') {
           const status = String((e.raw as any)?.status ?? '')
           const did = String((e.raw as any)?.deployment_id ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel({ deploymentId: did, sessionId: sid, requestId: rid })
+          const sfcLabel = resolveSfcLabel({
+            deploymentId: did,
+            sessionId: sid,
+            requestId: rid,
+            sfcName: String((e.raw as any)?.sfc_name ?? ''),
+          })
           if (status === 'completed') {
             return {
               id: e.id,
@@ -343,7 +408,7 @@ export default function SystemMessagePanel() {
             time,
             tone: 'info',
             title: '部署进度更新',
-            text: short(`${sfcLabel} 状态: ${status || 'unknown'}`),
+            text: short(`${sfcLabel} 状态：${deploymentStatusLabel(status)}`),
           }
         }
 
@@ -351,7 +416,12 @@ export default function SystemMessagePanel() {
           const did = String((e.raw as any)?.deployment_id ?? '')
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
-          const sfcLabel = resolveSfcLabel({ deploymentId: did, sessionId: sid, requestId: rid })
+          const sfcLabel = resolveSfcLabel({
+            deploymentId: did,
+            sessionId: sid,
+            requestId: rid,
+            sfcName: String((e.raw as any)?.sfc_name ?? ''),
+          })
           const phase = String((e.raw as any)?.orchestration_phase ?? 'unknown')
           const progress = Number((e.raw as any)?.orchestration_progress ?? 0)
           return {
@@ -359,7 +429,7 @@ export default function SystemMessagePanel() {
             time,
             tone: 'info',
             title: '部署运行态更新',
-            text: short(`${sfcLabel} · ${phase} (${progress}%)`),
+            text: short(`${sfcLabel} · ${phaseLabel(phase)} (${progress}%)`),
           }
         }
 
@@ -403,7 +473,7 @@ export default function SystemMessagePanel() {
             time,
             tone: 'info',
             title: '实时通道状态',
-            text: short(e.message),
+            text: short(String(e.message ?? '').replace('实时事件通道已连接', '实时事件通道已连接')),
           }
         }
 
@@ -423,7 +493,7 @@ export default function SystemMessagePanel() {
             id: e.id,
             time,
             tone: 'info',
-            title: `系统事件 · ${e.type || 'event'}`,
+            title: '系统事件',
             text: short(msg),
           }
         }

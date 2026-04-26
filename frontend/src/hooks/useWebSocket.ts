@@ -135,7 +135,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                 type: 'deployment_update',
                 sim_time: data.sim_time,
                 message: `部署进度 ${sfcLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
-                raw: data,
+                raw: { ...data, sfc_name: sfcLabel },
               })
               return
             }
@@ -162,7 +162,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                 type: 'deployment_runtime_update',
                 sim_time: data.last_update_at,
                 message: `部署运行态更新 ${sfcLabel}: ${String(data.orchestration_phase ?? 'unknown')} (${Number(data.orchestration_progress ?? 0)}%)`,
-                raw: data,
+                raw: { ...data, sfc_name: sfcLabel },
               })
               return
             }
@@ -234,12 +234,12 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               pushDecisionTrace(trace)
               upsertSessionDeploymentFromTrace(trace)
               const trigger = String(trace?.trigger ?? '')
+              const sessionId = String(trace?.session_id ?? trace?.request_id ?? 'unknown')
+              const sfcLabel = sfcLabelByIds(String(trace?.session_id ?? ''), String(trace?.request_id ?? ''))
+              const key = `${sessionId}:${trigger}`
+              const now = Date.now()
+              const last = endpointFaultPopupCooldownRef.current[key] ?? 0
               if (trigger === 'source_node_down' || trigger === 'destination_node_down') {
-                const sessionId = String(trace?.session_id ?? trace?.request_id ?? 'unknown')
-                const sfcLabel = sfcLabelByIds(String(trace?.session_id ?? ''), String(trace?.request_id ?? ''))
-                const key = `${sessionId}:${trigger}`
-                const now = Date.now()
-                const last = endpointFaultPopupCooldownRef.current[key] ?? 0
                 if (now - last > 12000) {
                   endpointFaultPopupCooldownRef.current[key] = now
                   const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
@@ -250,8 +250,28 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,
+                      sfc_name: sfcLabel,
                       trigger,
                       label,
+                    },
+                  })
+                }
+              } else if (
+                trigger === 'deployment_node_down' ||
+                trigger === 'anchor_path_disconnected' ||
+                trigger === 'resource_or_link_fault'
+              ) {
+                if (now - last > 8000) {
+                  endpointFaultPopupCooldownRef.current[key] = now
+                  pushRuntimeEvent({
+                    type: 'path_recompute_trigger',
+                    sim_time: data.sim_time,
+                    message: `${sfcLabel} 触发路径重算：${trigger}`,
+                    raw: {
+                      session_id: trace?.session_id,
+                      request_id: trace?.request_id,
+                      sfc_name: sfcLabel,
+                      trigger,
                     },
                   })
                 }
@@ -260,7 +280,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                 type: 'decision_trace',
                 sim_time: data.sim_time,
                 message: `策略决策完成: ${data.request_id} [${data.mode ?? 'single'}]`,
-                raw: data,
+                raw: { ...data, sfc_name: sfcLabel },
               })
               return
             }
@@ -272,7 +292,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                 type,
                 sim_time: data.sim_time,
                 message: `SFC编排更新 ${sfcLabel}: ${data.status}`,
-                raw: data,
+                raw: { ...data, sfc_name: sfcLabel },
               })
               return
             }
@@ -292,14 +312,14 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               const entityId = String(data.entity_id ?? '')
               const entity = entityType === 'session'
                 ? sfcLabelByIds(entityId, String(data.request_id ?? ''))
-                : `${entityType}:${entityId}`
+                : (entityType === 'link' ? `链路:${entityId}` : `节点:${entityId}`)
               const faultType = String(data.fault_type ?? data.reason ?? '')
               const faultText = faultType ? ` (${faultTypeLabel(faultType)})` : ''
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
                 message: `${label} ${entity}${faultText}`,
-                raw: data,
+                raw: { ...data, sfc_name: entityType === 'session' ? entity : '' },
               })
               addToast(
                 `${label} ${entity}${faultText}`,

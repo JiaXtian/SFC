@@ -605,7 +605,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         : json.get("egress_node", "").asString();
     request.priority = json.get("priority", "medium").asString();
     request.optimize = json.get("optimize", "latency").asString();
-    request.topk = json.get("topk", 3).asInt();
+    request.topk = json.get("topk", 1).asInt();
     request.topology_version = json.get("topology_version", -1).asInt();
     request.sim_time = json.get("sim_time", "").asString();
     request.core_business_load = CoreBusinessLoad{};
@@ -631,7 +631,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         request.score_weights.resource = sw.get("resource", -1.0).asDouble();
         request.score_weights.reliability = sw.get("reliability", -1.0).asDouble();
         request.score_weights.bandwidth = sw.get("bandwidth", -1.0).asDouble();
-        request.score_weights.dispersion = sw.get("dispersion", -1.0).asDouble();
+        request.score_weights.dispersion = sw.get("dispersion", 0.0).asDouble();
     }
     
     if (json.isMember("constraints")) {
@@ -668,7 +668,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         }
     }
 
-    request.topk = std::max(1, std::min(32, request.topk));
+    request.topk = std::max(1, std::min(5, request.topk));
     request.core_business_load.normalize_inplace();
     request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
     request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));

@@ -10,6 +10,17 @@ export function formatSfcSeq(seq: number): string {
   return `SFC-${String(safe).padStart(3, '0')}`
 }
 
+function parseSeq(label: string) {
+  const m = /^SFC-(\d{1,})$/i.exec(String(label ?? '').trim())
+  return m ? Number(m[1]) : 0
+}
+
+function extractSfcLabel(raw: string): string {
+  const m = /\bSFC-(\d{1,})\b/i.exec(String(raw ?? ''))
+  if (!m) return ''
+  return formatSfcSeq(Number(m[1]))
+}
+
 export function buildSfcLabelMaps(deployments: Deployment[]) {
   const order = [...(Array.isArray(deployments) ? deployments : [])].sort((a: any, b: any) => {
     const ta = toMs(a?.deployed_at)
@@ -24,8 +35,31 @@ export function buildSfcLabelMaps(deployments: Deployment[]) {
   const bySession = new Map<string, string>()
   const byRequest = new Map<string, string>()
   const byDeployment = new Map<string, string>()
+  const usedLabels = new Set<string>()
 
-  let seq = 1
+  order.forEach((dep: any) => {
+    const sid = String(dep?.session_id ?? '')
+    const rid = String(dep?.request_id ?? '')
+    const did = String(dep?.deployment_id ?? '')
+    const backendDid = String(dep?.backend_deployment_id ?? '')
+    const preset = extractSfcLabel(String(dep?.sfc_name ?? ''))
+    if (!preset) return
+    const label = preset
+    usedLabels.add(label)
+    if (sid && !bySession.has(sid)) bySession.set(sid, label)
+    if (rid && !byRequest.has(rid)) byRequest.set(rid, label)
+    if (did && !byDeployment.has(did)) byDeployment.set(did, label)
+    if (backendDid && !byDeployment.has(backendDid)) byDeployment.set(backendDid, label)
+  })
+
+  let seq = Math.max(1, ...Array.from(usedLabels).map((x) => parseSeq(x)).filter((n) => Number.isFinite(n) && n > 0)) + 1
+  const allocLabel = () => {
+    let label = formatSfcSeq(seq++)
+    while (usedLabels.has(label)) label = formatSfcSeq(seq++)
+    usedLabels.add(label)
+    return label
+  }
+
   order.forEach((dep: any) => {
     const sid = String(dep?.session_id ?? '')
     const rid = String(dep?.request_id ?? '')
@@ -33,9 +67,11 @@ export function buildSfcLabelMaps(deployments: Deployment[]) {
     const backendDid = String(dep?.backend_deployment_id ?? '')
 
     let label = ''
-    if (sid && bySession.has(sid)) label = String(bySession.get(sid))
+    if (did && byDeployment.has(did)) label = String(byDeployment.get(did))
+    else if (backendDid && byDeployment.has(backendDid)) label = String(byDeployment.get(backendDid))
+    else if (sid && bySession.has(sid)) label = String(bySession.get(sid))
     else if (rid && byRequest.has(rid)) label = String(byRequest.get(rid))
-    else label = formatSfcSeq(seq++)
+    else label = allocLabel()
 
     if (sid && !bySession.has(sid)) bySession.set(sid, label)
     if (rid && !byRequest.has(rid)) byRequest.set(rid, label)

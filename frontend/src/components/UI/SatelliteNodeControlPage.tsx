@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDownUp, CheckSquare, Copy, Database, Filter, RefreshCw, Satellite as SatelliteIcon, Trash2 } from 'lucide-react'
+import { ArrowDownUp, CheckSquare, Copy, Database, Filter, ListChecks, RefreshCw, Satellite as SatelliteIcon, Trash2 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import ConstellationControlPanel from './ConstellationControlPanel'
 import { useStore } from '@/store/useStore'
@@ -21,17 +21,19 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
   const canOperate = role === 'admin'
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [batchDeleting, setBatchDeleting] = useState(false)
+  const [selectingAll, setSelectingAll] = useState(false)
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [keyword, setKeyword] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'down'>('all')
-  const [planeFilter, setPlaneFilter] = useState<string>('')
   const [page, setPage] = useState(1)
   const [sortField, setSortField] = useState<SortField>('id')
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
   const [rows, setRows] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(1)
+  const [samplingSec, setSamplingSec] = useState<number>(15)
+  const [samplingSaving, setSamplingSaving] = useState(false)
+  const [samplingRefreshing, setSamplingRefreshing] = useState(false)
 
   const debounceRef = useRef<number | null>(null)
   const lastFetchKeyRef = useRef('')
@@ -41,6 +43,8 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
     openSystemPopup,
     addToast,
     setDeployments,
+    setAutoDynamics,
+    setSimulationStatus,
   } = useStore()
 
   const rowById = useMemo(() => {
@@ -51,13 +55,10 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
 
   const fetchPage = async (opts?: { silent?: boolean; forcePage?: number }) => {
     const targetPage = opts?.forcePage ?? page
-    const planeNum = planeFilter.trim() === '' ? undefined : Number(planeFilter)
     const reqKey = JSON.stringify({
       page: targetPage,
       pageSize: PAGE_SIZE,
       keyword,
-      statusFilter,
-      planeNum,
       sortField,
       sortOrder,
     })
@@ -67,8 +68,6 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
         page: targetPage,
         page_size: PAGE_SIZE,
         q: keyword.trim(),
-        status: statusFilter,
-        plane: Number.isFinite(planeNum as number) ? (planeNum as number) : undefined,
         sort_by: sortField,
         sort_order: sortOrder,
       })
@@ -101,7 +100,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current)
     }
-  }, [keyword, statusFilter, planeFilter, sortField, sortOrder])
+  }, [keyword, sortField, sortOrder])
 
   useEffect(() => {
     fetchPage()
@@ -117,7 +116,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
       window.clearInterval(timer)
       window.removeEventListener('satellite-table-refresh', onRefresh)
     }
-  }, [page, keyword, statusFilter, planeFilter, sortField, sortOrder])
+  }, [page, keyword, sortField, sortOrder])
 
   useEffect(() => {
     if (selectedIds.size === 0) return
@@ -157,6 +156,48 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
     applyTopologySnapshot(topo)
     if (Array.isArray(depList)) {
       setDeployments(depList as any)
+    }
+  }
+
+  const refreshSamplingConfig = async (silent = false) => {
+    if (!silent) setSamplingRefreshing(true)
+    try {
+      const [cfg, status] = await Promise.all([
+        apiClient.getControlConfig().catch(() => ({})),
+        apiClient.getDynamicStatus().catch(() => ({})),
+      ])
+      const raw = Number(
+        (cfg as any)?.resource_sampling_interval_sec
+        ?? (cfg as any)?.control_config?.resource_sampling_interval_sec
+        ?? (status as any)?.control_config?.resource_sampling_interval_sec
+        ?? (status as any)?.sampling_interval_sec
+        ?? samplingSec
+      )
+      const next = Math.max(10, Math.min(30, Number.isFinite(raw) ? raw : 15))
+      setSamplingSec(next)
+      setAutoDynamics({ resource_update_sec: next })
+      setSimulationStatus({ sampling_interval_sec: next })
+    } finally {
+      if (!silent) setSamplingRefreshing(false)
+    }
+  }
+
+  const saveSamplingConfig = async () => {
+    setSamplingSaving(true)
+    try {
+      const next = Math.max(10, Math.min(30, Number(samplingSec || 15)))
+      await apiClient.updateControlConfig({
+        resource_sampling_interval_sec: next,
+        apply_now: true,
+      })
+      setSamplingSec(next)
+      setAutoDynamics({ resource_update_sec: next })
+      setSimulationStatus({ sampling_interval_sec: next })
+      addToast(`资源采样间隔已更新为 ${next}s`, 'success')
+    } catch (e: any) {
+      addToast(`采样配置保存失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setSamplingSaving(false)
     }
   }
 
@@ -222,6 +263,42 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
     }
   }
 
+  const toggleSelectAllSatellites = async () => {
+    if (total > 0 && selectedIds.size >= total) {
+      setSelectedIds(new Set())
+      addToast('已取消全选', 'info')
+      return
+    }
+    setSelectingAll(true)
+    try {
+      const all = new Set<string>()
+      let targetPage = 1
+      let totalPagesFromApi = 1
+      do {
+        const resp = await apiClient.getSatellitesPage({
+          page: targetPage,
+          page_size: 500,
+          q: keyword.trim(),
+          sort_by: 'id',
+          sort_order: 'asc',
+        })
+        const items = Array.isArray(resp?.items) ? resp.items : []
+        items.forEach((sat: any) => {
+          const id = String(sat?.id ?? '').trim()
+          if (id) all.add(id)
+        })
+        totalPagesFromApi = Math.max(1, Number(resp?.total_pages ?? 1))
+        targetPage += 1
+      } while (targetPage <= totalPagesFromApi)
+      setSelectedIds(all)
+      addToast(`已全选 ${all.size} 颗卫星`, 'success')
+    } catch (e: any) {
+      addToast(`全选失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      setSelectingAll(false)
+    }
+  }
+
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
       setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
@@ -232,14 +309,62 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
   }
 
   const allOnPageSelected = rows.length > 0 && rows.every((sat: any) => selectedIds.has(String(sat.id)))
+  const allAcrossSelected = total > 0 && selectedIds.size >= total
+
+  useEffect(() => {
+    refreshSamplingConfig(true)
+  }, [])
 
   return (
     <div className="h-full grid grid-cols-12 gap-3 overflow-hidden">
-      <div className="col-span-12 xl:col-span-3 h-full overflow-hidden">
+      <div className="col-span-12 xl:col-span-3 h-full overflow-y-auto pr-1 space-y-2.5">
         <ConstellationControlPanel
           readonly={!canOperate}
           onUnauthorized={() => openSystemPopup('无权限操作', '普通用户不允许生成或导入星座。', 'warning')}
         />
+        <div
+          className="rounded-2xl p-3"
+          style={{
+            background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
+            border: '1px solid rgba(112,168,208,0.28)',
+            backdropFilter: 'blur(14px)',
+          }}
+        >
+          <div className="text-[12px] uppercase tracking-wide text-cyan-100 font-semibold inline-flex items-center gap-1.5">
+            <ListChecks className="w-3.5 h-3.5 text-cyan-300" />
+            系统资源采样配置
+          </div>
+          <div className="mt-1 text-[10px] text-slate-400">控制 CPU/内存/磁盘与核心网业务负载采样周期（10~30秒）。</div>
+          <div className="mt-2 flex items-end gap-2">
+            <label className="flex-1">
+              <div className="text-[10px] text-slate-400 mb-1">采样间隔（秒）</div>
+              <input
+                type="number"
+                min={10}
+                max={30}
+                step={1}
+                value={samplingSec}
+                onChange={(e) => setSamplingSec(Math.max(10, Math.min(30, Number(e.target.value) || 15)))}
+                className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
+              />
+            </label>
+            <button
+              onClick={saveSamplingConfig}
+              disabled={samplingSaving}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/15 border border-cyan-500/35 disabled:opacity-60"
+            >
+              {samplingSaving ? '保存中...' : '保存'}
+            </button>
+            <button
+              onClick={() => refreshSamplingConfig(false)}
+              disabled={samplingRefreshing}
+              className="h-8 px-2 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70 disabled:opacity-60"
+              title="刷新采样配置"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${samplingRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
       </div>
 
       <div
@@ -265,43 +390,17 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
           </div>
         </div>
 
-        <div className="mb-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 p-2.5 space-y-2">
-          <div className="grid grid-cols-1 2xl:grid-cols-4 gap-2">
-            <label className="2xl:col-span-2">
+        <div className="mb-2.5 rounded-xl border border-slate-700/60 bg-slate-900/25 p-2.5">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="min-w-[220px] flex-1">
               <div className="text-[10px] text-slate-400 mb-1 inline-flex items-center gap-1"><Filter className="w-3 h-3" />关键词</div>
               <input
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
-                placeholder="卫星ID / 故障标签 / 轨道面"
+                placeholder="卫星ID / 故障标签 / 轨道面（输入关键词匹配）"
                 className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
               />
             </label>
-            <label>
-              <div className="text-[10px] text-slate-400 mb-1">状态</div>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter((e.target.value as any) || 'all')}
-                className="w-full h-8 px-2 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
-              >
-                <option value="all">全部</option>
-                <option value="active">正常</option>
-                <option value="down">故障</option>
-              </select>
-            </label>
-            <label>
-              <div className="text-[10px] text-slate-400 mb-1">轨道面</div>
-              <input
-                type="number"
-                min={0}
-                value={planeFilter}
-                onChange={(e) => setPlaneFilter(e.target.value)}
-                placeholder="全部"
-                className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
-              />
-            </label>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => fetchPage()}
               disabled={loading}
@@ -309,6 +408,14 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               刷新
+            </button>
+            <button
+              onClick={toggleSelectAllSatellites}
+              disabled={selectingAll || total === 0}
+              className="h-8 px-2.5 rounded-lg text-[12px] text-sky-100 bg-sky-500/15 border border-sky-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
+            >
+              <CheckSquare className="w-3.5 h-3.5" />
+              {selectingAll ? '全选中...' : allAcrossSelected ? '取消全选' : '全选所有卫星'}
             </button>
             <button
               onClick={copyBatchSatellites}

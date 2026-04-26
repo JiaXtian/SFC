@@ -7,32 +7,38 @@ import FaultInjectionControl from './FaultInjectionControl'
 import UserManagementPage from './UserManagementPage'
 import ControlDeploymentList from './ControlDeploymentList'
 
-type Tab = 'satellite' | 'strategy_fault' | 'users'
+type Tab = 'satellite' | 'strategy' | 'fault' | 'users'
 
-function StrategyFaultBody({ canManage }: { canManage: boolean }) {
+function StrategyDeployBody({ canManage }: { canManage: boolean }) {
   return (
-    <div className="h-full grid grid-cols-12 gap-3 overflow-hidden">
+    <div className="h-full grid grid-cols-12 gap-2.5 overflow-hidden">
       <div className="col-span-12 xl:col-span-4 h-full overflow-hidden">
         <div
-          className="rounded-2xl p-3.5 h-full overflow-hidden"
+          className="rounded-2xl p-3 h-full overflow-hidden"
           style={{
             background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
             border: '1px solid rgba(112,168,208,0.28)',
             backdropFilter: 'blur(14px)',
           }}
         >
-          <div className="text-[14px] uppercase tracking-wide text-cyan-100 font-semibold mb-2.5">部署策略生成</div>
+          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold mb-2">策略部署</div>
           <div className="h-[calc(100%-28px)] overflow-y-auto pr-1">
             <SFCForm />
           </div>
         </div>
       </div>
 
-      <div className="col-span-12 xl:col-span-4 h-full overflow-hidden">
+      <div className="col-span-12 xl:col-span-8 h-full overflow-hidden">
         <ControlDeploymentList canManage={canManage} />
       </div>
+    </div>
+  )
+}
 
-      <div className="col-span-12 xl:col-span-4 h-full overflow-hidden">
+function FaultControlBody() {
+  return (
+    <div className="h-full grid grid-cols-12 gap-2.5 overflow-hidden">
+      <div className="col-span-12 h-full overflow-hidden">
         <FaultInjectionControl />
       </div>
     </div>
@@ -46,7 +52,7 @@ export default function ControlPage() {
   const [tab, setTab] = useState<Tab>('satellite')
   const mainUrl = String((import.meta as any)?.env?.VITE_MAIN_SCREEN_URL || 'http://localhost:3001')
 
-  const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy_fault', 'users'] : ['satellite']
+  const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy', 'fault', 'users'] : ['satellite']
   const activeTab = visibleTabs.includes(tab) ? tab : 'satellite'
 
   return (
@@ -113,18 +119,32 @@ export default function ControlPage() {
               卫星节点控制
             </button>
           )}
-          {visibleTabs.includes('strategy_fault') && (
+          {visibleTabs.includes('strategy') && (
             <button
               className={`h-9 px-4 rounded-lg text-[12px] font-semibold inline-flex items-center gap-1.5 ${
-                activeTab === 'strategy_fault' ? 'text-cyan-100' : 'text-slate-300'
+                activeTab === 'strategy' ? 'text-cyan-100' : 'text-slate-300'
               }`}
-              style={activeTab === 'strategy_fault'
+              style={activeTab === 'strategy'
                 ? { background: 'linear-gradient(135deg, rgba(8,79,118,0.82), rgba(8,45,74,0.92))', border: '1px solid rgba(125,211,252,0.3)' }
                 : { background: 'rgba(30,41,59,0.65)', border: '1px solid rgba(100,116,139,0.3)' }}
-              onClick={() => setTab('strategy_fault')}
+              onClick={() => setTab('strategy')}
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              策略与故障操控
+              策略部署
+            </button>
+          )}
+          {visibleTabs.includes('fault') && (
+            <button
+              className={`h-9 px-4 rounded-lg text-[12px] font-semibold inline-flex items-center gap-1.5 ${
+                activeTab === 'fault' ? 'text-cyan-100' : 'text-slate-300'
+              }`}
+              style={activeTab === 'fault'
+                ? { background: 'linear-gradient(135deg, rgba(8,79,118,0.82), rgba(8,45,74,0.92))', border: '1px solid rgba(125,211,252,0.3)' }
+                : { background: 'rgba(30,41,59,0.65)', border: '1px solid rgba(100,116,139,0.3)' }}
+              onClick={() => setTab('fault')}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              故障控制
             </button>
           )}
           {visibleTabs.includes('users') && (
@@ -145,11 +165,11 @@ export default function ControlPage() {
 
         <div className="h-[calc(100%-104px)] overflow-hidden">
           {activeTab === 'satellite' && <SatelliteNodeControlPage role={role} />}
-          {activeTab === 'strategy_fault' && <StrategyFaultBody canManage={canManage} />}
+          {activeTab === 'strategy' && <StrategyDeployBody canManage={canManage} />}
+          {activeTab === 'fault' && <FaultControlBody />}
           {activeTab === 'users' && <UserManagementPage />}
         </div>
       </div>
     </div>
   )
 }
-
