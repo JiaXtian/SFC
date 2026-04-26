@@ -110,6 +110,8 @@ class DeploymentOrchestratorService {
         const std::string& nf_type,
         const std::string& config_content
     );
+    bool ensure_container_tun_device(const std::string& container_name) const;
+    bool setup_upf_dataplane(const std::string& container_name) const;
     bool check_nrf_registration(
         const std::string& nrf_container,
         const std::string& nrf_ip,

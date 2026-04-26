@@ -1423,6 +1423,13 @@ bool DeploymentOrchestratorService::start_nf_in_container(
         return false;
     }
 
+    if (nf == "upf") {
+        if (!setup_upf_dataplane(container_name)) {
+            spdlog::warn("Failed to prepare UPF dataplane in {}", container_name);
+            return false;
+        }
+    }
+
     int code = 0;
     std::ostringstream oss;
     oss
@@ -1451,6 +1458,61 @@ bool DeploymentOrchestratorService::start_nf_in_container(
         trim_copy(tail_lines(log_tail, 12))
     );
     return false;
+}
+
+bool DeploymentOrchestratorService::ensure_container_tun_device(const std::string& container_name) const {
+    if (container_name.empty()) return false;
+    int code = 0;
+    const std::string cmd =
+        "docker exec " + container_name +
+        " sh -lc 'mkdir -p /dev/net; "
+        "if [ ! -c /dev/net/tun ]; then mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true; fi; "
+        "chmod 666 /dev/net/tun >/dev/null 2>&1 || true; "
+        "test -c /dev/net/tun'";
+    run_shell_command(cmd, &code);
+    return code == 0;
+}
+
+bool DeploymentOrchestratorService::setup_upf_dataplane(const std::string& container_name) const {
+    if (container_name.empty()) return false;
+    if (!ensure_container_tun_device(container_name)) {
+        spdlog::warn("UPF dataplane precheck failed: /dev/net/tun unavailable in {}", container_name);
+        return false;
+    }
+
+    int code = 0;
+    const std::string cmd =
+        "docker exec " + container_name +
+        " sh -lc '"
+        "set -e; "
+        "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; "
+        "sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true; "
+        "ip tuntap add name ogstun mode tun >/dev/null 2>&1 || true; "
+        "ip link set ogstun up >/dev/null 2>&1 || true; "
+        "ip addr add 10.45.0.1/16 dev ogstun >/dev/null 2>&1 || true; "
+        "ip -6 addr add 2001:db8:cafe::1/48 dev ogstun >/dev/null 2>&1 || true; "
+        "iptables -t nat -C POSTROUTING -s 10.45.0.0/16 ! -o ogstun -j MASQUERADE >/dev/null 2>&1 || "
+        "iptables -t nat -A POSTROUTING -s 10.45.0.0/16 ! -o ogstun -j MASQUERADE >/dev/null 2>&1 || true; "
+        "iptables -C FORWARD -i ogstun -j ACCEPT >/dev/null 2>&1 || iptables -A FORWARD -i ogstun -j ACCEPT >/dev/null 2>&1 || true; "
+        "iptables -C FORWARD -o ogstun -j ACCEPT >/dev/null 2>&1 || iptables -A FORWARD -o ogstun -j ACCEPT >/dev/null 2>&1 || true; "
+        "ip6tables -t nat -C POSTROUTING -s 2001:db8:cafe::/48 ! -o ogstun -j MASQUERADE >/dev/null 2>&1 || "
+        "ip6tables -t nat -A POSTROUTING -s 2001:db8:cafe::/48 ! -o ogstun -j MASQUERADE >/dev/null 2>&1 || true; "
+        "ip -o link show ogstun >/dev/null 2>&1; "
+        "'";
+    run_shell_command(cmd, &code);
+    if (code != 0) {
+        std::string debug;
+        run_shell_command_capture(
+            "docker exec " + container_name +
+                " sh -lc 'ip -o link show ogstun 2>/dev/null || true; ip addr show ogstun 2>/dev/null || true; "
+                "iptables -t nat -S 2>/dev/null | tail -n 30 || true'",
+            &debug,
+            &code
+        );
+        spdlog::warn("UPF dataplane setup failed in {} details={}", container_name, trim_copy(tail_lines(debug, 20)));
+        return false;
+    }
+    return true;
 }
 
 bool DeploymentOrchestratorService::check_nrf_registration(

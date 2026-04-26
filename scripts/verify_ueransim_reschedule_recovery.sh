@@ -13,7 +13,11 @@ WAIT_FAULT_TIMEOUT_SEC="${WAIT_FAULT_TIMEOUT_SEC:-600}"
 
 VERIFY_TIMEOUT_SEC="${VERIFY_TIMEOUT_SEC:-120}"
 PDU_WAIT_SEC="${PDU_WAIT_SEC:-30}"
-STRICT_PDU_SESSION="${STRICT_PDU_SESSION:-0}"
+STRICT_PDU_SESSION="${STRICT_PDU_SESSION:-1}"
+STRICT_TUN_DEVICE="${STRICT_TUN_DEVICE:-1}"
+STRICT_UE_IP_ALLOC="${STRICT_UE_IP_ALLOC:-1}"
+UE_IP_WAIT_SEC="${UE_IP_WAIT_SEC:-30}"
+UE_TUN_IFACE="${UE_TUN_IFACE:-uesimtun0}"
 SMOKE_SCRIPT="${SMOKE_SCRIPT:-}"
 
 require_cmd() {
@@ -28,9 +32,9 @@ require_cmd curl
 require_cmd jq
 
 if [[ -z "$API_BASE" ]]; then
-  for base in "http://127.0.0.1:18080/api/v1" "http://127.0.0.1:8080/api/v1"; do
-    if curl -fsS "$base/health" >/dev/null 2>&1; then
-      API_BASE="$base"
+  for root in "http://127.0.0.1:18080" "http://127.0.0.1:8080"; do
+    if curl -fsS "$root/api/v1/health" >/dev/null 2>&1 || curl -fsS "$root/health" >/dev/null 2>&1; then
+      API_BASE="$root/api/v1"
       break
     fi
   done
@@ -56,6 +60,18 @@ CURL_AUTH_ARGS=("-H" "Authorization: Bearer $API_TOKEN")
 api_get() {
   local url="$1"
   curl -fsS "${CURL_AUTH_ARGS[@]}" "$url"
+}
+
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+    return 0
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -MTime::HiRes=time -e 'printf("%d\n", int(time()*1000));'
+    return 0
+  fi
+  printf '%s000\n' "$(date +%s)"
 }
 
 if [[ -z "$SMOKE_SCRIPT" ]]; then
@@ -98,6 +114,8 @@ echo "[INFO] target deployment=$DEPLOYMENT_ID sfc=$SFC_ID"
 echo "[INFO] baseline verification before fault injection ..."
 API_BASE="$API_BASE" API_TOKEN="$API_TOKEN" DEPLOYMENT_ID="$DEPLOYMENT_ID" \
 VERIFY_TIMEOUT_SEC="$VERIFY_TIMEOUT_SEC" PDU_WAIT_SEC="$PDU_WAIT_SEC" STRICT_PDU_SESSION="$STRICT_PDU_SESSION" \
+STRICT_TUN_DEVICE="$STRICT_TUN_DEVICE" STRICT_UE_IP_ALLOC="$STRICT_UE_IP_ALLOC" \
+UE_IP_WAIT_SEC="$UE_IP_WAIT_SEC" UE_TUN_IFACE="$UE_TUN_IFACE" \
 KEEP_UERANSIM=0 "$SMOKE_SCRIPT"
 
 baseline_signature="$(printf '%s' "$deployment_json" | jq -r '(.per_vnf // .per_core_nf // []) | map(((.nf_type // .core_nf // .vnf // "") + "@" + (.node // ""))) | sort | join(",")')"
@@ -150,7 +168,10 @@ while (( SECONDS < wait_deadline )); do
 
   if [[ "$reschedule_started" != "1" && ( "$phase_hint" == "1" || "$changed_hint" == "1" || "$service_ready" != "true" ) ]]; then
     reschedule_started=1
-    reschedule_start_ms="$(date +%s%3N)"
+    reschedule_start_ms="$(now_ms)"
+    if [[ ! "$reschedule_start_ms" =~ ^[0-9]+$ ]]; then
+      reschedule_start_ms="$((SECONDS * 1000))"
+    fi
     recovery_deadline=$((SECONDS + RECOVERY_TIMEOUT_SEC))
     echo "[INFO] reschedule detected: phase=$current_phase runtime=$latest_runtime"
     echo "[INFO] waiting for post-reschedule service recovery (timeout=${RECOVERY_TIMEOUT_SEC}s) ..."
@@ -163,6 +184,8 @@ while (( SECONDS < wait_deadline )); do
     echo "[INFO] recovered runtime observed, running UE re-attach validation ..."
     if API_BASE="$API_BASE" API_TOKEN="$API_TOKEN" DEPLOYMENT_ID="$DEPLOYMENT_ID" \
       VERIFY_TIMEOUT_SEC="$VERIFY_TIMEOUT_SEC" PDU_WAIT_SEC="$PDU_WAIT_SEC" STRICT_PDU_SESSION="$STRICT_PDU_SESSION" \
+      STRICT_TUN_DEVICE="$STRICT_TUN_DEVICE" STRICT_UE_IP_ALLOC="$STRICT_UE_IP_ALLOC" \
+      UE_IP_WAIT_SEC="$UE_IP_WAIT_SEC" UE_TUN_IFACE="$UE_TUN_IFACE" \
       KEEP_UERANSIM=0 "$SMOKE_SCRIPT"; then
       recovered=1
       break
@@ -193,7 +216,10 @@ if [[ "$recovered" != "1" ]]; then
   exit 1
 fi
 
-recovery_done_ms="$(date +%s%3N)"
+recovery_done_ms="$(now_ms)"
+if [[ ! "$recovery_done_ms" =~ ^[0-9]+$ ]]; then
+  recovery_done_ms="$((SECONDS * 1000))"
+fi
 recovery_cost_ms=$((recovery_done_ms - reschedule_start_ms))
 
 echo "[OK] reschedule recovery verification passed"

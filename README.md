@@ -156,6 +156,38 @@ python -m ground_training.models.model_export --context-dim 48
 - 后端包含启发式与硬约束兜底，未训练也可能有可行结果。
 - 重新训练可显著提升动态场景下的排序质量、稳定性与时延表现。
 
+### 8.4 MySQL 存储增长过快（binlog）
+- 默认已切换为“关闭 binlog”模式（`SFC_MYSQL_DISABLE_BINLOG=1`）。
+- 启动时若发现旧容器仍是 `log_bin=ON`，`dev.sh` 会自动保留数据卷并重建 MySQL 容器，使其切换到 `log_bin=OFF`。
+- 可先确认没有主从复制，再长期关闭 binlog：
+
+```bash
+docker exec sfc-mysql mysql -uroot -proot123456 -e "SHOW REPLICA STATUS\G; SHOW SLAVE STATUS\G;"
+```
+
+- 若无输出（空结果），表示未配置主从复制，可安全关闭 binlog（本地单机场景）。
+- 现已在 `dev.sh` 启动链路中自动执行：
+  - 过期业务事件清理（`event_log` / `runtime_events`）。
+  - 若启用了 binlog，则执行过期策略收紧与旧 binlog 清理。
+- 你也可以手动执行一次紧凑清理：
+
+```bash
+cd /Users/t1an/Desktop/project/SFC/sfc_deploy
+./scripts/compact_mysql_storage.sh
+```
+
+- 可通过环境变量调整（示例）：
+
+```bash
+SFC_MYSQL_DISABLE_BINLOG=1 \
+SFC_MYSQL_BINLOG_KEEP_DAYS=1 \
+SFC_MYSQL_BINLOG_EXPIRE_SECONDS=86400 \
+SFC_MYSQL_MAX_BINLOG_SIZE=67108864 \
+SFC_DB_EVENT_RETENTION_DAYS=7 \
+SFC_DB_RUNTIME_EVENT_RETENTION_DAYS=7 \
+./dev.sh restart
+```
+
 ## 9. 相关文档
 - 详细设计：`/Users/t1an/Desktop/project/SFC/sfc_deploy/项目总体设计文档.md`
 - 训练与推理说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/算法训练与推理说明.md`
@@ -165,3 +197,13 @@ python -m ground_training.models.model_export --context-dim 48
 ## 10. Open5GS 真实部署辅助脚本
 - 多架构镜像构建：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/build_open5gs_multiarch.sh`
 - 手动 UERANSIM 冒烟验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_smoke.sh`
+- 重调度恢复验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_reschedule_recovery.sh`
+
+UERANSIM 脚本默认启用严格验证（不仅注册成功，还要求 UE 分配到 `uesimtun0` IPv4）。
+
+可选参数示例：
+```bash
+STRICT_UE_IP_ALLOC=1 STRICT_TUN_DEVICE=1 STRICT_PDU_SESSION=1 \
+UE_IP_WAIT_SEC=40 \
+./scripts/verify_ueransim_smoke.sh
+```

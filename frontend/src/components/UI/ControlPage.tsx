@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowLeft, SlidersHorizontal, Users, LogOut, Satellite, ShieldAlert } from 'lucide-react'
+import { SlidersHorizontal, Users, LogOut, Satellite, ShieldAlert } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import SatelliteNodeControlPage from './SatelliteNodeControlPage'
 import SFCForm from './SFCForm'
@@ -50,7 +50,6 @@ export default function ControlPage() {
   const role = user?.role === 'admin' ? 'admin' : 'user'
   const canManage = role === 'admin'
   const [tab, setTab] = useState<Tab>('satellite')
-  const mainUrl = String((import.meta as any)?.env?.VITE_MAIN_SCREEN_URL || 'http://localhost:3001')
 
   const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy', 'fault', 'users'] : ['satellite']
   const activeTab = visibleTabs.includes(tab) ? tab : 'satellite'
@@ -64,19 +63,6 @@ export default function ControlPage() {
     >
       <div className="mx-auto px-4 py-3.5 h-full" style={{ width: 'min(99vw, 1980px)' }}>
         <div className="flex items-center gap-2.5 mb-3.5">
-          <button
-            onClick={() => {
-              window.location.href = mainUrl
-            }}
-            className="h-10 px-3.5 rounded-xl text-cyan-100 text-[14px] flex items-center gap-1.5 transition hover:brightness-110"
-            style={{
-              background: 'linear-gradient(135deg, rgba(22,52,78,0.14), rgba(11,26,44,0.1))',
-              backdropFilter: 'blur(10px)',
-            }}
-          >
-            <ArrowLeft className="w-4 h-4" />
-            返回大屏
-          </button>
           <div className="text-2xl font-semibold text-slate-100 inline-flex items-center gap-2">
             <SlidersHorizontal className="w-5 h-5 text-cyan-300" />
             系统控制中心

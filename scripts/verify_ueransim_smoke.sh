@@ -11,7 +11,11 @@ GNB_CONTAINER="${GNB_CONTAINER_NAME:-sfc-ueransim-gnb}"
 UE_CONTAINER="${UE_CONTAINER_NAME:-sfc-ueransim-ue}"
 VERIFY_TIMEOUT_SEC="${VERIFY_TIMEOUT_SEC:-120}"
 PDU_WAIT_SEC="${PDU_WAIT_SEC:-30}"
-STRICT_PDU_SESSION="${STRICT_PDU_SESSION:-0}"
+STRICT_PDU_SESSION="${STRICT_PDU_SESSION:-1}"
+STRICT_TUN_DEVICE="${STRICT_TUN_DEVICE:-1}"
+STRICT_UE_IP_ALLOC="${STRICT_UE_IP_ALLOC:-1}"
+UE_IP_WAIT_SEC="${UE_IP_WAIT_SEC:-30}"
+UE_TUN_IFACE="${UE_TUN_IFACE:-uesimtun0}"
 KEEP_UERANSIM="${KEEP_UERANSIM:-0}"
 DEPLOYMENT_ID="${DEPLOYMENT_ID:-}"
 ALLOW_SERVICE_READY_FALLBACK="${ALLOW_SERVICE_READY_FALLBACK:-0}"
@@ -95,6 +99,66 @@ wait_for_log() {
       return 0
     fi
     sleep 2
+  done
+  return 1
+}
+
+ensure_tun_device_in_container() {
+  local container="$1"
+  docker exec "$container" sh -lc '
+    mkdir -p /dev/net
+    if [ ! -c /dev/net/tun ]; then
+      mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true
+    fi
+    chmod 666 /dev/net/tun >/dev/null 2>&1 || true
+    test -c /dev/net/tun
+  ' >/dev/null 2>&1
+}
+
+start_ueransim_container() {
+  local name="$1"
+  local image="$2"
+  local extra_mount="$3"
+
+  docker rm -f "$name" >/dev/null 2>&1 || true
+
+  if docker run -d --name "$name" --network "$SFC_NETWORK" \
+      --cap-add=NET_ADMIN --device=/dev/net/tun \
+      -v "$extra_mount" "$image" sh -lc 'while true; do sleep 3600; done' >/dev/null 2>&1; then
+    if ensure_tun_device_in_container "$name"; then
+      return 0
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  fi
+
+  if docker run -d --name "$name" --network "$SFC_NETWORK" \
+      --privileged \
+      -v "$extra_mount" "$image" sh -lc 'while true; do sleep 3600; done' >/dev/null 2>&1; then
+    if ensure_tun_device_in_container "$name"; then
+      return 0
+    fi
+    if [[ "$STRICT_TUN_DEVICE" != "1" ]]; then
+      return 0
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  fi
+
+  return 1
+}
+
+wait_for_ue_tun_ip() {
+  local container="$1"
+  local iface="$2"
+  local timeout="$3"
+  local deadline=$((SECONDS + timeout))
+  local ip4=""
+  while (( SECONDS < deadline )); do
+    ip4="$(docker exec "$container" sh -lc "ip -o -4 addr show dev '$iface' 2>/dev/null | awk '{print \$4}' | cut -d/ -f1 | head -n 1" | tr -d '\r' || true)"
+    if [[ -n "$ip4" ]]; then
+      printf '%s\n' "$ip4"
+      return 0
+    fi
+    sleep 1
   done
   return 1
 }
@@ -289,9 +353,9 @@ require_cmd curl
 require_cmd jq
 
 if [[ -z "$API_BASE" ]]; then
-  for base in "http://127.0.0.1:18080/api/v1" "http://127.0.0.1:8080/api/v1"; do
-    if curl -fsS "$base/health" >/dev/null 2>&1; then
-      API_BASE="$base"
+  for root in "http://127.0.0.1:18080" "http://127.0.0.1:8080"; do
+    if curl -fsS "$root/api/v1/health" >/dev/null 2>&1 || curl -fsS "$root/health" >/dev/null 2>&1; then
+      API_BASE="$root/api/v1"
       break
     fi
   done
@@ -560,8 +624,15 @@ docker pull "$UERANSIM_IMAGE" >/dev/null
 docker rm -f "$GNB_CONTAINER" "$UE_CONTAINER" >/dev/null 2>&1 || true
 TMP_DIR="$(mktemp -d -t sfc-ueransim.XXXXXX)"
 
-docker run -d --name "$GNB_CONTAINER" --network "$SFC_NETWORK" -v "$TMP_DIR:/config" "$UERANSIM_IMAGE" sh -lc 'while true; do sleep 3600; done' >/dev/null
-docker run -d --name "$UE_CONTAINER" --network "$SFC_NETWORK" -v "$TMP_DIR:/config" "$UERANSIM_IMAGE" sh -lc 'while true; do sleep 3600; done' >/dev/null
+if ! start_ueransim_container "$GNB_CONTAINER" "$UERANSIM_IMAGE" "$TMP_DIR:/config"; then
+  echo "[ERROR] failed to start gNB container with required privileges/tun support"
+  exit 1
+fi
+if ! start_ueransim_container "$UE_CONTAINER" "$UERANSIM_IMAGE" "$TMP_DIR:/config"; then
+  echo "[ERROR] failed to start UE container with required privileges/tun support"
+  echo "       try: open Docker Desktop privileged support and ensure /dev/net/tun is available"
+  exit 1
+fi
 
 GNB_BIN_PATH="$(resolve_bin_path "$GNB_CONTAINER" "$GNB_BIN_OVERRIDE" /ueransim/nr-gnb /UERANSIM/build/nr-gnb nr-gnb || true)"
 UE_BIN_PATH="$(resolve_bin_path "$UE_CONTAINER" "$UE_BIN_OVERRIDE" /ueransim/nr-ue /UERANSIM/build/nr-ue nr-ue || true)"
@@ -685,8 +756,26 @@ else
 fi
 
 if docker exec "$UE_CONTAINER" sh -lc "test -f /tmp/ue.log && grep -Eiq 'TUN allocation failure|Open failure /dev/net/tun' /tmp/ue.log"; then
-  echo "[WARN] UE data-plane TUN device is unavailable in container (/dev/net/tun)."
-  echo "[WARN] On macOS Docker Desktop this is often expected; control-plane registration/PDU-signaling result is still valid."
+  if [[ "$STRICT_TUN_DEVICE" == "1" ]]; then
+    echo "[ERROR] UE data-plane TUN device is unavailable in container (/dev/net/tun)"
+    echo "[INFO] UE log tail:"
+    docker exec "$UE_CONTAINER" sh -lc 'tail -n 120 /tmp/ue.log || true'
+    exit 1
+  fi
+  echo "[WARN] UE data-plane TUN device is unavailable in container (/dev/net/tun), continue because STRICT_TUN_DEVICE=0"
+fi
+
+ue_ip=""
+if ue_ip="$(wait_for_ue_tun_ip "$UE_CONTAINER" "$UE_TUN_IFACE" "$UE_IP_WAIT_SEC")"; then
+  echo "[INFO] UE tunnel interface ${UE_TUN_IFACE} IPv4=${ue_ip}"
+else
+  if [[ "$STRICT_UE_IP_ALLOC" == "1" ]]; then
+    echo "[ERROR] UE did not obtain IPv4 on ${UE_TUN_IFACE} within ${UE_IP_WAIT_SEC}s"
+    echo "[INFO] UE interface diagnostics:"
+    docker exec "$UE_CONTAINER" sh -lc "ip addr show '${UE_TUN_IFACE}' || true; ip route || true; tail -n 120 /tmp/ue.log || true"
+    exit 1
+  fi
+  echo "[WARN] UE has no IPv4 on ${UE_TUN_IFACE} (STRICT_UE_IP_ALLOC=0)"
 fi
 
 echo "[OK] UERANSIM smoke verification passed"

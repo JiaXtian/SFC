@@ -15,6 +15,15 @@ BACKEND_LOG_FILE="${LOG_DIR}/backend.log"
 FRONTEND_MAIN_LOG_FILE="${LOG_DIR}/frontend-main.log"
 FRONTEND_CONTROL_LOG_FILE="${LOG_DIR}/frontend-control.log"
 
+# MySQL storage policy defaults (can be overridden by env vars).
+# These settings keep history useful but prevent local disk blow-up.
+MYSQL_DISABLE_BINLOG="${SFC_MYSQL_DISABLE_BINLOG:-1}"                      # 1=disable binlog completely
+MYSQL_BINLOG_EXPIRE_SECONDS="${SFC_MYSQL_BINLOG_EXPIRE_SECONDS:-86400}"    # 1 day
+MYSQL_BINLOG_KEEP_DAYS="${SFC_MYSQL_BINLOG_KEEP_DAYS:-1}"                  # purge cutoff
+MYSQL_MAX_BINLOG_SIZE="${SFC_MYSQL_MAX_BINLOG_SIZE:-134217728}"            # 128MB
+DB_EVENT_RETENTION_DAYS="${SFC_DB_EVENT_RETENTION_DAYS:-14}"
+DB_RUNTIME_EVENT_RETENTION_DAYS="${SFC_DB_RUNTIME_EVENT_RETENTION_DAYS:-14}"
+
 mkdir -p "${PID_DIR}" "${LOG_DIR}"
 
 is_running() {
@@ -60,6 +69,31 @@ build_backend() {
   cmake --build "${BACKEND_BUILD_DIR}" -j
 }
 
+apply_mysql_storage_policy() {
+  local mysql_container="$1"
+
+  # 1) Prune old app history rows (safe best-effort).
+  docker exec "${mysql_container}" mysql -usfc -psfc123456 -D sfc_runtime \
+    -e "DELETE FROM event_log WHERE created_at < NOW() - INTERVAL ${DB_EVENT_RETENTION_DAYS} DAY;" \
+    >/dev/null 2>&1 || true
+  docker exec "${mysql_container}" mysql -usfc -psfc123456 -D sfc_runtime \
+    -e "DELETE FROM runtime_events WHERE created_at < NOW() - INTERVAL ${DB_RUNTIME_EVENT_RETENTION_DAYS} DAY;" \
+    >/dev/null 2>&1 || true
+
+  # 2) Keep MySQL binlog bounded and purge stale logs (safe when not using replication).
+  # log_bin may still be ON for existing containers created in older versions.
+  local log_bin
+  log_bin="$(docker exec "${mysql_container}" mysql -N -B -uroot -proot123456 -e "SHOW VARIABLES LIKE 'log_bin';" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)"
+  if [[ "${log_bin}" == "ON" ]]; then
+    docker exec "${mysql_container}" mysql -uroot -proot123456 -e \
+      "SET PERSIST binlog_expire_logs_seconds=${MYSQL_BINLOG_EXPIRE_SECONDS}; \
+       SET PERSIST max_binlog_size=${MYSQL_MAX_BINLOG_SIZE}; \
+       FLUSH BINARY LOGS; \
+       PURGE BINARY LOGS BEFORE NOW() - INTERVAL ${MYSQL_BINLOG_KEEP_DAYS} DAY;" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
 ensure_mysql_ready() {
   local mysql_container="sfc-mysql"
   local mysql_network="sfc-net"
@@ -71,17 +105,34 @@ ensure_mysql_ready() {
     local data_dir="$1"
     mkdir -p "${data_dir}"
     docker network inspect "${mysql_network}" >/dev/null 2>&1 || docker network create "${mysql_network}" >/dev/null
-    docker run -d \
-      --name "${mysql_container}" \
-      --network "${mysql_network}" \
-      -e MYSQL_ROOT_PASSWORD=root123456 \
-      -e MYSQL_DATABASE=sfc_runtime \
-      -e MYSQL_USER=sfc \
-      -e MYSQL_PASSWORD=sfc123456 \
-      -v "${data_dir}:/var/lib/mysql" \
-      mysql:8.0 \
-      --character-set-server=utf8mb4 \
-      --collation-server=utf8mb4_unicode_ci >/dev/null
+    if [[ "${MYSQL_DISABLE_BINLOG}" == "1" ]]; then
+      docker run -d \
+        --name "${mysql_container}" \
+        --network "${mysql_network}" \
+        -e MYSQL_ROOT_PASSWORD=root123456 \
+        -e MYSQL_DATABASE=sfc_runtime \
+        -e MYSQL_USER=sfc \
+        -e MYSQL_PASSWORD=sfc123456 \
+        -v "${data_dir}:/var/lib/mysql" \
+        mysql:8.0 \
+        --skip-log-bin \
+        --character-set-server=utf8mb4 \
+        --collation-server=utf8mb4_unicode_ci >/dev/null
+    else
+      docker run -d \
+        --name "${mysql_container}" \
+        --network "${mysql_network}" \
+        -e MYSQL_ROOT_PASSWORD=root123456 \
+        -e MYSQL_DATABASE=sfc_runtime \
+        -e MYSQL_USER=sfc \
+        -e MYSQL_PASSWORD=sfc123456 \
+        -v "${data_dir}:/var/lib/mysql" \
+        mysql:8.0 \
+        --binlog-expire-logs-seconds="${MYSQL_BINLOG_EXPIRE_SECONDS}" \
+        --max-binlog-size="${MYSQL_MAX_BINLOG_SIZE}" \
+        --character-set-server=utf8mb4 \
+        --collation-server=utf8mb4_unicode_ci >/dev/null
+    fi
   }
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -113,6 +164,28 @@ ensure_mysql_ready() {
   for _ in {1..60}; do
     if docker exec "${mysql_container}" mysql -usfc -psfc123456 -e "SELECT 1;" >/dev/null 2>&1; then
       echo "MySQL is ready"
+      if [[ "${MYSQL_DISABLE_BINLOG}" == "1" ]]; then
+        local log_bin
+        log_bin="$(docker exec "${mysql_container}" mysql -N -B -uroot -proot123456 -e "SHOW VARIABLES LIKE 'log_bin';" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true)"
+        if [[ "${log_bin}" == "ON" ]]; then
+          echo "MySQL binlog is ON, recreating container with --skip-log-bin ..."
+          local existing_data_dir
+          existing_data_dir="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Source}}{{end}}{{end}}' "${mysql_container}" 2>/dev/null || true)"
+          docker rm -f "${mysql_container}" >/dev/null 2>&1 || true
+          if [[ -n "${existing_data_dir}" ]]; then
+            mysql_data_dir="${existing_data_dir}"
+          fi
+          create_mysql_container "${mysql_data_dir}"
+          echo "waiting MySQL ready after binlog disable recreate..."
+          for _ in {1..60}; do
+            if docker exec "${mysql_container}" mysql -usfc -psfc123456 -e "SELECT 1;" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+        fi
+      fi
+      apply_mysql_storage_policy "${mysql_container}"
       return 0
     fi
     sleep 1
