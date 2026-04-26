@@ -5,6 +5,23 @@ import { useStore } from '@/store/useStore'
 
 const R = 5
 const PI = Math.PI
+const LOCAL_EARTH_TEXTURE_URLS = [
+  '/assets/earth/earth-blue-marble.jpg',
+  '/assets/earth/earth_atmos_2048.jpg',
+]
+const REMOTE_EARTH_TEXTURE_URLS = [
+  'https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg',
+  'https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/textures/planets/earth_atmos_2048.jpg',
+  'https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg',
+]
+const LOCAL_GEOJSON_URLS = [
+  '/assets/earth/countries.geo.json',
+]
+const REMOTE_GEOJSON_URLS = [
+  'https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json',
+  'https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json',
+  'https://fastly.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json',
+]
 
 function latLonToVec3(lat: number, lon: number, r: number): THREE.Vector3 {
   const phi = (90 - lat) * (PI / 180)
@@ -83,12 +100,7 @@ function EarthContent({
     let disposed = false
     let activeTexture: THREE.Texture | null = null
 
-    const textureUrls = [
-      //'http://unpkg.com/three-globe/example/img/earth-day.jpg',
-      'https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg',
-      'https://cdn.jsdelivr.net/gh/mrdoob/three.js@master/examples/textures/planets/earth_atmos_2048.jpg',
-      'https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg',
-    ]
+    const textureUrls = [...LOCAL_EARTH_TEXTURE_URLS, ...REMOTE_EARTH_TEXTURE_URLS]
 
     const setupTexture = (tex: THREE.Texture) => {
       tex.wrapS = THREE.RepeatWrapping
@@ -110,7 +122,9 @@ function EarthContent({
         return
       }
       const loader = new THREE.TextureLoader()
-      loader.setCrossOrigin('anonymous')
+      if (String(textureUrls[idx]).startsWith('http')) {
+        loader.setCrossOrigin('anonymous')
+      }
       loader.load(
         textureUrls[idx],
         (tex) => {
@@ -204,11 +218,7 @@ export default function Earth() {
     let disposed = false
 
     const fetchGeoJsonWithFallback = async () => {
-      const sources = [
-        'https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json',
-        'https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json',
-        'https://fastly.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json',
-      ]
+      const sources = [...LOCAL_GEOJSON_URLS, ...REMOTE_GEOJSON_URLS]
       let lastErr: any = null
       for (const url of sources) {
         try {

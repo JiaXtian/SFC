@@ -908,7 +908,7 @@ export const useStore = create<Store>((set, get) => ({
     showTexture: true,
     showBorders: false,
     showLatLon: false,
-    showLinks: false,
+    showLinks: true,
     linkOpacity: 0.7,
     showSky: true,
     showAtmosphere: true,
