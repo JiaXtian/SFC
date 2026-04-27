@@ -545,7 +545,7 @@ class SFCTrainer:
         total_epochs=1,
         reliability_curriculum=None,
     ):
-        from ground_training.environment.sfc_env import SFCEnvironment
+        from training.environment.sfc_env import SFCEnvironment
 
         epoch_start = time.time()
         total_requests = 0

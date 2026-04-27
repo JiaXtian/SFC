@@ -42,6 +42,8 @@ TEST_REQUESTS_FILE="data/val/requests/requests_000.json"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MODEL_EXPORT_DIR="${PROJECT_ROOT}/models/exported"
+RESULT_JSON="${SCRIPT_DIR}/results/results.json"
 
 usage() {
   cat <<EOF
@@ -158,7 +160,7 @@ echo "跳过阶段: data=$SKIP_DATA train=$SKIP_TRAIN export=$SKIP_EXPORT build=
 # 1) Data generation
 if [[ "$SKIP_DATA" -eq 0 ]]; then
   log "1/5" "生成扩展训练集..."
-  cd ground_training/data_generation
+  cd training/data_generation
   python augment_data.py \
     --train_topologies "$TRAIN_TOPOLOGIES" \
     --train_groups_per_topology "$TRAIN_GROUPS_PER_TOPOLOGY" \
@@ -177,7 +179,7 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
   require_dir_nonempty "data/train/topologies"
   require_dir_nonempty "data/train/requests"
   log "2/5" "执行单次长训练..."
-  python -m ground_training.train \
+  python -m training.train \
     --device "$DEVICE" \
     --epochs "$EPOCHS" \
     --max_requests_per_file "$MAX_REQUESTS_PER_FILE" \
@@ -202,7 +204,7 @@ if [[ "$SKIP_EXPORT" -eq 0 ]]; then
   require_file "models/checkpoints/gnn_best.pth"
   require_file "models/checkpoints/model_best.pth"
   log "3/5" "导出ONNX模型..."
-  python -m ground_training.models.model_export
+  python -m training.models.model_export --output-dir "${MODEL_EXPORT_DIR}"
 else
   log "3/5" "跳过ONNX导出"
 fi
@@ -211,7 +213,7 @@ fi
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   have_cmd cmake || die "未找到 cmake，请先安装"
   log "4/5" "编译C++模型验证程序..."
-  cd onboard_inference
+  cd test
   mkdir -p build
   cd build
   if [[ -f "CMakeCache.txt" ]]; then
@@ -236,36 +238,39 @@ fi
 # 5) Inference benchmark test
 #仅测试： ./start.sh --skip-data --skip-train --skip-export
 if [[ "$SKIP_INFER" -eq 0 ]]; then
-  require_file "models/exported/gnn_encoder.onnx"
-  require_file "models/exported/actor.onnx"
-  require_file "onboard_inference/build/model_benchmark"
+  require_file "${MODEL_EXPORT_DIR}/gnn_encoder.onnx"
+  require_file "${MODEL_EXPORT_DIR}/actor.onnx"
+  require_file "test/build/model_benchmark"
   mkdir -p results
+  rm -f results/*.json
   log "5/5" "执行C++模型有效性与速度测试..."
+  echo "  选用模型: ${MODEL_EXPORT_DIR}/gnn_encoder.onnx"
+  echo "  选用模型: ${MODEL_EXPORT_DIR}/actor.onnx"
   if [[ -d "$TEST_TOPOLOGY_DIR" && -d "$TEST_REQUESTS_DIR" ]]; then
-    ./onboard_inference/build/model_benchmark \
-      --gnn_model models/exported/gnn_encoder.onnx \
-      --actor_model models/exported/actor.onnx \
+    ./test/build/model_benchmark \
+      --gnn_model "${MODEL_EXPORT_DIR}/gnn_encoder.onnx" \
+      --actor_model "${MODEL_EXPORT_DIR}/actor.onnx" \
       --topology_dir "$TEST_TOPOLOGY_DIR" \
       --requests_dir "$TEST_REQUESTS_DIR" \
-      --output results/final_results.json \
+      --output "${RESULT_JSON}" \
       --top_m "$TOP_M"
   else
     require_file "$TEST_TOPOLOGY_FILE"
     require_file "$TEST_REQUESTS_FILE"
-    ./onboard_inference/build/model_benchmark \
-      --gnn_model models/exported/gnn_encoder.onnx \
-      --actor_model models/exported/actor.onnx \
+    ./test/build/model_benchmark \
+      --gnn_model "${MODEL_EXPORT_DIR}/gnn_encoder.onnx" \
+      --actor_model "${MODEL_EXPORT_DIR}/actor.onnx" \
       --topology "$TEST_TOPOLOGY_FILE" \
       --requests "$TEST_REQUESTS_FILE" \
-      --output results/final_results.json \
+      --output "${RESULT_JSON}" \
       --top_m "$TOP_M"
   fi
 
-  if [[ -f "results/final_results.json" ]]; then
-    log "5/5" "生成科研风格分析图表..."
-    python onboard_inference/plot_results.py \
-      --input results/final_results.json \
-      --output-dir results/plots
+  if [[ -f "${RESULT_JSON}" ]]; then
+    log "5/5" "生成推理时延图..."
+    python test/plot_results.py \
+      --input "${RESULT_JSON}" \
+      --output "results/inference_latency_by_topology.png"
   fi
 else
   log "5/5" "跳过C++模型测试"
@@ -273,7 +278,7 @@ fi
 
 echo -e "\n=========================================="
 echo "  训练指标: logs/training_metrics.json"
-echo "  模型导出: models/exported"
-echo "  推理引擎测试结果: results/final_results.json"
-echo "  结果图表: results/plots"
+echo "  模型导出: ${MODEL_EXPORT_DIR}"
+echo "  推理引擎测试结果: ${RESULT_JSON}"
+echo "  结果图表: results/inference_latency_by_topology.png"
 echo "=========================================="

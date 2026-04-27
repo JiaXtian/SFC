@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TRAIN_ROOT = PROJECT_ROOT / "train"
 
-from ground_training.models.drl_agent import DRLAgent
-from ground_training.models.gnn_encoder import GNNEncoder
+from training.models.drl_agent import DRLAgent
+from training.models.gnn_encoder import GNNEncoder
 
 
 def _resolve_checkpoint(*candidates):

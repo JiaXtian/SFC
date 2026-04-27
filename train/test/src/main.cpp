@@ -24,7 +24,7 @@ struct Config {
     std::string requests_file;
     std::string topology_dir;
     std::string requests_dir;
-    std::string output_file = "result/results.json";
+    std::string output_file = "results/results.json";
     int num_threads = 4;
     HeuristicConfig heuristic;
 };

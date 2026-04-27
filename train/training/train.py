@@ -21,9 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_ROOT = PROJECT_ROOT / "train"
 
-from ground_training.models.drl_agent import DRLAgent
-from ground_training.models.gnn_encoder import GNNEncoder
-from ground_training.training.trainer import SFCTrainer
+from training.models.drl_agent import DRLAgent
+from training.models.gnn_encoder import GNNEncoder
+from training.training.trainer import SFCTrainer
 
 
 class HeuristicPruner:
@@ -555,7 +555,7 @@ def main():
 
     if not train_topos or not train_reqs:
         print("错误: 训练数据未生成，请先运行数据增强")
-        print("python3 train/ground_training/data_generation/augment_data.py")
+        print("python3 train/training/data_generation/augment_data.py")
         sys.exit(1)
 
     full_train_data = _build_scale_balanced_data(train_topos, train_reqs)

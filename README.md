@@ -107,7 +107,7 @@ cd /Users/t1an/Desktop/project/SFC/sfc_deploy/train
 ### 5.3 单独导出 ONNX
 ```bash
 cd /Users/t1an/Desktop/project/SFC/sfc_deploy/train
-python -m ground_training.models.model_export --context-dim 48
+python -m training.models.model_export --context-dim 48
 ```
 
 导出结果：

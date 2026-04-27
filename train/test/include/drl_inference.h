@@ -39,7 +39,8 @@ private:
     ) const;
     std::vector<float> align_node_features(
         const std::vector<float>& node_features,
-        size_t num_nodes
+        size_t num_nodes,
+        size_t target_dim
     ) const;
 
     int64_t node_feature_dim_ = kDefaultNodeFeatureDim;
