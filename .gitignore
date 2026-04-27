@@ -49,7 +49,6 @@ backend/build/
 backend/logs/
 backend/uploads/
 backend/sfc_server
-backend/old_version/
 
 # Training / inference generated artifacts
 train/data/
@@ -57,12 +56,9 @@ train/logs/
 train/results/
 train/models/exported/
 train/onboard_inference/build/
-models/exported/
-models/old/
 models.zip
 
 # Model binaries
-*.onnx
 *.onnx.data
 *.pt
 *.pth

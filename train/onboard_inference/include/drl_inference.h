@@ -27,10 +27,25 @@ public:
     );
     
 private:
-    static constexpr int64_t kExpectedNodeFeatureDim = 14;
-    static constexpr int64_t kExpectedEmbeddingDim = 192;
-    static constexpr int64_t kExpectedVnfFeatureDim = 8;
-    static constexpr int64_t kExpectedContextFeatureDim = 48;
+    static constexpr int64_t kDefaultNodeFeatureDim = 14;
+    static constexpr int64_t kDefaultEmbeddingDim = 192;
+    static constexpr int64_t kDefaultVnfFeatureDim = 8;
+    static constexpr int64_t kDefaultContextFeatureDim = 48;
+
+    std::vector<float> align_flat_features(
+        const std::vector<float>& features,
+        size_t target_dim,
+        const char* feature_name
+    ) const;
+    std::vector<float> align_node_features(
+        const std::vector<float>& node_features,
+        size_t num_nodes
+    ) const;
+
+    int64_t node_feature_dim_ = kDefaultNodeFeatureDim;
+    int64_t embedding_dim_ = kDefaultEmbeddingDim;
+    int64_t vnf_feature_dim_ = kDefaultVnfFeatureDim;
+    int64_t context_feature_dim_ = kDefaultContextFeatureDim;
 
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> gnn_session_;
