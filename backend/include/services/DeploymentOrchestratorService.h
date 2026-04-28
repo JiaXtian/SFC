@@ -78,9 +78,23 @@ class DeploymentOrchestratorService {
     );
 
     bool ensure_satellite_image_available(std::string* image_out, std::string* reason_out);
+    bool validate_satellite_image(
+        const std::string& image,
+        std::string* reason_out = nullptr
+    ) const;
     bool ensure_network();
     bool ensure_mongo_container(std::string* reason_out = nullptr);
     bool stop_container(const std::string& container_name);
+    bool is_container_running(const std::string& container_name) const;
+    bool wait_for_container_running(
+        const std::string& container_name,
+        int attempts = 8,
+        int interval_ms = 250
+    ) const;
+    void log_container_diagnostics(
+        const std::string& container_name,
+        const std::string& context
+    ) const;
     bool ensure_satellite_container(
         const std::string& container_name,
         const std::string& image,
@@ -91,6 +105,10 @@ class DeploymentOrchestratorService {
         const std::string& container_name,
         const std::string& nf_type,
         const std::string& content
+    ) const;
+    std::string normalize_rendered_nf_config(
+        const std::string& nf_type,
+        const std::string& raw_config
     ) const;
     std::string render_nf_config(
         const std::string& nf_type,
@@ -116,6 +134,11 @@ class DeploymentOrchestratorService {
         const std::string& nrf_container,
         const std::string& nrf_ip,
         const std::vector<std::string>& started_nfs
+    ) const;
+    bool check_smf_upf_pfcp_ready(
+        const std::string& smf_container,
+        const std::string& upf_container,
+        int timeout_seconds = 20
     ) const;
     bool run_shell_command_capture(
         const std::string& cmd,

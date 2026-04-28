@@ -27,12 +27,14 @@ namespace sfc {
 namespace {
 
 constexpr const char* kSatelliteNetwork = "sfc-open5gs-net";
-constexpr const char* kDefaultSatelliteImage = "ghcr.io/open5gs/open5gs:latest";
+constexpr const char* kMirrorSatelliteImage = "docker.1ms.run/gradiant/open5gs:2.7.7";
+constexpr const char* kDefaultSatelliteImage = "gradiant/open5gs:2.7.7";
+constexpr const char* kFallbackSatelliteImage = "ghcr.io/open5gs/open5gs:latest";
 constexpr const char* kLocalSatelliteImage = "sfc-open5gs-satellite:local";
 constexpr const char* kLocalSatelliteImageLatest = "sfc-open5gs-satellite:latest";
 constexpr const char* kMongoContainer = "sfc-open5gs-mongo";
 constexpr const char* kMongoImage = "mongo:6";
-constexpr const char* kMongoUri = "mongodb://sfc-open5gs-mongo/open5gs";
+constexpr const char* kMongoUri = "mongodb://mongo/open5gs";
 
 constexpr int kSbiPortNrf = 7777;
 constexpr int kSbiPortAmf = 7778;
@@ -72,6 +74,16 @@ std::string getenv_str(const char* key) {
     const char* v = std::getenv(key);
     if (!v || !*v) return "";
     return std::string(v);
+}
+
+std::string default_satellite_platform() {
+    const std::string configured = getenv_str("SFC_SATELLITE_PLATFORM");
+    if (!configured.empty()) return configured;
+#if defined(__aarch64__) || defined(__arm64__)
+    return "linux/amd64";
+#else
+    return "";
+#endif
 }
 
 std::vector<std::string> unique_nf_types(const std::vector<std::string>& values) {
@@ -177,9 +189,11 @@ std::vector<std::string> build_image_candidates() {
     push_if(getenv_str("SFC_SATELLITE_IMAGE_AMD64"));
     push_if(getenv_str("SFC_SATELLITE_IMAGE_X86_64"));
 #endif
+    push_if(kMirrorSatelliteImage);
+    push_if(kDefaultSatelliteImage);
     push_if(kLocalSatelliteImage);
     push_if(kLocalSatelliteImageLatest);
-    push_if(kDefaultSatelliteImage);
+    push_if(kFallbackSatelliteImage);
     return out;
 }
 
@@ -502,7 +516,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         fail_deployment(image_reason.empty() ? "satellite_image_unavailable" : image_reason);
         return;
     }
-    const std::string platform = getenv_str("SFC_SATELLITE_PLATFORM");
+    const std::string platform = default_satellite_platform();
 
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "starting_containers"},
@@ -578,11 +592,13 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }
 
     std::string nrf_node;
+    std::string smf_node;
     std::string upf_node;
     std::string scp_node;
     for (const auto& pv : task.candidate.per_vnf) {
         const std::string nf = normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type);
         if (nf == "nrf" && nrf_node.empty()) nrf_node = pv.node;
+        if (nf == "smf" && smf_node.empty()) smf_node = pv.node;
         if (nf == "upf" && upf_node.empty()) upf_node = pv.node;
         if (nf == "scp" && scp_node.empty()) scp_node = pv.node;
     }
@@ -690,12 +706,32 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     const bool has_pcf = std::any_of(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [](const auto& pv) {
         return normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type) == "pcf";
     });
+
+    bool pfcp_ready = true;
+    if (has_smf && has_upf) {
+        const std::string smf_container = (!smf_node.empty() && node_container_by_id.count(smf_node))
+            ? node_container_by_id[smf_node]
+            : "";
+        const std::string upf_container = (!upf_node.empty() && node_container_by_id.count(upf_node))
+            ? node_container_by_id[upf_node]
+            : "";
+        if (smf_container.empty() || upf_container.empty()) {
+            pfcp_ready = false;
+        } else {
+            pfcp_ready = check_smf_upf_pfcp_ready(smf_container, upf_container, 20);
+        }
+        if (!pfcp_ready) {
+            errors.push_back("smf_upf_pfcp_not_ready");
+        }
+    }
+
     const bool min_chain_ready = has_amf && has_smf && has_upf && has_nrf;
     const bool service_ready =
         min_chain_ready &&
         containers_failed == 0 &&
         core_nfs_failed == 0 &&
-        registration_ok;
+        registration_ok &&
+        pfcp_ready;
     const bool ue_validation_ready =
         service_ready &&
         has_ausf &&
@@ -826,25 +862,46 @@ bool DeploymentOrchestratorService::ensure_satellite_image_available(
     if (!image_out) return false;
 
     const auto candidates = build_image_candidates();
+    const std::string platform = default_satellite_platform();
     int code = 0;
 
     for (const auto& image : candidates) {
         const std::string inspect_cmd = "docker image inspect " + image + " >/dev/null 2>&1";
         if (run_shell_command(inspect_cmd, &code) && code == 0) {
-            *image_out = image;
-            if (reason_out) *reason_out = "";
-            return true;
+            std::string invalid_reason;
+            if (validate_satellite_image(image, &invalid_reason)) {
+                *image_out = image;
+                if (reason_out) *reason_out = "";
+                spdlog::info("Selected satellite image {}", image);
+                return true;
+            }
+            spdlog::warn(
+                "Skipping satellite image {} due to missing Open5GS daemons: {}",
+                image,
+                invalid_reason
+            );
         }
     }
 
     for (const auto& image : candidates) {
         std::string output;
-        const std::string pull_cmd = "docker pull " + image;
+        const std::string pull_cmd =
+            "docker pull " + (platform.empty() ? "" : ("--platform " + platform + " ")) + image;
         run_shell_command_capture(pull_cmd, &output, &code);
         if (code == 0) {
-            *image_out = image;
-            if (reason_out) *reason_out = "";
-            return true;
+            std::string invalid_reason;
+            if (validate_satellite_image(image, &invalid_reason)) {
+                *image_out = image;
+                if (reason_out) *reason_out = "";
+                spdlog::info("Pulled and selected satellite image {}", image);
+                return true;
+            }
+            spdlog::warn(
+                "Pulled satellite image {} but validation failed: {}",
+                image,
+                invalid_reason
+            );
+            continue;
         }
         spdlog::warn("Failed to pull image {}: {}", image, trim_copy(tail_lines(output, 8)));
     }
@@ -868,9 +925,18 @@ bool DeploymentOrchestratorService::ensure_satellite_image_available(
             "docker build -f " + dockerfile + " -t " + std::string(kLocalSatelliteImage) + " " + context;
         run_shell_command_capture(build_cmd, &output, &code);
         if (code == 0) {
-            *image_out = kLocalSatelliteImage;
-            if (reason_out) *reason_out = "";
-            return true;
+            std::string invalid_reason;
+            if (validate_satellite_image(kLocalSatelliteImage, &invalid_reason)) {
+                *image_out = kLocalSatelliteImage;
+                if (reason_out) *reason_out = "";
+                spdlog::info("Built and selected satellite image {}", kLocalSatelliteImage);
+                return true;
+            }
+            spdlog::warn(
+                "Built satellite image {} but validation failed: {}",
+                kLocalSatelliteImage,
+                invalid_reason
+            );
         }
         spdlog::warn(
             "Failed to build {} from {}: {}",
@@ -882,6 +948,36 @@ bool DeploymentOrchestratorService::ensure_satellite_image_available(
 
     if (reason_out) {
         *reason_out = "satellite_image_unavailable";
+    }
+    return false;
+}
+
+bool DeploymentOrchestratorService::validate_satellite_image(
+    const std::string& image,
+    std::string* reason_out
+) const {
+    if (reason_out) reason_out->clear();
+    if (image.empty()) {
+        if (reason_out) *reason_out = "empty_image";
+        return false;
+    }
+
+    const std::string platform = default_satellite_platform();
+    int code = 0;
+    std::string output;
+    const std::string cmd =
+        "docker run --rm " +
+        (platform.empty() ? "" : (" --platform " + platform)) +
+        " --entrypoint /bin/sh " + image +
+        " -lc 'for d in open5gs-nrfd open5gs-amfd open5gs-smfd open5gs-upfd; do "
+        "command -v \"$d\" >/dev/null 2>&1 || [ -x \"/opt/open5gs/bin/$d\" ] || exit 10; "
+        "done'";
+    run_shell_command_capture(cmd, &output, &code);
+    if (code == 0) return true;
+
+    if (reason_out) {
+        *reason_out = trim_copy(tail_lines(output, 6));
+        if (reason_out->empty()) *reason_out = "required_open5gs_daemons_not_found";
     }
     return false;
 }
@@ -903,6 +999,7 @@ bool DeploymentOrchestratorService::ensure_mongo_container(std::string* reason_o
     std::string inspect_output;
     bool has_container = false;
     bool attached_to_target_network = false;
+    bool has_mongo_alias = false;
     {
         const std::string inspect_cmd =
             "docker inspect -f '{{json .NetworkSettings.Networks}}' " + std::string(kMongoContainer) + " 2>/dev/null";
@@ -911,15 +1008,17 @@ bool DeploymentOrchestratorService::ensure_mongo_container(std::string* reason_o
         if (has_container) {
             attached_to_target_network =
                 inspect_output.find("\"" + std::string(kSatelliteNetwork) + "\"") != std::string::npos;
+            has_mongo_alias = inspect_output.find("\"mongo\"") != std::string::npos;
         }
     }
 
-    if (!has_container || !attached_to_target_network) {
+    if (!has_container || !attached_to_target_network || !has_mongo_alias) {
         run_shell_command("docker rm -f " + std::string(kMongoContainer) + " >/dev/null 2>&1", &code);
         const std::string run_cmd =
             "docker run -d --name " + std::string(kMongoContainer) +
             " --network " + std::string(kSatelliteNetwork) +
             " --network-alias " + std::string(kMongoContainer) +
+            " --network-alias mongo " +
             " " + std::string(kMongoImage) + " >/dev/null 2>&1";
         if (!(run_shell_command(run_cmd, &code) && code == 0)) {
             if (reason_out) *reason_out = "mongo_container_start_failed";
@@ -958,6 +1057,59 @@ bool DeploymentOrchestratorService::stop_container(const std::string& container_
     return code == 0;
 }
 
+bool DeploymentOrchestratorService::is_container_running(const std::string& container_name) const {
+    if (container_name.empty()) return false;
+    int code = 0;
+    const std::string inspect_running =
+        "docker inspect -f '{{.State.Running}}' " + container_name + " 2>/dev/null | grep -q true";
+    run_shell_command(inspect_running, &code);
+    return code == 0;
+}
+
+bool DeploymentOrchestratorService::wait_for_container_running(
+    const std::string& container_name,
+    int attempts,
+    int interval_ms
+) const {
+    if (container_name.empty()) return false;
+    attempts = std::max(1, attempts);
+    interval_ms = std::max(50, interval_ms);
+
+    for (int i = 0; i < attempts; ++i) {
+        if (is_container_running(container_name)) {
+            // Double-check after a short delay to catch fast-exit containers.
+            std::this_thread::sleep_for(std::chrono::milliseconds(160));
+            if (is_container_running(container_name)) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+    return false;
+}
+
+void DeploymentOrchestratorService::log_container_diagnostics(
+    const std::string& container_name,
+    const std::string& context
+) const {
+    if (container_name.empty()) return;
+    int code = 0;
+    std::string inspect_output;
+    std::string logs_output;
+    const std::string inspect_cmd =
+        "docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}} "
+        "started={{.State.StartedAt}} finished={{.State.FinishedAt}} image={{.Config.Image}}' " +
+        container_name + " 2>/dev/null";
+    run_shell_command_capture(inspect_cmd, &inspect_output, &code);
+    const std::string logs_cmd = "docker logs --tail 20 " + container_name + " 2>/dev/null || true";
+    run_shell_command_capture(logs_cmd, &logs_output, &code);
+    spdlog::warn(
+        "Container diagnostics [{}] {} inspect={} logs={}",
+        context,
+        container_name,
+        trim_copy(inspect_output),
+        trim_copy(tail_lines(logs_output, 8))
+    );
+}
+
 bool DeploymentOrchestratorService::ensure_satellite_container(
     const std::string& container_name,
     const std::string& image,
@@ -966,12 +1118,13 @@ bool DeploymentOrchestratorService::ensure_satellite_container(
     if (container_name.empty() || image.empty()) return false;
     int code = 0;
 
-    const std::string inspect_running =
-        "docker inspect -f '{{.State.Running}}' " + container_name + " 2>/dev/null | grep -q true";
-    if (run_shell_command(inspect_running, &code) && code == 0) return true;
+    if (wait_for_container_running(container_name)) return true;
 
     const std::string start_cmd = "docker start " + container_name + " >/dev/null 2>&1";
-    if (run_shell_command(start_cmd, &code) && code == 0) return true;
+    if (run_shell_command(start_cmd, &code) && code == 0) {
+        if (wait_for_container_running(container_name)) return true;
+        log_container_diagnostics(container_name, "start_existing_unstable");
+    }
 
     run_shell_command("docker rm -f " + container_name + " >/dev/null 2>&1", &code);
 
@@ -982,10 +1135,12 @@ bool DeploymentOrchestratorService::ensure_satellite_container(
             " --network " + std::string(kSatelliteNetwork) +
             (platform.empty() ? "" : (" --platform " + platform)) +
             (extra_flags.empty() ? "" : (" " + extra_flags)) +
+            " --entrypoint /bin/sh " +
             " " + image +
-            " sh -lc 'trap : TERM INT; while true; do sleep 3600; done'";
+            " -c 'while sleep 3600; do :; done'";
         run_shell_command_capture(run_cmd, &output, &code);
-        return code == 0;
+        if (!(code == 0)) return false;
+        return wait_for_container_running(container_name);
     };
 
     bool started = try_run("--cap-add=NET_ADMIN --device=/dev/net/tun");
@@ -995,10 +1150,12 @@ bool DeploymentOrchestratorService::ensure_satellite_container(
             container_name,
             trim_copy(tail_lines(output, 8))
         );
+        log_container_diagnostics(container_name, "device_mode_failed");
         run_shell_command("docker rm -f " + container_name + " >/dev/null 2>&1", &code);
         started = try_run("--privileged");
     }
     if (!started) {
+        log_container_diagnostics(container_name, "privileged_mode_failed");
         spdlog::warn(
             "Failed to start satellite container {} with image {}: {}",
             container_name,
@@ -1008,8 +1165,7 @@ bool DeploymentOrchestratorService::ensure_satellite_container(
         return false;
     }
 
-    if (run_shell_command(inspect_running, &code) && code == 0) return true;
-    return false;
+    return true;
 }
 
 std::string DeploymentOrchestratorService::inspect_container_ip(const std::string& container_name) const {
@@ -1104,7 +1260,8 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "  level: info\n";
         if (log_name && *log_name) {
             oss << "  file:\n";
-            oss << "    path: /var/log/open5gs/" << log_name << ".log\n";
+            // Use a writable path across heterogeneous Open5GS images.
+            oss << "    path: /tmp/open5gs/" << log_name << ".log\n";
         }
         oss << "global:\n";
         oss << "  max:\n";
@@ -1206,7 +1363,8 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "  pfcp:\n";
         oss << "    server:\n";
         oss << "      - address: " << local_ip << "\n";
-        oss << "        port: 8806\n";
+        // Keep SMF PFCP on the 3GPP-default port to avoid association/heartbeat mismatch.
+        oss << "        port: 8805\n";
         oss << "    client:\n";
         oss << "      upf:\n";
         oss << "        - address: " << (upf_ip.empty() ? local_ip : upf_ip) << "\n";
@@ -1382,7 +1540,7 @@ bool DeploymentOrchestratorService::write_config_to_container(
     int code = 0;
     const std::string nf = normalize_nf_type(nf_type);
     const std::string config_in_container = "/tmp/open5gs/" + nf + ".yaml";
-    const std::string mkdir_cmd = "docker exec " + container_name + " sh -lc 'mkdir -p /tmp/open5gs'";
+    const std::string mkdir_cmd = "docker exec -u 0 " + container_name + " sh -lc 'mkdir -p /tmp/open5gs'";
     if (!(run_shell_command(mkdir_cmd, &code) && code == 0)) return false;
 
     const auto tmp_dir = std::filesystem::temp_directory_path();
@@ -1407,6 +1565,28 @@ bool DeploymentOrchestratorService::write_config_to_container(
     return cp_ok;
 }
 
+std::string DeploymentOrchestratorService::normalize_rendered_nf_config(
+    const std::string& nf_type,
+    const std::string& raw_config
+) const {
+    std::string out = raw_config;
+    if (normalize_nf_type(nf_type) != "smf") {
+        return out;
+    }
+
+    std::size_t pos = 0;
+    bool migrated = false;
+    while ((pos = out.find("port: 8806", pos)) != std::string::npos) {
+        out.replace(pos, std::string("port: 8806").size(), "port: 8805");
+        pos += std::string("port: 8805").size();
+        migrated = true;
+    }
+    if (migrated) {
+        spdlog::warn("Auto-migrated legacy SMF PFCP port 8806->8805 before daemon start");
+    }
+    return out;
+}
+
 bool DeploymentOrchestratorService::start_nf_in_container(
     const std::string& container_name,
     const std::string& nf_type,
@@ -1418,26 +1598,51 @@ bool DeploymentOrchestratorService::start_nf_in_container(
     const std::string config_path = "/tmp/open5gs/" + nf + ".yaml";
     const std::string log_path = "/tmp/open5gs/" + daemon + ".log";
 
-    if (!write_config_to_container(container_name, nf, config_content)) {
+    if (!wait_for_container_running(container_name, 5, 220)) {
+        const std::string restart_cmd = "docker start " + container_name + " >/dev/null 2>&1";
+        int restart_code = 0;
+        run_shell_command(restart_cmd, &restart_code);
+        if (!wait_for_container_running(container_name, 8, 250)) {
+            log_container_diagnostics(container_name, "nf_start_container_not_running");
+            spdlog::warn("Container {} not running before starting {}", container_name, nf);
+            return false;
+        }
+    }
+
+    {
+        int prep_code = 0;
+        const std::string prep_cmd =
+            "docker exec -u 0 " + container_name +
+            " sh -lc 'mkdir -p /tmp/open5gs; chmod 777 /tmp/open5gs >/dev/null 2>&1 || true'";
+        run_shell_command(prep_cmd, &prep_code);
+    }
+
+    const std::string normalized_config = normalize_rendered_nf_config(nf, config_content);
+    if (!write_config_to_container(container_name, nf, normalized_config)) {
+        log_container_diagnostics(container_name, "write_config_failed");
         spdlog::warn("Failed to write config for {} in {}", nf, container_name);
         return false;
     }
 
     if (nf == "upf") {
         if (!setup_upf_dataplane(container_name)) {
-            spdlog::warn("Failed to prepare UPF dataplane in {}", container_name);
-            return false;
+            // Keep UPF start best-effort: some environments (e.g. restricted Docker Desktop)
+            // cannot fully provision kernel dataplane devices but daemon can still come up.
+            spdlog::warn("UPF dataplane setup not ready in {}, continue with daemon start", container_name);
         }
     }
 
     int code = 0;
     std::ostringstream oss;
     oss
-        << "docker exec " << container_name
-        << " sh -lc 'if command -v " << daemon << " >/dev/null 2>&1; then "
+        << "docker exec -u 0 " << container_name
+        << " sh -lc 'DAEMON_BIN=$(command -v " << daemon << " 2>/dev/null || true); "
+        << "if [ -z \"$DAEMON_BIN\" ] && [ -x /opt/open5gs/bin/" << daemon << " ]; then "
+        << "DAEMON_BIN=/opt/open5gs/bin/" << daemon << "; fi; "
+        << "if [ -n \"$DAEMON_BIN\" ]; then "
         << "pkill -x \"" << daemon << "\" >/dev/null 2>&1 || true; "
         << ": > " << log_path << "; "
-        << "nohup " << daemon << " -c " << config_path << " >" << log_path << " 2>&1 & "
+        << "nohup \"$DAEMON_BIN\" -c " << config_path << " >" << log_path << " 2>&1 & "
         << "sleep 1; "
         << "pgrep -x \"" << daemon << "\" >/dev/null 2>&1; "
         << "else "
@@ -1448,7 +1653,7 @@ bool DeploymentOrchestratorService::start_nf_in_container(
 
     std::string log_tail;
     const std::string tail_cmd =
-        "docker exec " + container_name + " sh -lc 'tail -n 80 " + log_path + " 2>/dev/null || true'";
+        "docker exec -u 0 " + container_name + " sh -lc 'tail -n 80 " + log_path + " 2>/dev/null || true'";
     run_shell_command_capture(tail_cmd, &log_tail, &code);
     spdlog::warn(
         "Failed to start {} in {} (nf={}): {}",
@@ -1464,7 +1669,7 @@ bool DeploymentOrchestratorService::ensure_container_tun_device(const std::strin
     if (container_name.empty()) return false;
     int code = 0;
     const std::string cmd =
-        "docker exec " + container_name +
+        "docker exec -u 0 " + container_name +
         " sh -lc 'mkdir -p /dev/net; "
         "if [ ! -c /dev/net/tun ]; then mknod /dev/net/tun c 10 200 >/dev/null 2>&1 || true; fi; "
         "chmod 666 /dev/net/tun >/dev/null 2>&1 || true; "
@@ -1482,7 +1687,7 @@ bool DeploymentOrchestratorService::setup_upf_dataplane(const std::string& conta
 
     int code = 0;
     const std::string cmd =
-        "docker exec " + container_name +
+        "docker exec -u 0 " + container_name +
         " sh -lc '"
         "set -e; "
         "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; "
@@ -1503,7 +1708,7 @@ bool DeploymentOrchestratorService::setup_upf_dataplane(const std::string& conta
     if (code != 0) {
         std::string debug;
         run_shell_command_capture(
-            "docker exec " + container_name +
+            "docker exec -u 0 " + container_name +
                 " sh -lc 'ip -o link show ogstun 2>/dev/null || true; ip addr show ogstun 2>/dev/null || true; "
                 "iptables -t nat -S 2>/dev/null | tail -n 30 || true'",
             &debug,
@@ -1616,6 +1821,55 @@ bool DeploymentOrchestratorService::check_nrf_registration(
         join_sorted(wanted),
         join_sorted(last_found),
         trim_copy(tail_lines(last_probe_output, 20))
+    );
+    return false;
+}
+
+bool DeploymentOrchestratorService::check_smf_upf_pfcp_ready(
+    const std::string& smf_container,
+    const std::string& upf_container,
+    int timeout_seconds
+) const {
+    if (smf_container.empty() || upf_container.empty()) return false;
+    timeout_seconds = std::max(1, timeout_seconds);
+
+    int code = 0;
+    auto has_pfcp_associated = [&](const std::string& container, const std::string& daemon) -> bool {
+        const std::string log_path = "/tmp/open5gs/" + daemon + ".log";
+        const std::string cmd =
+            "docker exec -u 0 " + container +
+            " sh -lc 'test -f " + log_path + " && grep -q \"PFCP associated\" " + log_path + "'";
+        run_shell_command(cmd, &code);
+        return code == 0;
+    };
+
+    for (int i = 0; i < timeout_seconds; ++i) {
+        const bool smf_ok = has_pfcp_associated(smf_container, "open5gs-smfd");
+        const bool upf_ok = has_pfcp_associated(upf_container, "open5gs-upfd");
+        if (smf_ok && upf_ok) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    std::string smf_tail;
+    std::string upf_tail;
+    run_shell_command_capture(
+        "docker exec -u 0 " + smf_container + " sh -lc 'tail -n 80 /tmp/open5gs/open5gs-smfd.log 2>/dev/null || true'",
+        &smf_tail,
+        &code
+    );
+    run_shell_command_capture(
+        "docker exec -u 0 " + upf_container + " sh -lc 'tail -n 80 /tmp/open5gs/open5gs-upfd.log 2>/dev/null || true'",
+        &upf_tail,
+        &code
+    );
+    spdlog::warn(
+        "PFCP association not ready between SMF={} and UPF={} smf_tail={} upf_tail={}",
+        smf_container,
+        upf_container,
+        trim_copy(tail_lines(smf_tail, 10)),
+        trim_copy(tail_lines(upf_tail, 10))
     );
     return false;
 }
