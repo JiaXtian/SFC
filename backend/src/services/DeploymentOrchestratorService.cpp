@@ -612,6 +612,10 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     const std::string scp_ip = (!scp_node.empty() && node_ip_by_id.count(scp_node))
         ? node_ip_by_id[scp_node]
         : "";
+    const bool smf_upf_colocated =
+        !smf_node.empty() &&
+        !upf_node.empty() &&
+        smf_node == upf_node;
     const std::string nrf_uri = nrf_ip.empty()
         ? ""
         : ("http://" + nrf_ip + ":" + std::to_string(sbi_port_for_nf_type("nrf")));
@@ -636,9 +640,10 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
                 nrf_uri,
                 upf_ip.empty() ? local_ip : upf_ip,
                 kMongoUri,
-                scp_uri
+                scp_uri,
+                smf_upf_colocated
             );
-            if (start_nf_in_container(container_name, nf, cfg)) {
+            if (start_nf_in_container(container_name, nf, cfg, smf_upf_colocated)) {
                 running_nfs.push_back(nf);
                 started_nfs_set.insert(nf);
                 core_nfs_running += 1;
@@ -1248,7 +1253,8 @@ std::string DeploymentOrchestratorService::render_nf_config(
     const std::string& nrf_uri,
     const std::string& upf_ip,
     const std::string& mongo_uri,
-    const std::string& scp_uri
+    const std::string& scp_uri,
+    bool smf_upf_colocated
 ) const {
     const std::string nf = normalize_nf_type(nf_type);
     const int sbi_port = sbi_port_for_nf_type(nf);
@@ -1354,6 +1360,7 @@ std::string DeploymentOrchestratorService::render_nf_config(
 
     if (nf == "smf") {
         append_common_header(oss, "smf");
+        const int smf_pfcp_server_port = smf_upf_colocated ? 8806 : 8805;
         oss << "smf:\n";
         oss << "  sbi:\n";
         oss << "    server:\n";
@@ -1363,8 +1370,8 @@ std::string DeploymentOrchestratorService::render_nf_config(
         oss << "  pfcp:\n";
         oss << "    server:\n";
         oss << "      - address: " << local_ip << "\n";
-        // Keep SMF PFCP on the 3GPP-default port to avoid association/heartbeat mismatch.
-        oss << "        port: 8805\n";
+        // If SMF and UPF are collocated, move SMF PFCP to 8806 to avoid local bind collision.
+        oss << "        port: " << smf_pfcp_server_port << "\n";
         oss << "    client:\n";
         oss << "      upf:\n";
         oss << "        - address: " << (upf_ip.empty() ? local_ip : upf_ip) << "\n";
@@ -1567,22 +1574,36 @@ bool DeploymentOrchestratorService::write_config_to_container(
 
 std::string DeploymentOrchestratorService::normalize_rendered_nf_config(
     const std::string& nf_type,
-    const std::string& raw_config
+    const std::string& raw_config,
+    bool smf_upf_colocated
 ) const {
     std::string out = raw_config;
     if (normalize_nf_type(nf_type) != "smf") {
         return out;
     }
 
-    std::size_t pos = 0;
-    bool migrated = false;
-    while ((pos = out.find("port: 8806", pos)) != std::string::npos) {
-        out.replace(pos, std::string("port: 8806").size(), "port: 8805");
-        pos += std::string("port: 8805").size();
-        migrated = true;
+    const int expected_port = smf_upf_colocated ? 8806 : 8805;
+    const std::size_t pfcp_anchor = out.find("pfcp:\n    server:\n");
+    if (pfcp_anchor == std::string::npos) {
+        return out;
     }
-    if (migrated) {
-        spdlog::warn("Auto-migrated legacy SMF PFCP port 8806->8805 before daemon start");
+    const std::size_t port_pos = out.find("port:", pfcp_anchor);
+    if (port_pos == std::string::npos) {
+        return out;
+    }
+    const std::size_t line_end = out.find('\n', port_pos);
+    if (line_end == std::string::npos) {
+        return out;
+    }
+    const std::string expected = "port: " + std::to_string(expected_port);
+    const std::string current = trim_copy(out.substr(port_pos, line_end - port_pos));
+    if (current != expected) {
+        out.replace(port_pos, line_end - port_pos, expected);
+        spdlog::warn(
+            "Auto-migrated SMF PFCP server port to {} (smf_upf_colocated={}) before daemon start",
+            expected_port,
+            smf_upf_colocated
+        );
     }
     return out;
 }
@@ -1590,7 +1611,8 @@ std::string DeploymentOrchestratorService::normalize_rendered_nf_config(
 bool DeploymentOrchestratorService::start_nf_in_container(
     const std::string& container_name,
     const std::string& nf_type,
-    const std::string& config_content
+    const std::string& config_content,
+    bool smf_upf_colocated
 ) {
     if (container_name.empty() || nf_type.empty()) return false;
     const std::string nf = normalize_nf_type(nf_type);
@@ -1617,7 +1639,7 @@ bool DeploymentOrchestratorService::start_nf_in_container(
         run_shell_command(prep_cmd, &prep_code);
     }
 
-    const std::string normalized_config = normalize_rendered_nf_config(nf, config_content);
+    const std::string normalized_config = normalize_rendered_nf_config(nf, config_content, smf_upf_colocated);
     if (!write_config_to_container(container_name, nf, normalized_config)) {
         log_container_diagnostics(container_name, "write_config_failed");
         spdlog::warn("Failed to write config for {} in {}", nf, container_name);

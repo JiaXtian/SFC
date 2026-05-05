@@ -108,7 +108,8 @@ class DeploymentOrchestratorService {
     ) const;
     std::string normalize_rendered_nf_config(
         const std::string& nf_type,
-        const std::string& raw_config
+        const std::string& raw_config,
+        bool smf_upf_colocated
     ) const;
     std::string render_nf_config(
         const std::string& nf_type,
@@ -116,7 +117,8 @@ class DeploymentOrchestratorService {
         const std::string& nrf_uri,
         const std::string& upf_ip,
         const std::string& mongo_uri,
-        const std::string& scp_uri
+        const std::string& scp_uri,
+        bool smf_upf_colocated
     ) const;
     std::string daemon_for_nf_type(const std::string& nf_type) const;
     std::string nf_type_to_3gpp(const std::string& nf_type) const;
@@ -126,7 +128,8 @@ class DeploymentOrchestratorService {
     bool start_nf_in_container(
         const std::string& container_name,
         const std::string& nf_type,
-        const std::string& config_content
+        const std::string& config_content,
+        bool smf_upf_colocated
     );
     bool ensure_container_tun_device(const std::string& container_name) const;
     bool setup_upf_dataplane(const std::string& container_name) const;

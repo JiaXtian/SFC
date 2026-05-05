@@ -5,6 +5,7 @@ Thumbs.db
 .idea/
 .run/
 data/
+docs/
 
 # Python
 __pycache__/
