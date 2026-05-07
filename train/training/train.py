@@ -43,6 +43,14 @@ class HeuristicPruner:
         self.top_m = int(max(16, top_m))
         self.fast_prefilter_limit = max(96, self.top_m * 3)
 
+    def _prefilter_limit(self, graph_size, top_m):
+        top_m = int(max(16, top_m))
+        if graph_size >= 4000:
+            return min(self.fast_prefilter_limit, max(top_m + 24, int(top_m * 1.35)))
+        if graph_size >= 2000:
+            return min(self.fast_prefilter_limit, max(top_m + 36, int(top_m * 1.65)))
+        return self.fast_prefilter_limit
+
     @staticmethod
     def _nf_type(vnf: dict) -> str:
         return str(vnf.get("nf_type", vnf.get("core_nf_type", vnf.get("vnf_type", "")))).lower().replace("-", "_").replace(" ", "_")
@@ -195,12 +203,16 @@ class HeuristicPruner:
             )
             fast_candidates.append((node_id, float(fast_score), projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty))
 
-        fast_candidates.sort(key=lambda item: item[1])
+        if not fast_candidates:
+            return []
         if not deployed_by_type:
-            return [node for node, *_ in fast_candidates[: int(top_m)]]
+            best_fast = heapq.nsmallest(int(top_m), fast_candidates, key=lambda item: item[1])
+            return [node for node, *_ in best_fast]
 
         candidates = []
-        for node_id, _fast_score, projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty in fast_candidates[: self.fast_prefilter_limit]:
+        prefilter_limit = min(len(fast_candidates), self._prefilter_limit(len(G), top_m))
+        best_fast = heapq.nsmallest(prefilter_limit, fast_candidates, key=lambda item: item[1])
+        for node_id, _fast_score, projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty in best_fast:
             dep_score = self._score_dependency_paths(G, node_id, nf_type, deployed_by_type, dependencies, int(max_dependency_hops))
             if dep_score is None:
                 continue
@@ -353,9 +365,12 @@ def _is_request_file_compatible(req_file, topo_nodes, sample_limit=24):
         if not requests:
             return False
         for r in requests[:sample_limit]:
-            core_nfs = r.get("core_nfs", [])
-            deps = r.get("core_nf_dependencies", [])
-            if len(core_nfs) != len(CORE_NF_TYPES) or not deps:
+            core_nfs = r.get("core_nfs", r.get("core_nf_sequence", r.get("vnf_sequence", [])))
+            if core_nfs and len(core_nfs) not in {len(CORE_NF_TYPES), 0}:
+                # Older partial-chain files are still usable because the
+                # environment now completes missing open5gs NFs deterministically.
+                continue
+            if not isinstance(r, dict):
                 return False
         return True
     except Exception:
@@ -392,8 +407,36 @@ def _build_scale_balanced_data(train_topos, train_reqs):
             if idx < len(bucket):
                 balanced.append(bucket[idx])
     if skipped > 0:
-        print(f"训练数据过滤: 跳过 {skipped} 个与拓扑不兼容的请求文件")
+        print(f"训练数据过滤: 跳过 {skipped} 个空文件或无法读取的请求文件")
     return balanced
+
+
+def _training_quality_score(metrics):
+    """Scale-independent checkpoint score.
+
+    Raw algorithm latency grows with topology size, so using it directly made
+    warmup epochs look better than full-scale epochs.  This score emphasizes
+    deployment quality and only applies a bounded speed term.
+    """
+    success = float(metrics.get("success_rate", 0.0))
+    full_sla = float(metrics.get("full_sla_satisfaction_rate", metrics.get("sla_satisfaction_rate", 0.0)))
+    dep = float(metrics.get("dependency_satisfaction_rate", 0.0))
+    quality = 100.0 * float(metrics.get("avg_quality_score", 0.0))
+    resource = 100.0 * float(metrics.get("resource_balance_score", 0.0))
+    business = 100.0 * float(metrics.get("business_balance_score", 0.0))
+    link_good = 100.0 * (1.0 - float(metrics.get("link_congestion_score", 0.0)))
+    alg_latency = float(metrics.get("avg_algorithm_latency_ms", 0.0))
+    speed = 100.0 * max(0.0, 1.0 - min(1.0, alg_latency / 500.0))
+    return (
+        0.24 * success
+        + 0.18 * full_sla
+        + 0.10 * dep
+        + 0.22 * quality
+        + 0.10 * resource
+        + 0.08 * business
+        + 0.05 * link_good
+        + 0.03 * speed
+    )
 
 
 def main():
@@ -406,8 +449,8 @@ def main():
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
     parser.add_argument("--max_data_files", type=int, default=10, help="每个epoch最多使用的训练文件数，0表示全部")
     parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
-    parser.add_argument("--time_budget_hours", type=float, default=4.0, help="训练时间预算(小时)，0表示不限制")
-    parser.add_argument("--min_epochs", type=int, default=25, help="触发时间预算早停前至少训练轮次")
+    parser.add_argument("--time_budget_hours", type=float, default=0.0, help="保留兼容参数；当前训练不按时间预算早停")
+    parser.add_argument("--min_epochs", type=int, default=0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--rel_curr_start_epoch", type=int, default=1, help="可靠性课程学习起始epoch")
     parser.add_argument("--rel_curr_end_epoch", type=int, default=32, help="可靠性课程学习结束epoch（到达严格约束）")
     parser.add_argument("--rel_curr_min_scale", type=float, default=0.75, help="课程学习初始可靠性缩放系数")
@@ -543,22 +586,21 @@ def main():
         )
         history.append(epoch_metrics)
 
-        composite_score = (
-            epoch_metrics["success_rate"] * 0.45
-            + epoch_metrics["sla_satisfaction_rate"] * 0.35
-            + epoch_metrics.get("full_sla_satisfaction_rate", 0.0) * 0.25
-            - epoch_metrics["avg_algorithm_latency_ms"] * 0.15
-            - epoch_metrics["avg_episode_delay_ms"] * 0.05
-        )
+        composite_score = _training_quality_score(epoch_metrics)
+        if epoch == args.warmup_epochs + 1:
+            best_score = -1e9
+            print("  ℹ 进入完整规模训练阶段，重置最佳模型评分基准")
         total_req = int(epoch_metrics.get("total_requests", 0))
         fail_count = int(max(0, round(total_req * (100.0 - float(epoch_metrics["success_rate"])) / 100.0)))
         print(
             f"Epoch {epoch} | Score={composite_score:.2f} | Reward={epoch_metrics['avg_reward']:.2f} | "
+            f"Quality={epoch_metrics.get('avg_quality_score', 0.0):.3f} | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
             f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"
         )
 
-        if composite_score > best_score:
+        eligible_for_best = epoch > args.warmup_epochs or best_score <= -1e8
+        if eligible_for_best and composite_score > best_score:
             best_score = composite_score
             best_success_rate = max(best_success_rate, epoch_metrics["success_rate"])
             agent.save("models/checkpoints/model_best.pth")
@@ -583,13 +625,21 @@ def main():
             # 1) 失败模式驱动的动作
             top_fails = dict(epoch_metrics.get("top_failure_reasons", []))
             max_step_fail = top_fails.get("max_steps_reached", 0)
+            no_candidate_fail = top_fails.get("no_candidates", 0) + top_fails.get("invalid_candidates", 0)
             if max_step_fail > 0.5 * max(1, epoch_metrics.get("total_requests", 1)):
                 heuristic.top_m = min(120, heuristic.top_m + 5)
                 epsilon = max(epsilon, 0.22)
+            if no_candidate_fail > 0:
+                heuristic.top_m = min(120, heuristic.top_m + 8)
+                epsilon = max(epsilon, 0.20)
 
             # 2) 时延优化：在成功率较高时收紧候选规模，提高推理速度
-            if epoch_metrics["success_rate"] > 55.0 and epoch_metrics["avg_algorithm_latency_ms"] > 140:
-                heuristic.top_m = max(45, heuristic.top_m - 5)
+            if (
+                epoch_metrics["success_rate"] >= 99.0
+                and epoch_metrics["avg_algorithm_latency_ms"] > 300
+                and no_candidate_fail == 0
+            ):
+                heuristic.top_m = max(64, heuristic.top_m - 4)
 
             # 3) 崩塌保护：成功率明显低于历史最佳时触发
             collapse_threshold = max(10.0, best_success_rate * 0.55)
@@ -641,16 +691,12 @@ def main():
             critic_scheduler.step()
         epsilon = max(0.02, epsilon * 0.985)
 
-        if args.time_budget_hours > 0 and epoch >= args.min_epochs:
-            elapsed_hours = (time.time() - start_time) / 3600.0
-            avg_epoch_hours = elapsed_hours / max(1, epoch)
-            projected_total_hours = avg_epoch_hours * args.epochs
-            if projected_total_hours > args.time_budget_hours * 1.05:
-                print(
-                    f"  ⚠ 触发时间预算早停: 已训练 {epoch} 轮, "
-                    f"预计总耗时 {projected_total_hours:.2f}h 超过预算 {args.time_budget_hours:.2f}h"
-                )
-                break
+    best_actor_path = "models/checkpoints/model_best.pth"
+    best_gnn_path = "models/checkpoints/gnn_best.pth"
+    if os.path.exists(best_actor_path) and os.path.exists(best_gnn_path):
+        agent.load(best_actor_path, load_optimizer=False)
+        gnn.load_state_dict(torch.load(best_gnn_path, map_location=args.device))
+        print(f"  ✓ 已恢复最佳策略作为最终模型: Score={best_score:.2f}")
 
     agent.save("models/checkpoints/model_final.pth")
     torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")

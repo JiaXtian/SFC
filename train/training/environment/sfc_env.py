@@ -12,9 +12,12 @@ import torch
 
 from training.open5gs_profile import (
     BUSINESS_DIMENSIONS,
+    CORE_NF_RESOURCE_RANGES,
     CORE_NF_TYPES,
     NODE_FEATURE_DIM,
     dependencies_for_request,
+    nf_profile,
+    nf_role,
     normalize_nf_type,
     zero_business_load,
 )
@@ -39,9 +42,10 @@ class SFCEnvironment:
         self.shared_resources = bool(shared_resources)
         self.strict_reliability = bool(strict_reliability)
         self.reward_config = reward_config or {
-            "step_success": 0.25,
-            "completion_success": 6.0,
-            "quality_scale": 10.0,
+            "step_success": 0.05,
+            "completion_success": 2.0,
+            "quality_scale": 24.0,
+            "quality_delta_scale": 3.0,
             "resource_fail": -8.0,
             "path_fail": -7.0,
             "sla_fail": -8.0,
@@ -97,7 +101,9 @@ class SFCEnvironment:
 
         self.request = copy.deepcopy(sfc_request)
         self.core_nfs = self._normalize_core_nfs(self.request)
-        self.dependencies = [dict(dep) for dep in self.request.get("core_nf_dependencies", dependencies_for_request())]
+        self.dependencies = self._normalize_dependencies(
+            self.request.get("core_nf_dependencies") or dependencies_for_request()
+        )
         self.current_nf_idx = 0
         self.deployed_nfs = []
         self.deployed_by_type = {}
@@ -115,12 +121,34 @@ class SFCEnvironment:
             return None
         return self._build_state()
 
+    def _default_nf(self, nf_type: str, request_demand: Dict) -> Dict:
+        ranges = CORE_NF_RESOURCE_RANGES.get(nf_type, CORE_NF_RESOURCE_RANGES["amf"])
+        profile = nf_profile(nf_type)
+        midpoint = lambda key: (float(ranges[key][0]) + float(ranges[key][1])) * 0.5
+        bw_req = midpoint("bw")
+        return {
+            "core_nf_id": f"{self.request.get('request_id', 'core')}_{nf_type}",
+            "core_nf_type": nf_type,
+            "nf_type": nf_type,
+            "nf_role": nf_role(nf_type),
+            "stateful": nf_type not in {"scp", "nrf"},
+            "cpu_required": midpoint("cpu"),
+            "mem_required": midpoint("mem"),
+            "disk_required_gb": midpoint("disk"),
+            "bandwidth_required_gbps": bw_req,
+            "business_load_demand": {
+                dim: float(profile.get(dim, 0.0)) * float(request_demand.get(dim, 1.0))
+                for dim in BUSINESS_DIMENSIONS
+            },
+        }
+
     def _normalize_core_nfs(self, request: Dict) -> List[Dict]:
         raw_nfs = request.get("core_nfs", [])
         if not raw_nfs:
             raw_nfs = request.get("core_nf_sequence", request.get("vnf_sequence", []))
 
         nf_by_type = {}
+        request_demand = request.get("business_demand", zero_business_load())
         for idx, nf in enumerate(raw_nfs):
             nf_type = normalize_nf_type(nf.get("nf_type", nf.get("core_nf_type", nf.get("vnf_type", ""))))
             if not nf_type:
@@ -139,7 +167,37 @@ class SFCEnvironment:
                 "bandwidth_required_gbps": bw_req,
                 "business_load_demand": {dim: float(business_load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS},
             }
+        for nf_type in CORE_NF_TYPES:
+            if nf_type not in nf_by_type:
+                nf_by_type[nf_type] = self._default_nf(nf_type, request_demand)
         return [nf_by_type[nf_type] for nf_type in CORE_NF_TYPES if nf_type in nf_by_type]
+
+    def _normalize_dependencies(self, raw_dependencies: List[Dict]) -> List[Dict]:
+        nf_by_type = {nf["nf_type"]: nf for nf in self.core_nfs}
+        request_bw = max([float(nf.get("bandwidth_required_gbps", 0.0)) for nf in self.core_nfs] or [0.0])
+        dependencies = []
+        seen = set()
+        for dep in raw_dependencies or dependencies_for_request():
+            src = normalize_nf_type(dep.get("source"))
+            dst = normalize_nf_type(dep.get("target"))
+            if not src or not dst or src not in nf_by_type or dst not in nf_by_type:
+                continue
+            key = f"{src}->{dst}"
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized = dict(dep)
+            normalized["source"] = src
+            normalized["target"] = dst
+            if float(normalized.get("bandwidth_required_gbps", 0.0)) <= 0.0:
+                src_bw = float(nf_by_type[src].get("bandwidth_required_gbps", 0.0))
+                dst_bw = float(nf_by_type[dst].get("bandwidth_required_gbps", 0.0))
+                base_bw = max(src_bw, dst_bw, request_bw * 0.18, 1e-6)
+                normalized["bandwidth_required_gbps"] = round(
+                    base_bw * float(normalized.get("bandwidth_scale", 0.5)), 4
+                )
+            dependencies.append(normalized)
+        return dependencies or dependencies_for_request()
 
     def _extract_sla(self) -> Dict:
         sla = self.request.get("sla", {}) if self.request else {}
@@ -441,9 +499,14 @@ class SFCEnvironment:
         self.current_nf_idx += 1
 
         done = self.current_nf_idx >= len(self.core_nfs)
+        prev_quality = float(self.last_quality_score)
         quality = self._compute_quality_score()
         self.last_quality_score = quality
-        reward = self.reward_config["step_success"] + 1.2 * (quality - 0.5)
+        reward = (
+            self.reward_config["step_success"]
+            + self.reward_config["quality_delta_scale"] * (quality - prev_quality)
+            + 0.8 * (quality - 0.5)
+        )
         reward -= self._hotspot_penalty(selected_node, nf)
         if done:
             sla = self._extract_sla()

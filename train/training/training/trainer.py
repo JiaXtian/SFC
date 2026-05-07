@@ -434,7 +434,7 @@ class SFCTrainer:
                     candidate_indices,
                     vnf_feat,
                     ctx_feat,
-                    deterministic=True,
+                    deterministic=False,
                 )
 
             action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))

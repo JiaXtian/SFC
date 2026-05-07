@@ -65,6 +65,12 @@ def augment_training_data(
     val_topology_dir.mkdir(parents=True, exist_ok=True)
     val_request_dir.mkdir(parents=True, exist_ok=True)
 
+    # Keep each simulation run self-contained.  Stale request/topology JSON from
+    # older scale settings can otherwise be mixed into the next training pool.
+    for output_dir in (train_topology_dir, train_request_dir, val_topology_dir, val_request_dir):
+        for old_file in output_dir.glob("*.json"):
+            old_file.unlink()
+
     print("\n[1/3] 生成训练拓扑...")
     parsed_scales = _parse_scales(train_scales)
     scale_to_count = _distribute_counts(train_topologies, parsed_scales, scale_distribution)
