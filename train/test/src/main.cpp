@@ -220,7 +220,7 @@ struct ScaleAggregate {
 
 int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
-    std::cout << "  SFC智能编排系统 - C++模型性能验证" << std::endl;
+    std::cout << "  open5gs星座核心网部署 - C++模型性能验证" << std::endl;
     std::cout << "========================================" << std::endl;
 
     Config config = parse_args(argc, argv);
@@ -335,10 +335,9 @@ int main(int argc, char* argv[]) {
             nlohmann::json sfc_json;
             sfc_json["request_id"] = result.request_id;
             sfc_json["service_type"] = request.service_type;
-            sfc_json["source_node"] = request.source_node;
-            sfc_json["destination_node"] = request.destination_node;
             sfc_json["vnf_count"] = request.vnf_sequence.size();
             sfc_json["core_nf_count"] = request.vnf_sequence.size();
+            sfc_json["core_dependency_count"] = request.core_dependencies.size();
             nlohmann::json vnf_types = nlohmann::json::array();
             for (const auto& vnf : request.vnf_sequence) {
                 vnf_types.push_back(vnf.nf_type.empty() ? vnf.vnf_type : vnf.nf_type);
@@ -360,6 +359,7 @@ int main(int argc, char* argv[]) {
             per_sfc.push_back(sfc_json);
 
             if (result.success) {
+                graph = request_graph;
                 topo_success_count += 1;
                 overall_success_count += 1;
                 topo_success_delay += result.total_delay_ms;
@@ -438,7 +438,7 @@ int main(int argc, char* argv[]) {
     std::cout << "成功数: " << overall_success_count << " (" << overall_success_rate << "%)" << std::endl;
     std::cout << "平均成功时延: " << overall_avg_delay << " ms" << std::endl;
     std::cout << "总耗时: " << total_time_ms << " ms" << std::endl;
-    std::cout << "平均每SFC处理时延: " << avg_time_per_sfc << " ms" << std::endl;
+    std::cout << "平均每核心网请求处理时延: " << avg_time_per_sfc << " ms" << std::endl;
     std::cout << "P50 / P95 单请求推理时延: " << overall_p50_ms << " / " << overall_p95_ms << " ms" << std::endl;
     std::cout << "========================================" << std::endl;
     print_top_failure_reasons(overall_failure_reason_counts, "总体失败原因Top:");

@@ -1,4 +1,7 @@
-"""SFC编排环境（完整指标输入 + SLA约束版）"""
+"""open5gs full-core deployment environment."""
+
+from __future__ import annotations
+
 import copy
 import heapq
 from typing import Dict, List, Optional
@@ -7,13 +10,20 @@ import networkx as nx
 import numpy as np
 import torch
 
+from training.open5gs_profile import (
+    BUSINESS_DIMENSIONS,
+    CORE_NF_TYPES,
+    NODE_FEATURE_DIM,
+    dependencies_for_request,
+    normalize_nf_type,
+    zero_business_load,
+)
+
 
 class SFCEnvironment:
-    TARGET_TOTAL_HOPS = 25
-    HARD_TOTAL_HOPS = 30
-    PATH_SOFTENING_EXPONENT = 0.46
-    EXCESS_HOP_RELIABILITY_PENALTY = 0.9988
-    HOP_PENALTY_MS = 2.5
+    """Environment kept under the historical class name for import stability."""
+
+    HOP_PENALTY_MS = 2.0
 
     def __init__(
         self,
@@ -26,308 +36,211 @@ class SFCEnvironment:
         self.device = device
         self.original_topology = copy.deepcopy(topology)
         self.topology = topology
-        self.shared_resources = shared_resources
-        self.strict_reliability = strict_reliability
-
+        self.shared_resources = bool(shared_resources)
+        self.strict_reliability = bool(strict_reliability)
         self.reward_config = reward_config or {
-            "step_success": 12,
-            "sla_bonus": 26,
-            "resource_bonus": 22,
-            "load_balance_bonus": 12,
-            "completion_bonus": 120,
-            "step_penalty": -2,
-            "resource_fail": -45,
-            "delay_fail": -35,
-            "path_fail": -30,
-            "reliability_fail": -40,
-            "hotspot_penalty": -12,
+            "step_success": 0.25,
+            "completion_success": 6.0,
+            "quality_scale": 10.0,
+            "resource_fail": -8.0,
+            "path_fail": -7.0,
+            "sla_fail": -8.0,
+            "hotspot_penalty": -2.2,
+            "fragment_penalty": -1.6,
         }
-
-        self.sfc_request = None
-        self.current_vnf_idx = 0
-        self.prev_node = None
-        self.accumulated_delay = 0.0
-        self.accumulated_reliability = 1.0
+        self.request = None
+        self.core_nfs: List[Dict] = []
+        self.dependencies: List[Dict] = []
+        self.current_nf_idx = 0
+        self.deployed_nfs: List[Dict] = []
+        self.deployed_by_type: Dict[str, Dict] = {}
+        self.request_snapshots: List[Dict] = []
+        self.accumulated_dependency_delay = 0.0
+        self.max_dependency_delay = 0.0
         self.accumulated_hops = 0
-        self.deployed_vnfs = []
-        self.resource_snapshots = []
+        self.min_dependency_reliability = 1.0
+        self.satisfied_dependency_keys = set()
+        self.last_quality_score = 0.0
 
     @staticmethod
-    def _softened_path_reliability(raw_reliability: float, hops: int) -> float:
-        if hops <= 0:
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _estimate_link_reliability(edge_data: Dict) -> float:
+        if int(edge_data.get("link_status", 1)) != 1:
+            return 0.0
+        base = SFCEnvironment._clamp01(edge_data.get("link_reliability", edge_data.get("reliability", 0.98)))
+        bw_total = float(edge_data.get("bandwidth_gbps", 0.0))
+        bw_avail = float(edge_data.get("bandwidth_available_gbps", 0.0))
+        bw_ratio = SFCEnvironment._clamp01(bw_avail / bw_total) if bw_total > 1e-9 else 0.0
+        return SFCEnvironment._clamp01(base * (0.985 + 0.015 * bw_ratio))
+
+    @staticmethod
+    def _path_reliability(topology: nx.DiGraph, path: List[str]) -> float:
+        if len(path) < 2:
             return 1.0
-        raw = max(1e-9, min(1.0, float(raw_reliability)))
-        geometric_mean = raw ** (1.0 / max(1, hops))
-        softened_product = raw ** SFCEnvironment.PATH_SOFTENING_EXPONENT
-        blend = (0.7 * softened_product + 0.3 * geometric_mean) if hops <= 6 else (0.82 * softened_product + 0.18 * geometric_mean)
-        excess_hops = max(0, hops - 6)
-        return float(
-            max(
-                0.0,
-                min(1.0, blend * (SFCEnvironment.EXCESS_HOP_RELIABILITY_PENALTY ** excess_hops)),
-            )
-        )
+        raw = 1.0
+        for i in range(len(path) - 1):
+            raw *= max(1e-9, SFCEnvironment._estimate_link_reliability(topology[path[i]][path[i + 1]]))
+        hops = max(1, len(path) - 1)
+        return float(raw ** (1.0 / hops))
+
+    @staticmethod
+    def _dependency_key(dep: Dict) -> str:
+        return f"{normalize_nf_type(dep.get('source'))}->{normalize_nf_type(dep.get('target'))}"
 
     def reset(self, sfc_request: Dict, reset_resources=None) -> Dict:
         should_reset = reset_resources if reset_resources is not None else (not self.shared_resources)
         if should_reset:
             self.topology = copy.deepcopy(self.original_topology)
 
-        if "vnf_sequence" not in sfc_request and "core_nf_sequence" in sfc_request:
-            sfc_request["vnf_sequence"] = list(sfc_request.get("core_nf_sequence", []))
-        if "vnf_sequence" not in sfc_request and "core_nfs" in sfc_request:
-            derived = []
-            for idx, nf in enumerate(sfc_request.get("core_nfs", [])):
-                bw_req = max(float(nf.get("bw_in", 0.0)), float(nf.get("bw_out", 0.0)))
-                derived.append(
-                    {
-                        "vnf_id": nf.get("core_nf_id", nf.get("name", f"core_nf_{idx}")),
-                        "vnf_type": nf.get("nf_type", nf.get("core_nf_type", "amf")),
-                        "core_nf_id": nf.get("core_nf_id", nf.get("name", f"core_nf_{idx}")),
-                        "core_nf_type": nf.get("core_nf_type", nf.get("nf_type", "amf")),
-                        "nf_type": nf.get("nf_type", nf.get("core_nf_type", "amf")),
-                        "nf_role": nf.get("nf_role", "control_plane"),
-                        "processing_weight": nf.get("processing_weight", 1.0),
-                        "stateful": nf.get("stateful", True),
-                        "cpu_required": nf.get("cpu", 0.0),
-                        "mem_required": nf.get("mem", 0.0),
-                        "disk_required_gb": nf.get("disk", 0.0),
-                        "bandwidth_required_gbps": nf.get("bandwidth_required_gbps", bw_req),
-                    }
-                )
-            sfc_request["vnf_sequence"] = derived
-
-        self.sfc_request = sfc_request
-        self.current_vnf_idx = 0
-        self.prev_node = sfc_request["source_node"]
-        self.accumulated_delay = 0.0
-        self.accumulated_reliability = 1.0
+        self.request = copy.deepcopy(sfc_request)
+        self.core_nfs = self._normalize_core_nfs(self.request)
+        self.dependencies = [dict(dep) for dep in self.request.get("core_nf_dependencies", dependencies_for_request())]
+        self.current_nf_idx = 0
+        self.deployed_nfs = []
+        self.deployed_by_type = {}
+        self.request_snapshots = []
+        self.accumulated_dependency_delay = 0.0
+        self.max_dependency_delay = 0.0
         self.accumulated_hops = 0
-        self.deployed_vnfs = []
-        self.resource_snapshots = []
+        self.min_dependency_reliability = 1.0
+        self.satisfied_dependency_keys = set()
+        self.last_quality_score = 0.0
         return self._build_state()
 
     def get_state(self) -> Optional[Dict]:
-        if self.sfc_request is None:
-            return None
-        if self.current_vnf_idx >= len(self.sfc_request.get("vnf_sequence", [])):
+        if self.request is None or self.current_nf_idx >= len(self.core_nfs):
             return None
         return self._build_state()
 
-    def advance_topology(self, next_topology: nx.DiGraph, reapply_allocations: bool = True) -> Dict:
-        """推进到下一时刻拓扑，并尽量重放已部署资源占用。"""
-        self.topology = copy.deepcopy(next_topology)
-        if self.sfc_request is None:
-            self.original_topology = copy.deepcopy(next_topology)
-            return {"reapplied": 0, "dropped": 0}
+    def _normalize_core_nfs(self, request: Dict) -> List[Dict]:
+        raw_nfs = request.get("core_nfs", [])
+        if not raw_nfs:
+            raw_nfs = request.get("core_nf_sequence", request.get("vnf_sequence", []))
 
-        if self.prev_node not in self.topology.nodes:
-            source = self.sfc_request.get("source_node")
-            self.prev_node = source if source in self.topology.nodes else next(iter(self.topology.nodes), None)
+        nf_by_type = {}
+        for idx, nf in enumerate(raw_nfs):
+            nf_type = normalize_nf_type(nf.get("nf_type", nf.get("core_nf_type", nf.get("vnf_type", ""))))
+            if not nf_type:
+                nf_type = CORE_NF_TYPES[min(idx, len(CORE_NF_TYPES) - 1)]
+            bw_req = max(float(nf.get("bandwidth_required_gbps", 0.0)), float(nf.get("bw_in", 0.0)), float(nf.get("bw_out", 0.0)))
+            business_load = nf.get("business_load_demand", nf.get("business_load_profile", zero_business_load()))
+            nf_by_type[nf_type] = {
+                "core_nf_id": nf.get("core_nf_id", nf.get("vnf_id", nf.get("name", nf_type))),
+                "core_nf_type": nf_type,
+                "nf_type": nf_type,
+                "nf_role": nf.get("nf_role", "user_plane" if nf_type == "upf" else "control_plane"),
+                "stateful": bool(nf.get("stateful", True)),
+                "cpu_required": float(nf.get("cpu_required", nf.get("cpu", 0.0))),
+                "mem_required": float(nf.get("mem_required", nf.get("mem", 0.0))),
+                "disk_required_gb": float(nf.get("disk_required_gb", nf.get("disk", 0.0))),
+                "bandwidth_required_gbps": bw_req,
+                "business_load_demand": {dim: float(business_load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS},
+            }
+        return [nf_by_type[nf_type] for nf_type in CORE_NF_TYPES if nf_type in nf_by_type]
 
-        if not reapply_allocations or not self.deployed_vnfs:
-            self.resource_snapshots = []
-            return {"reapplied": len(self.deployed_vnfs), "dropped": 0}
-
-        valid_allocations = []
-        dropped = 0
-        for alloc in self.deployed_vnfs:
-            node = alloc.get("node")
-            path = alloc.get("path", [])
-            cpu_req = float(alloc.get("cpu_required", 0.0))
-            mem_req = float(alloc.get("mem_required", 0.0))
-            disk_req = float(alloc.get("disk_required_gb", 0.0))
-            bw_req = float(alloc.get("bandwidth_required_gbps", 0.0))
-
-            if node not in self.topology.nodes:
-                dropped += 1
-                continue
-
-            node_data = self.topology.nodes[node]
-            if (
-                float(node_data.get("cpu_available", 0.0)) < cpu_req
-                or float(node_data.get("mem_available", 0.0)) < mem_req
-                or float(node_data.get("disk_available", 0.0)) < disk_req
-            ):
-                dropped += 1
-                continue
-
-            path_ok = True
-            for i in range(len(path) - 1):
-                u, v = path[i], path[i + 1]
-                if not self.topology.has_edge(u, v):
-                    path_ok = False
-                    break
-                edge = self.topology[u][v]
-                if int(edge.get("link_status", 1)) == 0:
-                    path_ok = False
-                    break
-                if float(edge.get("bandwidth_available_gbps", 0.0)) < bw_req:
-                    path_ok = False
-                    break
-
-            if not path_ok:
-                dropped += 1
-                continue
-
-            node_data["cpu_available"] = float(node_data.get("cpu_available", 0.0)) - cpu_req
-            node_data["mem_available"] = float(node_data.get("mem_available", 0.0)) - mem_req
-            node_data["disk_available"] = float(node_data.get("disk_available", 0.0)) - disk_req
-            for i in range(len(path) - 1):
-                u, v = path[i], path[i + 1]
-                self.topology[u][v]["bandwidth_available_gbps"] = (
-                    float(self.topology[u][v].get("bandwidth_available_gbps", 0.0)) - bw_req
-                )
-
-            valid_allocations.append(alloc)
-
-        self.deployed_vnfs = valid_allocations
-        self.resource_snapshots = []
-        return {"reapplied": len(valid_allocations), "dropped": dropped}
-
-    def _extract_sla(self):
-        sla = self.sfc_request.get("sla", {})
-        base_reliability_req = float(
-            sla.get("reliability_requirement", self.sfc_request.get("reliability_requirement", 0.97))
-        )
-        reliability_scale = float(self.sfc_request.get("reliability_scale", 1.0))
-        effective_reliability_req = min(0.999, max(0.0, base_reliability_req * reliability_scale))
-        strict_reliability = bool(self.sfc_request.get("strict_reliability", self.strict_reliability))
-        max_total_hops = int(self.sfc_request.get("max_total_hops", self.TARGET_TOTAL_HOPS))
-        hard_max_total_hops = int(self.sfc_request.get("hard_max_total_hops", self.HARD_TOTAL_HOPS))
-        max_total_hops = max(8, min(self.HARD_TOTAL_HOPS, max_total_hops))
-        hard_max_total_hops = max(max_total_hops, min(64, hard_max_total_hops))
+    def _extract_sla(self) -> Dict:
+        sla = self.request.get("sla", {}) if self.request else {}
         return {
-            "latency_requirement_ms": float(
-                sla.get("latency_requirement_ms", self.sfc_request.get("max_latency_ms", 100.0))
-            ),
-            "bandwidth_demand_gbps": float(
-                sla.get("bandwidth_demand_gbps", self.sfc_request.get("bandwidth_demand_gbps", 0.1))
-            ),
-            "reliability_requirement": effective_reliability_req,
-            "base_reliability_requirement": base_reliability_req,
-            "reliability_scale": reliability_scale,
-            "strict_reliability": strict_reliability,
-            "max_total_hops": max_total_hops,
-            "hard_max_total_hops": hard_max_total_hops,
+            "latency_requirement_ms": float(sla.get("latency_requirement_ms", self.request.get("max_latency_ms", 120.0))),
+            "reliability_requirement": float(sla.get("reliability_requirement", self.request.get("reliability_requirement", 0.82))),
+            "max_dependency_hops": int(sla.get("max_dependency_hops", self.request.get("max_dependency_hops", 16))),
         }
 
     def _build_state(self) -> Dict:
-        vnf = self.sfc_request["vnf_sequence"][self.current_vnf_idx]
+        nf = self.core_nfs[self.current_nf_idx]
         sla = self._extract_sla()
-        remaining_delay = sla["latency_requirement_ms"] - self.accumulated_delay
-        remaining_reliability_margin = self.accumulated_reliability - sla["reliability_requirement"]
-
+        relevant_deps = self._dependencies_touching(nf["nf_type"])
+        already_open = [
+            dep for dep in relevant_deps
+            if normalize_nf_type(dep["source"]) in self.deployed_by_type or normalize_nf_type(dep["target"]) in self.deployed_by_type
+        ]
         return {
             "topology": self.topology,
-            "vnf": vnf,
-            "prev_node": self.prev_node,
-            "dest_node": self.sfc_request["destination_node"],
-            "remaining_delay": remaining_delay,
-            "current_vnf_idx": self.current_vnf_idx,
-            "total_vnfs": len(self.sfc_request["vnf_sequence"]),
-            "accumulated_delay": self.accumulated_delay,
-            "accumulated_reliability": self.accumulated_reliability,
+            "core_nf": nf,
+            "vnf": nf,
+            "current_nf_idx": self.current_nf_idx,
+            "current_vnf_idx": self.current_nf_idx,
+            "total_core_nfs": len(self.core_nfs),
+            "total_vnfs": len(self.core_nfs),
+            "deployed_nfs": list(self.deployed_nfs),
+            "deployed_by_type": dict(self.deployed_by_type),
+            "dependencies": self.dependencies,
+            "open_dependencies_for_current": len(already_open),
+            "critical_open_dependencies_for_current": sum(1 for dep in already_open if float(dep.get("criticality", 0.0)) >= 0.85),
+            "satisfied_dependencies": len(self.satisfied_dependency_keys),
+            "total_dependencies": len(self.dependencies),
+            "accumulated_dependency_delay": self.accumulated_dependency_delay,
+            "max_dependency_delay": self.max_dependency_delay,
             "accumulated_hops": int(self.accumulated_hops),
-            "remaining_reliability_margin": remaining_reliability_margin,
-            "core_business_load": self.sfc_request.get(
-                "core_business_load",
-                {
-                    "signaling_load": 0.5,
-                    "session_load": 0.5,
-                    "user_plane_load": 0.5,
-                    "mobility_load": 0.5,
-                    "policy_load": 0.5,
-                    "auth_load": 0.5,
-                },
-            ),
-            "bandwidth_demand_gbps": sla["bandwidth_demand_gbps"],
+            "min_dependency_reliability": self.min_dependency_reliability,
+            "remaining_delay": sla["latency_requirement_ms"] - self.accumulated_dependency_delay,
+            "latency_requirement_ms": sla["latency_requirement_ms"],
             "reliability_requirement": sla["reliability_requirement"],
-            "base_reliability_requirement": sla["base_reliability_requirement"],
-            "reliability_scale": sla["reliability_scale"],
-            "strict_reliability": sla["strict_reliability"],
-            "max_total_hops": int(sla["max_total_hops"]),
-            "hard_max_total_hops": int(sla["hard_max_total_hops"]),
+            "max_dependency_hops": sla["max_dependency_hops"],
+            "business_demand": self.request.get("business_demand", zero_business_load()),
         }
 
-    def _save_resource_snapshot(self, selected_node: str, path_to_node: List[str]):
-        node_data = self.topology.nodes[selected_node]
-        snapshot = {
-            "node": selected_node,
-            "cpu": node_data.get("cpu_available", 0.0),
-            "mem": node_data.get("mem_available", 0.0),
-            "disk": node_data.get("disk_available", 0.0),
-            "links": [],
-        }
-        for i in range(len(path_to_node) - 1):
-            u, v = path_to_node[i], path_to_node[i + 1]
-            edge_data = self.topology[u][v]
-            snapshot["links"].append(
+    def _dependencies_touching(self, nf_type: str) -> List[Dict]:
+        nf_type = normalize_nf_type(nf_type)
+        return [
+            dep for dep in self.dependencies
+            if normalize_nf_type(dep.get("source")) == nf_type or normalize_nf_type(dep.get("target")) == nf_type
+        ]
+
+    def _new_dependencies_for_nf(self, nf_type: str, selected_node: str) -> List[Dict]:
+        nf_type = normalize_nf_type(nf_type)
+        paths = []
+        sla = self._extract_sla()
+        for dep in self._dependencies_touching(nf_type):
+            key = self._dependency_key(dep)
+            if key in self.satisfied_dependency_keys:
+                continue
+            src_type = normalize_nf_type(dep.get("source"))
+            dst_type = normalize_nf_type(dep.get("target"))
+            if src_type == nf_type and dst_type in self.deployed_by_type:
+                src_node = selected_node
+                dst_node = self.deployed_by_type[dst_type]["node"]
+            elif dst_type == nf_type and src_type in self.deployed_by_type:
+                src_node = self.deployed_by_type[src_type]["node"]
+                dst_node = selected_node
+            else:
+                continue
+            bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
+            path, delay, rel, hops, bottleneck = self._find_constrained_path(
+                src_node, dst_node, bw_req=bw_req, max_hops=sla["max_dependency_hops"]
+            )
+            if not path:
+                return []
+            paths.append(
                 {
-                    "u": u,
-                    "v": v,
-                    "bw": edge_data.get("bandwidth_available_gbps", 0.0),
+                    "dependency": dep,
+                    "key": key,
+                    "path": path,
+                    "delay_ms": delay,
+                    "reliability": rel,
+                    "hops": hops,
+                    "bottleneck_bw": bottleneck,
+                    "bandwidth_required_gbps": bw_req,
                 }
             )
-        self.resource_snapshots.append(snapshot)
+        return paths
 
-    def _rollback_resources(self):
-        for snapshot in self.resource_snapshots:
-            node = snapshot["node"]
-            if node not in self.topology.nodes:
-                continue
-            self.topology.nodes[node]["cpu_available"] = snapshot["cpu"]
-            self.topology.nodes[node]["mem_available"] = snapshot["mem"]
-            self.topology.nodes[node]["disk_available"] = snapshot["disk"]
-
-            for link in snapshot["links"]:
-                if self.topology.has_edge(link["u"], link["v"]):
-                    self.topology[link["u"]][link["v"]]["bandwidth_available_gbps"] = link["bw"]
-
-    @staticmethod
-    def _path_reliability(topology: nx.DiGraph, path: List[str]):
-        if len(path) < 2:
-            return 1.0
-        raw_product = 1.0
-        for i in range(len(path) - 1):
-            edge_data = topology[path[i]][path[i + 1]]
-            raw_product *= max(1e-9, SFCEnvironment._estimate_link_reliability(edge_data))
-        return SFCEnvironment._softened_path_reliability(raw_product, len(path) - 1)
-
-    @staticmethod
-    def _estimate_link_reliability(edge_data: Dict) -> float:
-        if int(edge_data.get("link_status", 1)) != 1:
-            return 0.0
-        status = str(edge_data.get("status", "active")).lower()
-        if status == "down":
-            return 0.0
-        base = max(0.0, min(1.0, float(edge_data.get("link_reliability", edge_data.get("reliability", 0.98)))))
-        bw_total = float(edge_data.get("bandwidth_gbps", 0.0))
-        bw_avail = float(edge_data.get("bandwidth_available_gbps", 0.0))
-        bw_ratio = max(0.0, min(1.0, bw_avail / bw_total)) if bw_total > 1e-9 else 0.0
-        bandwidth_factor = 0.98 + 0.02 * bw_ratio
-        status_penalty = 0.985 if status == "congested" else 1.0
-        return max(0.0, min(1.0, base * bandwidth_factor * status_penalty))
-
-    def _find_constrained_path(
-        self,
-        source: str,
-        target: str,
-        bw_req: float,
-        max_hops: int,
-    ) -> List[str]:
+    def _find_constrained_path(self, source: str, target: str, bw_req: float, max_hops: int):
         if source == target:
-            return [source]
+            return [source], 0.0, 1.0, 0, float("inf")
         if source not in self.topology.nodes or target not in self.topology.nodes:
-            return []
+            return [], float("inf"), 0.0, 0, 0.0
 
         dist = {source: 0.0}
         latency = {source: 0.0}
         hops = {source: 0}
-        reliability = {source: 1.0}
+        rel_raw = {source: 1.0}
+        bottleneck = {source: float("inf")}
         prev = {}
         pq = [(0.0, source)]
-
         while pq:
             cur_cost, u = heapq.heappop(pq)
             if cur_cost > dist.get(u, float("inf")) + 1e-9:
@@ -345,343 +258,333 @@ class SFCEnvironment:
                     continue
                 next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
                 next_cost = next_latency + self.HOP_PENALTY_MS * next_hops
-                edge_rel = max(1e-9, self._estimate_link_reliability(edge))
-                next_rel = reliability[u] * edge_rel
-
-                old_cost = dist.get(v, float("inf"))
-                old_latency = latency.get(v, float("inf"))
-                old_rel = reliability.get(v, 0.0)
-                should_update = (
-                    next_cost + 1e-9 < old_cost
-                    or (
-                        abs(next_cost - old_cost) <= 1e-9
-                        and (
-                            next_latency + 1e-9 < old_latency
-                            or (abs(next_latency - old_latency) <= 1e-9 and next_rel > old_rel + 1e-9)
-                        )
-                    )
-                )
-                if not should_update:
+                next_rel = rel_raw[u] * max(1e-9, self._estimate_link_reliability(edge))
+                old = dist.get(v, float("inf"))
+                if next_cost + 1e-9 >= old:
                     continue
-
                 dist[v] = next_cost
                 latency[v] = next_latency
                 hops[v] = next_hops
-                reliability[v] = next_rel
+                rel_raw[v] = next_rel
+                bottleneck[v] = min(bottleneck[u], float(edge.get("bandwidth_available_gbps", 0.0)))
                 prev[v] = u
                 heapq.heappush(pq, (next_cost, v))
 
         if target not in prev:
-            return []
-
+            return [], float("inf"), 0.0, 0, 0.0
         path = [target]
         while path[-1] != source:
             p = prev.get(path[-1])
             if p is None:
-                return []
+                return [], float("inf"), 0.0, 0, 0.0
             path.append(p)
         path.reverse()
-        return path
+        hop_count = len(path) - 1
+        rel = float(max(0.0, min(1.0, rel_raw.get(target, 1.0) ** (1.0 / max(1, hop_count)))))
+        return path, float(latency.get(target, 0.0)), rel, hop_count, float(bottleneck.get(target, 0.0))
 
-    def step(self, selected_node: str, path_to_node: List[str], path_delay: float):
-        vnf = self.sfc_request["vnf_sequence"][self.current_vnf_idx]
+    def plan_candidate(self, selected_node: str) -> Optional[Dict]:
+        if self.current_nf_idx >= len(self.core_nfs):
+            return None
+        nf = self.core_nfs[self.current_nf_idx]
+        if selected_node not in self.topology.nodes:
+            return None
+        node = self.topology.nodes[selected_node]
+        if (
+            float(node.get("cpu_available", 0.0)) + 1e-9 < float(nf["cpu_required"])
+            or float(node.get("mem_available", 0.0)) + 1e-9 < float(nf["mem_required"])
+            or float(node.get("disk_available", 0.0)) + 1e-9 < float(nf["disk_required_gb"])
+        ):
+            return None
+        dep_paths = self._new_dependencies_for_nf(nf["nf_type"], selected_node)
+        if dep_paths == [] and any(
+            (
+                normalize_nf_type(dep.get("source")) == nf["nf_type"] and normalize_nf_type(dep.get("target")) in self.deployed_by_type
+            )
+            or (
+                normalize_nf_type(dep.get("target")) == nf["nf_type"] and normalize_nf_type(dep.get("source")) in self.deployed_by_type
+            )
+            for dep in self._dependencies_touching(nf["nf_type"])
+        ):
+            return None
+
+        total_delay = sum(float(p["delay_ms"]) * float(p["dependency"].get("latency_weight", 1.0)) for p in dep_paths)
+        max_delay = max([float(p["delay_ms"]) for p in dep_paths] or [0.0])
+        total_hops = sum(int(p["hops"]) for p in dep_paths)
+        min_rel = min([float(p["reliability"]) for p in dep_paths] or [1.0])
+        bottleneck = min([float(p["bottleneck_bw"]) for p in dep_paths] or [float("inf")])
+        node_load_after = self._project_node_business_load(node, nf)
+        node_business_pressure = max(node_load_after.values()) if node_load_after else 0.0
+        projected_delay = self.accumulated_dependency_delay + total_delay
         sla = self._extract_sla()
+        if projected_delay > sla["latency_requirement_ms"] * 1.08:
+            return None
+        score = (
+            total_delay
+            + 1.8 * total_hops
+            + 16.0 * max(0.0, node_business_pressure - 0.72)
+            + 4.0 * float(node.get("deployed_core_nf_count", 0))
+            - 1.5 * min(1.0, bottleneck / max(float(nf["bandwidth_required_gbps"]), 1e-6))
+        )
+        return {
+            "dependency_paths": dep_paths,
+            "path_delay_ms": total_delay,
+            "max_dependency_delay_ms": max_delay,
+            "path_hops": total_hops,
+            "min_dependency_reliability": min_rel,
+            "bottleneck_bw": bottleneck,
+            "score": float(score),
+        }
 
+    def _project_node_business_load(self, node: Dict, nf: Dict) -> Dict[str, float]:
+        current = node.get("core_business_load", {})
+        return {
+            dim: self._clamp01(float(current.get(dim, node.get(dim, 0.0))) + float(nf["business_load_demand"].get(dim, 0.0)))
+            for dim in BUSINESS_DIMENSIONS
+        }
+
+    def _save_snapshot(self, selected_node: str, dependency_paths: List[Dict]):
+        node = self.topology.nodes[selected_node]
+        snapshot = {
+            "node": selected_node,
+            "node_attrs": {
+                "cpu_available": float(node.get("cpu_available", 0.0)),
+                "mem_available": float(node.get("mem_available", 0.0)),
+                "disk_available": float(node.get("disk_available", 0.0)),
+                "core_business_load": dict(node.get("core_business_load", zero_business_load())),
+                "deployed_core_nf_count": int(node.get("deployed_core_nf_count", 0)),
+                "core_network_load": float(node.get("core_network_load", 0.0)),
+            },
+            "links": [],
+        }
+        seen = set()
+        for item in dependency_paths:
+            path = item.get("path", [])
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                if (u, v) in seen or not self.topology.has_edge(u, v):
+                    continue
+                seen.add((u, v))
+                snapshot["links"].append(
+                    {
+                        "u": u,
+                        "v": v,
+                        "bandwidth_available_gbps": float(self.topology[u][v].get("bandwidth_available_gbps", 0.0)),
+                    }
+                )
+        self.request_snapshots.append(snapshot)
+
+    def _rollback_request(self):
+        for snapshot in reversed(self.request_snapshots):
+            node_id = snapshot["node"]
+            if node_id in self.topology.nodes:
+                for key, value in snapshot["node_attrs"].items():
+                    self.topology.nodes[node_id][key] = copy.deepcopy(value)
+                for dim in BUSINESS_DIMENSIONS:
+                    self.topology.nodes[node_id][dim] = float(self.topology.nodes[node_id]["core_business_load"].get(dim, 0.0))
+            for link in snapshot["links"]:
+                if self.topology.has_edge(link["u"], link["v"]):
+                    self.topology[link["u"]][link["v"]]["bandwidth_available_gbps"] = link["bandwidth_available_gbps"]
+        self.request_snapshots = []
+
+    def step(self, selected_node: str, plan: Optional[Dict] = None):
+        nf = self.core_nfs[self.current_nf_idx]
+        if plan is None:
+            plan = self.plan_candidate(selected_node)
         info = {
-            "vnf_id": vnf["vnf_id"],
+            "core_nf_id": nf["core_nf_id"],
+            "core_nf_type": nf["nf_type"],
             "selected_node": selected_node,
             "success": False,
             "failure_reason": None,
         }
+        if not plan:
+            self._rollback_request()
+            return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "candidate_infeasible"}
 
-        if selected_node not in self.topology.nodes:
-            self._rollback_resources()
-            return None, self.reward_config["resource_fail"], True, {**info, "failure_reason": "node_not_exist"}
+        node = self.topology.nodes[selected_node]
+        self._save_snapshot(selected_node, plan["dependency_paths"])
+        node["cpu_available"] = float(node.get("cpu_available", 0.0)) - float(nf["cpu_required"])
+        node["mem_available"] = float(node.get("mem_available", 0.0)) - float(nf["mem_required"])
+        node["disk_available"] = float(node.get("disk_available", 0.0)) - float(nf["disk_required_gb"])
+        node["deployed_core_nf_count"] = int(node.get("deployed_core_nf_count", 0)) + 1
 
-        node_data = self.topology.nodes[selected_node]
-        cpu_req = float(vnf.get("cpu_required", 0.0))
-        mem_req = float(vnf.get("mem_required", 0.0))
-        disk_req = float(vnf.get("disk_required_gb", 0.0))
-        bw_req = max(
-            float(vnf.get("bandwidth_required_gbps", 0.0)),
-            float(sla.get("bandwidth_demand_gbps", 0.0)),
-        )
+        new_business = self._project_node_business_load(node, nf)
+        node["core_business_load"] = new_business
+        node["core_network_load"] = float(np.mean(list(new_business.values())))
+        for dim in BUSINESS_DIMENSIONS:
+            node[dim] = float(new_business[dim])
 
-        if (
-            node_data.get("cpu_available", 0.0) < cpu_req
-            or node_data.get("mem_available", 0.0) < mem_req
-            or node_data.get("disk_available", 0.0) < disk_req
-        ):
-            self._rollback_resources()
-            return None, self.reward_config["resource_fail"], True, {
-                **info,
-                "failure_reason": "resource_insufficient",
-            }
-
-        same_node_deploy = bool(selected_node == self.prev_node)
-        if not path_to_node:
-            if same_node_deploy:
-                path_to_node = [selected_node]
-            else:
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "invalid_path"}
-        if len(path_to_node) < 2 and (not same_node_deploy):
-            self._rollback_resources()
-            return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "invalid_path"}
-
-        for i in range(len(path_to_node) - 1):
-            u, v = path_to_node[i], path_to_node[i + 1]
-            if not self.topology.has_edge(u, v):
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "link_not_exist"}
-
-            edge_data = self.topology[u][v]
-            if int(edge_data.get("link_status", 1)) == 0:
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "link_down"}
-
-            if edge_data.get("bandwidth_available_gbps", 0.0) < bw_req:
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {
-                    **info,
-                    "failure_reason": "bandwidth_insufficient",
-                }
-
-        # 与后端推理引擎对齐：链路传输时延由路径累计，VNF处理时延不再单独叠加。
-        processing_delay = 0.0
-        total_delay = path_delay + processing_delay
-        new_accumulated_delay = self.accumulated_delay + total_delay
-        if new_accumulated_delay > sla["latency_requirement_ms"]:
-            self._rollback_resources()
-            return None, self.reward_config["delay_fail"], True, {
-                **info,
-                "failure_reason": "delay_exceeded",
-            }
-
-        already_deployed_on_node = any(dep.get("node") == selected_node for dep in self.deployed_vnfs)
-        node_rel = 1.0 if already_deployed_on_node else float(node_data.get("node_reliability", 0.98))
-        path_rel = self._path_reliability(self.topology, path_to_node)
-        new_acc_rel = self.accumulated_reliability * node_rel * path_rel
-        path_hops = max(0, len(path_to_node) - 1)
-        new_acc_hops = int(self.accumulated_hops + path_hops)
-        if new_acc_hops > int(sla["hard_max_total_hops"]):
-            self._rollback_resources()
-            return None, self.reward_config["path_fail"], True, {
-                **info,
-                "failure_reason": "hop_hard_limit_exceeded",
-            }
-
-        # 与后端判定口径对齐：最后一个VNF放置后，可靠性不足直接判失败。
-        is_last_vnf = self.current_vnf_idx + 1 >= len(self.sfc_request["vnf_sequence"])
-        if is_last_vnf and new_acc_rel < sla["reliability_requirement"]:
-            self._rollback_resources()
-            return None, self.reward_config["reliability_fail"], True, {
-                **info,
-                "failure_reason": "reliability_not_met",
-            }
-
-        self._save_resource_snapshot(selected_node, path_to_node)
-
-        node_data["cpu_available"] -= cpu_req
-        node_data["mem_available"] -= mem_req
-        node_data["disk_available"] -= disk_req
-        for i in range(len(path_to_node) - 1):
-            u, v = path_to_node[i], path_to_node[i + 1]
-            self.topology[u][v]["bandwidth_available_gbps"] -= bw_req
-
-        self.deployed_vnfs.append(
-            {
-                "vnf_id": vnf["vnf_id"],
-                "node": selected_node,
-                "path": path_to_node,
-                "delay": total_delay,
-                "path_reliability": path_rel,
-                "cpu_required": cpu_req,
-                "mem_required": mem_req,
-                "disk_required_gb": disk_req,
-                "bandwidth_required_gbps": bw_req,
-            }
-        )
-
-        self.accumulated_delay = new_accumulated_delay
-        self.accumulated_reliability = new_acc_rel
-        self.accumulated_hops = new_acc_hops
-        self.prev_node = selected_node
-        self.current_vnf_idx += 1
-
-        cpu_total = max(node_data.get("cpu_total", 1.0), 1e-6)
-        mem_total = max(node_data.get("mem_total", 1.0), 1e-6)
-        disk_total = max(node_data.get("disk_total", 1.0), 1e-6)
-        node_util = np.mean(
-            [
-                1.0 - node_data.get("cpu_available", 0.0) / cpu_total,
-                1.0 - node_data.get("mem_available", 0.0) / mem_total,
-                1.0 - node_data.get("disk_available", 0.0) / disk_total,
-            ]
-        )
-
-        delay_ratio = self.accumulated_delay / max(sla["latency_requirement_ms"], 1e-6)
-        reliability_gap = self.accumulated_reliability - sla["reliability_requirement"]
-
-        reward = self.reward_config["step_success"]
-        reward += self.reward_config["resource_bonus"] * (1.0 - min(1.0, node_util)) * 0.4
-        reward += self.reward_config["sla_bonus"] * max(0.0, 1.0 - delay_ratio) * 0.4
-        reward += self.reward_config["sla_bonus"] * max(-0.5, min(0.5, reliability_gap)) * 0.8
-        hop_ratio = self.accumulated_hops / max(1.0, float(sla["max_total_hops"]))
-        reward += self.reward_config["sla_bonus"] * max(-0.8, 1.0 - hop_ratio) * 0.45
-
-        node_usage_count = sum(1 for dep in self.deployed_vnfs if dep["node"] == selected_node)
-        if node_usage_count > 1:
-            reward += self.reward_config["hotspot_penalty"] * node_usage_count
-        else:
-            reward += self.reward_config["load_balance_bonus"]
-
-        reward += self.reward_config["step_penalty"]
-
-        done = False
-        if self.current_vnf_idx >= len(self.sfc_request["vnf_sequence"]):
-            final_bw_req = float(sla.get("bandwidth_demand_gbps", 0.0))
-            remaining_hop_target = max(1, int(sla["max_total_hops"]) - int(self.accumulated_hops))
-            remaining_hop_hard = max(1, int(sla["hard_max_total_hops"]) - int(self.accumulated_hops))
-            final_hop_cap = max(1, min(10, remaining_hop_target))
-            final_path = self._find_constrained_path(
-                self.prev_node,
-                self.sfc_request["destination_node"],
-                bw_req=final_bw_req,
-                max_hops=final_hop_cap,
-            )
-            if (not final_path) and remaining_hop_hard > final_hop_cap:
-                final_path = self._find_constrained_path(
-                    self.prev_node,
-                    self.sfc_request["destination_node"],
-                    bw_req=final_bw_req,
-                    max_hops=min(14, remaining_hop_hard),
+        for item in plan["dependency_paths"]:
+            bw_req = float(item["bandwidth_required_gbps"])
+            path = item["path"]
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                self.topology[u][v]["bandwidth_available_gbps"] = (
+                    float(self.topology[u][v].get("bandwidth_available_gbps", 0.0)) - bw_req
                 )
-            if not final_path:
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {
-                    **info,
-                    "failure_reason": "no_path_to_dest",
-                }
+            self.satisfied_dependency_keys.add(item["key"])
 
-            if any(int(self.topology[final_path[i]][final_path[i + 1]].get("link_status", 1)) == 0 for i in range(len(final_path) - 1)):
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {
-                    **info,
-                    "failure_reason": "final_path_link_down",
-                }
-            for i in range(len(final_path) - 1):
-                bw_avail = float(self.topology[final_path[i]][final_path[i + 1]].get("bandwidth_available_gbps", 0.0))
-                if bw_avail + 1e-9 < final_bw_req:
-                    self._rollback_resources()
-                    return None, self.reward_config["path_fail"], True, {
-                        **info,
-                        "failure_reason": "final_bandwidth_insufficient",
-                    }
+        self.deployed_nfs.append(
+            {
+                "core_nf_id": nf["core_nf_id"],
+                "nf_type": nf["nf_type"],
+                "node": selected_node,
+                "business_load_demand": dict(nf["business_load_demand"]),
+            }
+        )
+        self.deployed_by_type[nf["nf_type"]] = self.deployed_nfs[-1]
+        self.accumulated_dependency_delay += float(plan["path_delay_ms"])
+        self.max_dependency_delay = max(self.max_dependency_delay, float(plan["max_dependency_delay_ms"]))
+        self.accumulated_hops += int(plan["path_hops"])
+        self.min_dependency_reliability = min(self.min_dependency_reliability, float(plan["min_dependency_reliability"]))
+        self.current_nf_idx += 1
 
-            final_delay = float(
-                sum(self.topology[final_path[i]][final_path[i + 1]].get("latency_ms", 0.0) for i in range(len(final_path) - 1))
-            )
-            final_total_delay = self.accumulated_delay + final_delay
-            final_rel = self.accumulated_reliability * self._path_reliability(self.topology, final_path)
-            final_total_hops = int(self.accumulated_hops + max(0, len(final_path) - 1))
-
-            if final_total_delay > sla["latency_requirement_ms"]:
-                self._rollback_resources()
-                return None, self.reward_config["delay_fail"], True, {
-                    **info,
-                    "failure_reason": "final_delay_exceeded",
-                }
-
-            if final_rel < sla["reliability_requirement"]:
-                self._rollback_resources()
-                return None, self.reward_config["reliability_fail"], True, {
-                    **info,
-                    "failure_reason": "final_reliability_not_met",
-                }
-            if final_total_hops > int(sla["max_total_hops"]):
-                self._rollback_resources()
-                return None, self.reward_config["path_fail"], True, {
-                    **info,
-                    "failure_reason": "final_hop_target_exceeded",
-                }
-
-            done = True
-            self.accumulated_delay = final_total_delay
-            self.accumulated_reliability = final_rel
-            self.accumulated_hops = final_total_hops
-            reward += self.reward_config["completion_bonus"]
-            reward += self.reward_config["completion_bonus"] * max(0.0, 1.0 - final_total_delay / max(sla["latency_requirement_ms"], 1e-6)) * 0.3
-            final_hop_ratio = final_total_hops / max(1.0, float(sla["max_total_hops"]))
-            reward += self.reward_config["completion_bonus"] * max(-0.5, 1.0 - final_hop_ratio) * 0.2
+        done = self.current_nf_idx >= len(self.core_nfs)
+        quality = self._compute_quality_score()
+        self.last_quality_score = quality
+        reward = self.reward_config["step_success"] + 1.2 * (quality - 0.5)
+        reward -= self._hotspot_penalty(selected_node, nf)
+        if done:
+            sla = self._extract_sla()
+            dep_ratio = len(self.satisfied_dependency_keys) / max(1, len(self.dependencies))
+            if dep_ratio < 1.0:
+                self._rollback_request()
+                return None, self.reward_config["path_fail"], True, {**info, "failure_reason": "dependency_incomplete"}
+            if self.accumulated_dependency_delay > sla["latency_requirement_ms"]:
+                self._rollback_request()
+                return None, self.reward_config["sla_fail"], True, {**info, "failure_reason": "latency_not_met"}
+            if self.min_dependency_reliability < sla["reliability_requirement"] * 0.92:
+                self._rollback_request()
+                return None, self.reward_config["sla_fail"], True, {**info, "failure_reason": "reliability_not_met"}
+            reward += self.reward_config["completion_success"]
+            reward += self.reward_config["quality_scale"] * quality
             info["success"] = True
 
         next_state = None if done else self._build_state()
         info.update(
             {
                 "reward": float(reward),
-                "accumulated_delay": float(self.accumulated_delay),
-                "accumulated_reliability": float(self.accumulated_reliability),
+                "quality_score": float(quality),
+                "accumulated_dependency_delay": float(self.accumulated_dependency_delay),
+                "max_dependency_delay": float(self.max_dependency_delay),
+                "min_dependency_reliability": float(self.min_dependency_reliability),
                 "accumulated_hops": int(self.accumulated_hops),
-                "deployed_vnfs": len(self.deployed_vnfs),
-                "sla_latency_target": sla["latency_requirement_ms"],
-                "sla_reliability_target": sla["reliability_requirement"],
-                "sla_reliability_target_base": sla["base_reliability_requirement"],
-                "reliability_scale": sla["reliability_scale"],
-                "strict_reliability": sla["strict_reliability"],
-                "sla_hop_target": int(sla["max_total_hops"]),
+                "satisfied_dependencies": len(self.satisfied_dependency_keys),
+                "total_dependencies": len(self.dependencies),
+                "deployed_core_nfs": len(self.deployed_nfs),
+                "resource_balance": self._resource_balance_score(),
+                "link_congestion": self._link_congestion_score(),
+                "business_balance": self._business_balance_score(),
             }
         )
         return next_state, reward, done, info
 
-    def get_topology_state(self):
-        nodes = list(self.topology.nodes())
-        node_index = {n: i for i, n in enumerate(nodes)}
+    def _hotspot_penalty(self, selected_node: str, nf: Dict) -> float:
+        node = self.topology.nodes[selected_node]
+        count = int(node.get("deployed_core_nf_count", 0))
+        business_max = max(float(node.get("core_business_load", {}).get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS)
+        penalty = 0.0
+        if count > 2:
+            penalty += abs(self.reward_config["hotspot_penalty"]) * (count - 2) * 0.25
+        if nf["nf_type"] == "upf" and business_max > 0.55:
+            penalty += 1.5 * (business_max - 0.55)
+        return float(penalty)
 
+    def _compute_quality_score(self) -> float:
+        sla = self._extract_sla()
+        dep_ratio = len(self.satisfied_dependency_keys) / max(1, len(self.dependencies))
+        delay_score = 1.0 - min(1.0, self.accumulated_dependency_delay / max(sla["latency_requirement_ms"], 1e-6))
+        rel_score = min(1.0, self.min_dependency_reliability / max(sla["reliability_requirement"], 1e-6))
+        score = (
+            0.20 * dep_ratio
+            + 0.22 * self._resource_balance_score()
+            + 0.18 * self._business_balance_score()
+            + 0.18 * (1.0 - self._link_congestion_score())
+            + 0.14 * delay_score
+            + 0.08 * rel_score
+        )
+        return self._clamp01(score)
+
+    def _resource_balance_score(self) -> float:
+        utils = []
+        for _, node in self.topology.nodes(data=True):
+            for avail_key, total_key in [
+                ("cpu_available", "cpu_total"),
+                ("mem_available", "mem_total"),
+                ("disk_available", "disk_total"),
+            ]:
+                total = max(float(node.get(total_key, 0.0)), 1e-6)
+                utils.append(1.0 - float(node.get(avail_key, 0.0)) / total)
+        if not utils:
+            return 1.0
+        return self._clamp01(1.0 - float(np.std(utils)) * 2.0 - max(0.0, max(utils) - 0.82))
+
+    def _business_balance_score(self) -> float:
+        values = []
+        for _, node in self.topology.nodes(data=True):
+            load = node.get("core_business_load", {})
+            values.append(max(float(load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS))
+        if not values:
+            return 1.0
+        return self._clamp01(1.0 - float(np.std(values)) * 2.5 - max(0.0, max(values) - 0.86))
+
+    def _link_congestion_score(self) -> float:
+        ratios = []
+        for _, _, edge in self.topology.edges(data=True):
+            total = float(edge.get("bandwidth_gbps", 0.0))
+            if total <= 1e-9:
+                continue
+            ratios.append(1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total)
+        if not ratios:
+            return 0.0
+        return self._clamp01(float(np.percentile(ratios, 95)))
+
+    def get_topology_state(self):
+        node_features, edge_index = self._graph_features(self.topology)
+        return node_features, edge_index
+
+    def _graph_features(self, graph):
+        nodes = list(graph.nodes())
+        node_index = {n: i for i, n in enumerate(nodes)}
+        max_degree = max([graph.out_degree(n) for n in nodes] or [1])
         node_features = []
         for n in nodes:
-            node_data = self.topology.nodes[n]
-            cpu_total = max(float(node_data.get("cpu_total", 1.0)), 1e-6)
-            mem_total = max(float(node_data.get("mem_total", 1.0)), 1e-6)
-            disk_total = max(float(node_data.get("disk_total", 1.0)), 1e-6)
-
-            cpu_ratio = float(node_data.get("cpu_available", 0.0)) / cpu_total
-            mem_ratio = float(node_data.get("mem_available", 0.0)) / mem_total
-            disk_ratio = float(node_data.get("disk_available", 0.0)) / disk_total
-
-            out_edges = list(self.topology.out_edges(n, data=True))
+            node = graph.nodes[n]
+            cpu_total = max(float(node.get("cpu_total", 1.0)), 1e-6)
+            mem_total = max(float(node.get("mem_total", 1.0)), 1e-6)
+            disk_total = max(float(node.get("disk_total", 1.0)), 1e-6)
+            out_edges = list(graph.out_edges(n, data=True))
             if out_edges:
                 active_ratio = float(np.mean([float(e[2].get("link_status", 1)) for e in out_edges]))
-                bw_ratio = float(
-                    np.mean(
-                        [
-                            float(e[2].get("bandwidth_available_gbps", 0.0))
-                            / max(float(e[2].get("bandwidth_gbps", 1.0)), 1e-6)
-                            for e in out_edges
-                        ]
-                    )
-                )
+                bw_ratio = float(np.mean([
+                    float(e[2].get("bandwidth_available_gbps", 0.0)) / max(float(e[2].get("bandwidth_gbps", 1.0)), 1e-6)
+                    for e in out_edges
+                ]))
                 latency_norm = float(np.mean([float(e[2].get("latency_ms", 0.0)) for e in out_edges]) / 50.0)
             else:
                 active_ratio = 0.0
                 bw_ratio = 0.0
                 latency_norm = 1.0
-
+            load = node.get("core_business_load", {})
             node_features.append(
                 [
-                    cpu_ratio,
-                    mem_ratio,
-                    disk_ratio,
-                    float(node_data.get("core_network_load", 0.5)),
-                    float(node_data.get("node_reliability", 0.98)),
+                    float(node.get("cpu_available", 0.0)) / cpu_total,
+                    float(node.get("mem_available", 0.0)) / mem_total,
+                    float(node.get("disk_available", 0.0)) / disk_total,
+                    min(float(node.get("cpu_available", 0.0)) / 64.0, 4.0),
+                    min(float(node.get("mem_available", 0.0)) / 128.0, 4.0),
+                    min(float(node.get("disk_available", 0.0)) / 1024.0, 4.0),
+                    float(node.get("node_reliability", 0.98)),
+                    float(graph.out_degree(n)) / max(1.0, float(max_degree)),
                     active_ratio,
                     bw_ratio,
                     min(latency_norm, 5.0),
+                    *[float(load.get(dim, node.get(dim, 0.0))) for dim in BUSINESS_DIMENSIONS],
+                    min(1.0, float(node.get("deployed_core_nf_count", 0)) / 12.0),
                 ]
             )
-
-        edge_index = [[node_index[u], node_index[v]] for u, v in self.topology.edges()]
-
+        edge_index = [[node_index[u], node_index[v]] for u, v in graph.edges()]
         return (
             torch.tensor(node_features, dtype=torch.float32, device=self.device),
             torch.tensor(edge_index, dtype=torch.long, device=self.device).t()
@@ -690,28 +593,15 @@ class SFCEnvironment:
         )
 
     def get_node_id_map(self):
-        nodes = list(self.topology.nodes())
-        return {idx: node_id for idx, node_id in enumerate(nodes)}
+        return {idx: node_id for idx, node_id in enumerate(self.topology.nodes())}
 
     def get_resource_utilization(self):
         total_cpu = sum(float(self.topology.nodes[n].get("cpu_total", 0.0)) for n in self.topology.nodes())
-        used_cpu = sum(
-            float(self.topology.nodes[n].get("cpu_total", 0.0)) - float(self.topology.nodes[n].get("cpu_available", 0.0))
-            for n in self.topology.nodes()
-        )
-
+        used_cpu = sum(float(self.topology.nodes[n].get("cpu_total", 0.0)) - float(self.topology.nodes[n].get("cpu_available", 0.0)) for n in self.topology.nodes())
         total_mem = sum(float(self.topology.nodes[n].get("mem_total", 0.0)) for n in self.topology.nodes())
-        used_mem = sum(
-            float(self.topology.nodes[n].get("mem_total", 0.0)) - float(self.topology.nodes[n].get("mem_available", 0.0))
-            for n in self.topology.nodes()
-        )
-
+        used_mem = sum(float(self.topology.nodes[n].get("mem_total", 0.0)) - float(self.topology.nodes[n].get("mem_available", 0.0)) for n in self.topology.nodes())
         total_disk = sum(float(self.topology.nodes[n].get("disk_total", 0.0)) for n in self.topology.nodes())
-        used_disk = sum(
-            float(self.topology.nodes[n].get("disk_total", 0.0)) - float(self.topology.nodes[n].get("disk_available", 0.0))
-            for n in self.topology.nodes()
-        )
-
+        used_disk = sum(float(self.topology.nodes[n].get("disk_total", 0.0)) - float(self.topology.nodes[n].get("disk_available", 0.0)) for n in self.topology.nodes())
         return {
             "cpu_utilization": used_cpu / total_cpu if total_cpu > 0 else 0.0,
             "mem_utilization": used_mem / total_mem if total_mem > 0 else 0.0,

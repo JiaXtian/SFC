@@ -15,6 +15,8 @@ os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "logs", ".mplcon
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,56 +26,29 @@ TRAIN_ROOT = PROJECT_ROOT / "train"
 from training.models.drl_agent import DRLAgent
 from training.models.gnn_encoder import GNNEncoder
 from training.training.trainer import SFCTrainer
+from training.open5gs_profile import (
+    BUSINESS_DIMENSIONS,
+    CONTEXT_FEATURE_DIM,
+    CORE_NF_FEATURE_DIM,
+    GNN_EMBEDDING_DIM,
+    NODE_FEATURE_DIM,
+    CORE_NF_TYPES,
+)
 
 
 class HeuristicPruner:
-    TARGET_TOTAL_HOPS = 25
-    HARD_TOTAL_HOPS = 30
-    MIN_LEG_HOP_CAP = 3
-    MAX_LEG_HOP_CAP = 10
-    RELAXED_LEG_HOP_CAP = 14
-    HOP_PENALTY_MS = 2.5
-    PATH_SOFTENING_EXPONENT = 0.46
-    EXCESS_HOP_RELIABILITY_PENALTY = 0.9988
-    FUTURE_STEP_RELIABILITY_DECAY = 0.9990
+    HOP_PENALTY_MS = 2.0
 
     def __init__(self, top_m=80):
-        self.top_m = top_m
+        self.top_m = int(max(16, top_m))
+        self.fast_prefilter_limit = max(96, self.top_m * 3)
 
     @staticmethod
-    def _clamp01(value: float) -> float:
-        return max(0.0, min(1.0, float(value)))
-
-    @classmethod
-    def _softened_path_reliability(cls, raw_reliability: float, hops: int) -> float:
-        if hops <= 0:
-            return 1.0
-        raw = max(1e-9, cls._clamp01(raw_reliability))
-        geometric_mean = raw ** (1.0 / max(1, hops))
-        softened_product = raw ** cls.PATH_SOFTENING_EXPONENT
-        if hops <= 6:
-            blend = 0.7 * softened_product + 0.3 * geometric_mean
-        else:
-            blend = 0.82 * softened_product + 0.18 * geometric_mean
-        excess_hops = max(0, hops - 6)
-        return cls._clamp01(blend * (cls.EXCESS_HOP_RELIABILITY_PENALTY ** excess_hops))
-
-    @classmethod
-    def _compute_hop_cap(cls, current_hops: int, current_vnf_idx: int, total_vnfs: int) -> int:
-        remaining_vnfs = max(0, int(total_vnfs) - int(current_vnf_idx))
-        remaining_legs = max(1, remaining_vnfs + 1)
-        remaining_budget = max(cls.MIN_LEG_HOP_CAP, cls.TARGET_TOTAL_HOPS - max(0, int(current_hops)))
-        per_leg = remaining_budget // remaining_legs
-        return max(cls.MIN_LEG_HOP_CAP, min(cls.MAX_LEG_HOP_CAP, per_leg + 2))
-
-    @classmethod
-    def _compute_relaxed_hop_cap(cls, hop_cap: int) -> int:
-        return min(max(hop_cap, cls.MIN_LEG_HOP_CAP) + 3, cls.RELAXED_LEG_HOP_CAP)
+    def _nf_type(vnf: dict) -> str:
+        return str(vnf.get("nf_type", vnf.get("core_nf_type", vnf.get("vnf_type", "")))).lower().replace("-", "_").replace(" ", "_")
 
     @staticmethod
     def _active_graph(G, bw_req=0.0):
-        import networkx as nx
-
         active = nx.DiGraph()
         active.add_nodes_from(G.nodes(data=True))
         for u, v, d in G.edges(data=True):
@@ -85,211 +60,168 @@ class HeuristicPruner:
         return active
 
     @classmethod
-    def _estimate_link_reliability(cls, edge: dict) -> float:
-        if int(edge.get("link_status", 1)) != 1:
-            return 0.0
-        status = str(edge.get("status", "active")).lower()
-        if status == "down":
-            return 0.0
-        bw_total = float(edge.get("bandwidth_gbps", 0.0))
-        bw_avail = float(edge.get("bandwidth_available_gbps", 0.0))
-        bw_ratio = cls._clamp01(bw_avail / bw_total) if bw_total > 1e-9 else 0.0
-        base = cls._clamp01(float(edge.get("link_reliability", edge.get("reliability", 0.98))))
-        bandwidth_factor = 0.98 + 0.02 * bw_ratio
-        status_penalty = 0.985 if status == "congested" else 1.0
-        return cls._clamp01(base * bandwidth_factor * status_penalty)
-
-    @classmethod
     def _dijkstra_constrained(cls, G, source, target, bw_req: float, max_hops: int):
         if source == target:
-            return [source], 0.0, 1.0, 0
+            return [source], 0.0, 0
         if source not in G or target not in G:
-            return [], float("inf"), 0.0, 0
-
+            return [], float("inf"), 0
         dist = {source: 0.0}
         latency = {source: 0.0}
         hops = {source: 0}
-        reliability_raw = {source: 1.0}
         prev = {}
         pq = [(0.0, source)]
-
         while pq:
             cur_cost, u = heapq.heappop(pq)
             if cur_cost > dist.get(u, float("inf")) + 1e-9:
                 continue
             if u == target:
                 break
-
             for v, edge in G[u].items():
                 if int(edge.get("link_status", 1)) != 1:
                     continue
                 if float(edge.get("bandwidth_available_gbps", 0.0)) + 1e-9 < bw_req:
                     continue
-
                 next_hops = hops[u] + 1
                 if max_hops > 0 and next_hops > max_hops:
                     continue
                 next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
                 next_cost = next_latency + cls.HOP_PENALTY_MS * next_hops
-                edge_rel = max(1e-9, cls._estimate_link_reliability(edge))
-                next_rel = reliability_raw[u] * edge_rel
-
-                old_cost = dist.get(v, float("inf"))
-                old_latency = latency.get(v, float("inf"))
-                old_rel = reliability_raw.get(v, 0.0)
-                should_update = (
-                    next_cost + 1e-9 < old_cost
-                    or (
-                        abs(next_cost - old_cost) <= 1e-9
-                        and (
-                            next_latency + 1e-9 < old_latency
-                            or (abs(next_latency - old_latency) <= 1e-9 and next_rel > old_rel + 1e-9)
-                        )
-                    )
-                )
-                if not should_update:
+                if next_cost + 1e-9 >= dist.get(v, float("inf")):
                     continue
-
                 dist[v] = next_cost
                 latency[v] = next_latency
                 hops[v] = next_hops
-                reliability_raw[v] = next_rel
                 prev[v] = u
                 heapq.heappush(pq, (next_cost, v))
-
-        if target not in prev and target != source:
-            return [], float("inf"), 0.0, 0
-
+        if target not in prev:
+            return [], float("inf"), 0
         path = [target]
         while path[-1] != source:
-            nxt = prev.get(path[-1])
-            if nxt is None:
-                return [], float("inf"), 0.0, 0
-            path.append(nxt)
+            p = prev.get(path[-1])
+            if p is None:
+                return [], float("inf"), 0
+            path.append(p)
         path.reverse()
-        hop_count = max(0, len(path) - 1)
-        softened_rel = cls._softened_path_reliability(reliability_raw.get(target, 1.0), hop_count)
-        return path, float(latency.get(target, 0.0)), float(softened_rel), hop_count
+        return path, float(latency.get(target, 0.0)), max(0, len(path) - 1)
 
-    def find_path(
-        self,
-        G,
-        source,
-        target,
-        bw_req=0.0,
-        current_hops=0,
-        current_vnf_idx=0,
-        total_vnfs=1,
-    ):
-        active_graph = self._active_graph(G, bw_req=float(bw_req))
-        hop_cap = self._compute_hop_cap(current_hops, current_vnf_idx, total_vnfs)
-        path, delay, rel, hops = self._dijkstra_constrained(
-            active_graph, source, target, bw_req=float(bw_req), max_hops=hop_cap
-        )
-        if path:
-            return path, delay, rel, hops
-        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
-        return self._dijkstra_constrained(
-            active_graph, source, target, bw_req=float(bw_req), max_hops=relaxed_cap
-        )
+    def _score_dependency_paths(self, G, node, nf_type, deployed_by_type, dependencies, max_hops):
+        total_delay = 0.0
+        total_hops = 0
+        checked = 0
+        worst_bottleneck_pressure = 0.0
+        for dep in dependencies:
+            src_type = str(dep.get("source", "")).lower()
+            dst_type = str(dep.get("target", "")).lower()
+            if src_type == nf_type and dst_type in deployed_by_type:
+                src_node = node
+                dst_node = deployed_by_type[dst_type]["node"]
+            elif dst_type == nf_type and src_type in deployed_by_type:
+                src_node = deployed_by_type[src_type]["node"]
+                dst_node = node
+            else:
+                continue
+            bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
+            path, delay, hops = self._dijkstra_constrained(G, src_node, dst_node, bw_req, max_hops)
+            if not path:
+                return None
+            checked += 1
+            total_delay += delay * float(dep.get("latency_weight", 1.0))
+            total_hops += hops
+            for i in range(len(path) - 1):
+                edge = G[path[i]][path[i + 1]]
+                total_bw = max(float(edge.get("bandwidth_gbps", 0.0)), 1e-6)
+                pressure = 1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total_bw
+                worst_bottleneck_pressure = max(worst_bottleneck_pressure, pressure)
+        return total_delay, total_hops, checked, worst_bottleneck_pressure
 
     def prune(
         self,
         G,
         vnf,
-        prev_node,
-        dest_node,
-        remaining_delay,
+        deployed_by_type=None,
+        dependencies=None,
+        remaining_delay=float("inf"),
         top_m=None,
-        bandwidth_demand_gbps=0.0,
-        current_vnf_idx=0,
-        total_vnfs=1,
-        accumulated_reliability=1.0,
+        current_nf_idx=0,
+        total_core_nfs=12,
+        accumulated_delay=0.0,
         reliability_requirement=0.0,
         accumulated_hops=0,
+        max_dependency_hops=16,
         **_kwargs,
     ):
-        import networkx as nx
-
+        del current_nf_idx, total_core_nfs, accumulated_delay, reliability_requirement, accumulated_hops
         if top_m is None:
             top_m = self.top_m
-
-        bw_req = max(float(vnf.get("bandwidth_required_gbps", 0.0)), float(bandwidth_demand_gbps))
-        active_graph = self._active_graph(G, bw_req=bw_req)
-        candidates = []
-        try:
-            dist_from_prev = nx.single_source_dijkstra_path_length(
-                active_graph, prev_node, weight="latency_ms"
-            )
-            reverse_graph = active_graph.reverse(copy=False)
-            dist_to_dest = nx.single_source_dijkstra_path_length(
-                reverse_graph, dest_node, weight="latency_ms"
-            )
-            hop_from_prev = nx.single_source_shortest_path_length(active_graph, prev_node)
-            hop_to_dest = nx.single_source_shortest_path_length(reverse_graph, dest_node)
-        except Exception:
-            return []
-
+        deployed_by_type = deployed_by_type or {}
+        dependencies = dependencies or []
+        nf_type = self._nf_type(vnf)
         cpu_req = float(vnf.get("cpu_required", 0.0))
         mem_req = float(vnf.get("mem_required", 0.0))
         disk_req = float(vnf.get("disk_required_gb", 0.0))
-        delay_cap = float(remaining_delay)
-        hop_cap = self._compute_hop_cap(accumulated_hops, current_vnf_idx, total_vnfs)
-        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
-        remaining_steps = max(0, int(total_vnfs) - int(current_vnf_idx))
-        future_rel = self.FUTURE_STEP_RELIABILITY_DECAY ** remaining_steps
+        business = vnf.get("business_load_demand", {})
+        fast_candidates = []
 
-        valid_nodes = [
-            n
-            for n in G.nodes()
+        for node_id, node in G.nodes(data=True):
             if (
-                G.nodes[n].get("cpu_available", 0.0) >= cpu_req
-                and G.nodes[n].get("mem_available", 0.0) >= mem_req
-                and G.nodes[n].get("disk_available", 0.0) >= disk_req
+                float(node.get("cpu_available", 0.0)) + 1e-9 < cpu_req
+                or float(node.get("mem_available", 0.0)) + 1e-9 < mem_req
+                or float(node.get("disk_available", 0.0)) + 1e-9 < disk_req
+            ):
+                continue
+            cpu_total = max(float(node.get("cpu_total", 1.0)), 1e-6)
+            mem_total = max(float(node.get("mem_total", 1.0)), 1e-6)
+            disk_total = max(float(node.get("disk_total", 1.0)), 1e-6)
+            projected_resource_util = np.mean(
+                [
+                    1.0 - (float(node.get("cpu_available", 0.0)) - cpu_req) / cpu_total,
+                    1.0 - (float(node.get("mem_available", 0.0)) - mem_req) / mem_total,
+                    1.0 - (float(node.get("disk_available", 0.0)) - disk_req) / disk_total,
+                ]
             )
-        ]
+            load = node.get("core_business_load", {})
+            projected_business_max = max(
+                float(load.get(dim, node.get(dim, 0.0))) + float(business.get(dim, 0.0))
+                for dim in BUSINESS_DIMENSIONS
+            )
+            co_location = float(node.get("deployed_core_nf_count", 0))
+            upf_hotspot_penalty = 5.0 * max(0.0, projected_business_max - 0.55) if nf_type == "upf" else 0.0
+            fast_score = (
+                22.0 * max(0.0, projected_business_max - 0.72)
+                + 10.0 * max(0.0, projected_resource_util - 0.72)
+                + 2.0 * co_location
+                + upf_hotspot_penalty
+                - 0.25 * float(G.out_degree(node_id))
+            )
+            fast_candidates.append((node_id, float(fast_score), projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty))
 
-        for node in valid_nodes:
-            d1 = dist_from_prev.get(node, float("inf"))
-            d2 = dist_to_dest.get(node, float("inf"))
-            if d1 == float("inf") or d2 == float("inf"):
-                continue
+        fast_candidates.sort(key=lambda item: item[1])
+        if not deployed_by_type:
+            return [node for node, *_ in fast_candidates[: int(top_m)]]
 
-            total_d = d1 + d2
-            if total_d > delay_cap:
+        candidates = []
+        for node_id, _fast_score, projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty in fast_candidates[: self.fast_prefilter_limit]:
+            dep_score = self._score_dependency_paths(G, node_id, nf_type, deployed_by_type, dependencies, int(max_dependency_hops))
+            if dep_score is None:
                 continue
-            h1 = hop_from_prev.get(node, math.inf)
-            h2 = hop_to_dest.get(node, math.inf)
-            if h1 == math.inf or h2 == math.inf:
+            dep_delay, dep_hops, dep_checked, bottleneck_pressure = dep_score
+            if dep_delay > float(remaining_delay) * 1.08:
                 continue
-            if h1 > relaxed_cap:
-                continue
-            projected_hops = int(accumulated_hops + h1 + max(1, h2))
-            if projected_hops > self.HARD_TOTAL_HOPS:
-                continue
-            if projected_hops > self.TARGET_TOTAL_HOPS + 4:
-                continue
-
-            node_rel = float(G.nodes[node].get("node_reliability", 0.98))
-            optimistic_rel = float(accumulated_reliability) * max(1e-9, min(1.0, node_rel)) * future_rel
-            if optimistic_rel + 1e-9 < float(reliability_requirement) * 0.72:
-                continue
-
-            hop_over = max(0, projected_hops - self.TARGET_TOTAL_HOPS)
-            hop_ratio = float(projected_hops) / max(1.0, float(self.TARGET_TOTAL_HOPS))
-            hop_pressure = max(0.0, hop_ratio - 1.0)
+            dependency_bonus = -2.0 * dep_checked
             score = (
-                total_d
-                + self.HOP_PENALTY_MS * float(h1) / max(1.0, float(hop_cap))
-                + 3.0 * float(hop_over)
-                + 5.0 * float(hop_pressure)
+                dep_delay
+                + 1.7 * dep_hops
+                + 18.0 * max(0.0, projected_business_max - 0.78)
+                + 7.0 * max(0.0, projected_resource_util - 0.78)
+                + 6.0 * bottleneck_pressure
+                + 2.0 * co_location
+                + upf_hotspot_penalty
+                + dependency_bonus
             )
-            candidates.append((node, score))
-            if len(candidates) >= top_m * 3:
-                break
+            candidates.append((node_id, float(score)))
 
-        candidates.sort(key=lambda x: x[1])
-        return [c[0] for c in candidates[:top_m]]
+        candidates.sort(key=lambda item: item[1])
+        return [node for node, _ in candidates[: int(top_m)]]
 
 
 def save_metrics(history, output_dir="logs"):
@@ -378,26 +310,16 @@ def _read_request_meta(req_path):
         with open(req_path) as f:
             req = json.load(f)
         meta = req.get("metadata", {})
-        requests = req.get("requests", [])
-        src = None
-        dst = None
-        if requests:
-            src = requests[0].get("source_node")
-            dst = requests[0].get("destination_node")
         return {
             "topology_file": meta.get("topology_file"),
             "generation_seed": meta.get("generation_seed"),
             "topology_scale": meta.get("topology_scale", 0),
-            "first_source": src,
-            "first_destination": dst,
         }
     except Exception:
         return {
             "topology_file": None,
             "generation_seed": None,
             "topology_scale": 0,
-            "first_source": None,
-            "first_destination": None,
         }
 
 
@@ -419,18 +341,11 @@ def _pair_request_to_topology(req_file, topo_files, topo_by_name, topo_nodes_cac
         if mapped:
             return mapped
 
-    src = meta.get("first_source")
-    dst = meta.get("first_destination")
-    if src and dst:
-        for topo_file in topo_files:
-            node_set = topo_nodes_cache[topo_file]
-            if src in node_set and dst in node_set:
-                return topo_file
-
     return topo_files[0] if topo_files else None
 
 
 def _is_request_file_compatible(req_file, topo_nodes, sample_limit=24):
+    del topo_nodes
     try:
         with open(req_file) as f:
             req = json.load(f)
@@ -438,9 +353,9 @@ def _is_request_file_compatible(req_file, topo_nodes, sample_limit=24):
         if not requests:
             return False
         for r in requests[:sample_limit]:
-            src = r.get("source_node")
-            dst = r.get("destination_node")
-            if src not in topo_nodes or dst not in topo_nodes:
+            core_nfs = r.get("core_nfs", [])
+            deps = r.get("core_nf_dependencies", [])
+            if len(core_nfs) != len(CORE_NF_TYPES) or not deps:
                 return False
         return True
     except Exception:
@@ -484,17 +399,17 @@ def _build_scale_balanced_data(train_topos, train_reqs):
 def main():
     os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
+    parser.add_argument("--epochs", type=int, default=40, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
-    parser.add_argument("--heuristic_top_m", type=int, default=110, help="候选剪枝上限")
-    parser.add_argument("--max_requests_per_file", type=int, default=20)
+    parser.add_argument("--heuristic_top_m", type=int, default=80, help="候选剪枝上限")
+    parser.add_argument("--max_requests_per_file", type=int, default=8)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
-    parser.add_argument("--max_data_files", type=int, default=18, help="每个epoch最多使用的训练文件数，0表示全部")
-    parser.add_argument("--warmup_epochs", type=int, default=15, help="热身轮次，使用更小数据子集加速前期收敛")
-    parser.add_argument("--time_budget_hours", type=float, default=2.5, help="训练时间预算(小时)，0表示不限制")
-    parser.add_argument("--min_epochs", type=int, default=30, help="触发时间预算早停前至少训练轮次")
+    parser.add_argument("--max_data_files", type=int, default=10, help="每个epoch最多使用的训练文件数，0表示全部")
+    parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
+    parser.add_argument("--time_budget_hours", type=float, default=4.0, help="训练时间预算(小时)，0表示不限制")
+    parser.add_argument("--min_epochs", type=int, default=25, help="触发时间预算早停前至少训练轮次")
     parser.add_argument("--rel_curr_start_epoch", type=int, default=1, help="可靠性课程学习起始epoch")
-    parser.add_argument("--rel_curr_end_epoch", type=int, default=60, help="可靠性课程学习结束epoch（到达严格约束）")
+    parser.add_argument("--rel_curr_end_epoch", type=int, default=32, help="可靠性课程学习结束epoch（到达严格约束）")
     parser.add_argument("--rel_curr_min_scale", type=float, default=0.75, help="课程学习初始可靠性缩放系数")
     parser.add_argument("--rel_curr_strict_ratio", type=float, default=0.7, help="课程进度达到该比例后启用严格可靠性硬约束")
     parser.add_argument("--rel_curr_strict_ramp_ratio", type=float, default=0.2, help="严格可靠性从0到1的渐进区间比例")
@@ -521,7 +436,7 @@ def main():
     }
 
     print("=" * 72)
-    print("  SFC智能编排系统 - 训练（增强版）")
+    print("  open5gs星座核心网部署 - 训练")
     print("=" * 72)
 
     if args.device == "auto":
@@ -533,8 +448,13 @@ def main():
             args.device = "cpu"
 
     start_time = time.time()
-    gnn = GNNEncoder(input_dim=14, hidden_dim=192, num_layers=4)
-    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=48, device=args.device)
+    gnn = GNNEncoder(input_dim=NODE_FEATURE_DIM, hidden_dim=GNN_EMBEDDING_DIM, num_layers=4)
+    agent = DRLAgent(
+        node_dim=GNN_EMBEDDING_DIM,
+        vnf_dim=CORE_NF_FEATURE_DIM,
+        context_dim=CONTEXT_FEATURE_DIM,
+        device=args.device,
+    )
     if args.init_model_checkpoint and os.path.exists(args.init_model_checkpoint):
         print(f"加载初始化策略模型: {args.init_model_checkpoint}")
         # 继续训练时仅加载网络权重，不恢复旧优化器状态（参数组可能已变化）。
@@ -599,8 +519,17 @@ def main():
             epoch_files = target_files
             epoch_requests_per_file = args.max_requests_per_file
 
-        random.shuffle(full_train_data)
-        train_data = full_train_data[: min(len(full_train_data), epoch_files)]
+        candidate_pool = full_train_data
+        if epoch <= args.warmup_epochs:
+            warmup_pool = [
+                pair for pair in full_train_data
+                if 0 < _read_topology_scale(pair[0]) <= 1200
+            ]
+            if warmup_pool:
+                candidate_pool = warmup_pool
+
+        random.shuffle(candidate_pool)
+        train_data = candidate_pool[: min(len(candidate_pool), epoch_files)]
 
         epoch_metrics = trainer.train_epoch(
             epoch,

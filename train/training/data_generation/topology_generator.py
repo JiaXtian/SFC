@@ -5,6 +5,11 @@ from datetime import datetime
 import networkx as nx
 import numpy as np
 
+try:
+    from training.open5gs_profile import BUSINESS_DIMENSIONS, NODE_FEATURE_DIM, zero_business_load
+except ImportError:  # pragma: no cover - direct script execution from train/training
+    from open5gs_profile import BUSINESS_DIMENSIONS, NODE_FEATURE_DIM, zero_business_load
+
 
 class SatelliteConstellationGenerator:
     """Walker-Delta LEO 星座生成器，包含节点/链路完整指标。"""
@@ -70,21 +75,29 @@ class SatelliteConstellationGenerator:
                 "isl_count": len(links),
                 "feature_schema": {
                     "node": [
+                        "cpu_available/cpu_total",
+                        "mem_available/mem_total",
+                        "disk_available/disk_total",
                         "cpu_total",
                         "cpu_available",
                         "mem_total",
                         "mem_available",
                         "disk_total",
                         "disk_available",
-                        "core_network_load",
+                        "node_reliability",
+                        "degree_norm",
+                        "active_link_ratio",
+                        "avg_bandwidth_available_ratio",
+                        "avg_latency_norm",
                         "core_business_load.signaling_load",
                         "core_business_load.session_load",
                         "core_business_load.user_plane_load",
                         "core_business_load.mobility_load",
                         "core_business_load.policy_load",
                         "core_business_load.auth_load",
-                        "node_reliability",
+                        "deployed_core_nf_count_norm",
                     ],
+                    "node_feature_dim": NODE_FEATURE_DIM,
                     "link": [
                         "link_status",
                         "bandwidth_gbps",
@@ -228,34 +241,13 @@ class SatelliteConstellationGenerator:
                     "mem_available": round(float(mem_available), 2),
                     "disk_total": round(float(disk_total), 2),
                     "disk_available": round(float(disk_available), 2),
-                    "core_business_load": {
-                        "signaling_load": round(float(np.random.uniform(0.18, 0.78)), 4),
-                        "session_load": round(float(np.random.uniform(0.20, 0.80)), 4),
-                        "user_plane_load": round(float(np.random.uniform(0.24, 0.86)), 4),
-                        "mobility_load": round(float(np.random.uniform(0.16, 0.74)), 4),
-                        "policy_load": round(float(np.random.uniform(0.16, 0.72)), 4),
-                        "auth_load": round(float(np.random.uniform(0.14, 0.70)), 4),
-                    },
+                    "core_business_load": zero_business_load(),
+                    "core_network_load": 0.0,
+                    "deployed_core_nf_count": 0,
                     "node_reliability": round(
                         float(np.random.uniform(*self.node_reliability_range)), 5
                     ),
                 }
-            )
-
-            business = nodes[-1]["core_business_load"]
-            nodes[-1]["core_network_load"] = round(
-                float(
-                    (
-                        business["signaling_load"]
-                        + business["session_load"]
-                        + business["user_plane_load"]
-                        + business["mobility_load"]
-                        + business["policy_load"]
-                        + business["auth_load"]
-                    )
-                    / 6.0
-                ),
-                4,
             )
 
         return nodes
@@ -265,6 +257,9 @@ class SatelliteConstellationGenerator:
 
         for node in nodes:
             business_load = node.get("core_business_load", {})
+            business_values = {
+                dim: float(business_load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS
+            }
             graph.add_node(
                 node["id"],
                 cpu_total=node["cpu_total"],
@@ -273,14 +268,15 @@ class SatelliteConstellationGenerator:
                 mem_available=node["mem_available"],
                 disk_total=node["disk_total"],
                 disk_available=node["disk_available"],
-                core_network_load=node["core_network_load"],
-                core_business_load=business_load,
-                signaling_load=float(business_load.get("signaling_load", node["core_network_load"])),
-                session_load=float(business_load.get("session_load", node["core_network_load"])),
-                user_plane_load=float(business_load.get("user_plane_load", node["core_network_load"])),
-                mobility_load=float(business_load.get("mobility_load", node["core_network_load"])),
-                policy_load=float(business_load.get("policy_load", node["core_network_load"])),
-                auth_load=float(business_load.get("auth_load", node["core_network_load"])),
+                core_network_load=float(node.get("core_network_load", 0.0)),
+                core_business_load=business_values,
+                signaling_load=business_values["signaling_load"],
+                session_load=business_values["session_load"],
+                user_plane_load=business_values["user_plane_load"],
+                mobility_load=business_values["mobility_load"],
+                policy_load=business_values["policy_load"],
+                auth_load=business_values["auth_load"],
+                deployed_core_nf_count=int(node.get("deployed_core_nf_count", 0)),
                 node_reliability=node["node_reliability"],
                 type=node["type"],
             )

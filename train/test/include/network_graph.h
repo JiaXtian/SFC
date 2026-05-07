@@ -20,12 +20,21 @@ struct NodeResources {
 };
 
 struct CoreBusinessLoad {
-    float signaling_load = 0.5f;
-    float session_load = 0.5f;
-    float user_plane_load = 0.5f;
-    float mobility_load = 0.5f;
-    float policy_load = 0.5f;
-    float auth_load = 0.5f;
+    float signaling_load = 0.0f;
+    float session_load = 0.0f;
+    float user_plane_load = 0.0f;
+    float mobility_load = 0.0f;
+    float policy_load = 0.0f;
+    float auth_load = 0.0f;
+};
+
+struct CoreDependency {
+    std::string source;
+    std::string target;
+    float bandwidth_required_gbps = 0.0f;
+    float criticality = 1.0f;
+    float latency_weight = 1.0f;
+    float reliability_weight = 1.0f;
 };
 
 struct Node {
@@ -35,6 +44,7 @@ struct Node {
     float core_network_load = 0.5f;
     CoreBusinessLoad core_business_load;
     float node_reliability = 0.98f;
+    int deployed_core_nf_count = 0;
     std::vector<size_t> neighbors;
     std::vector<size_t> predecessors;
 };
@@ -70,6 +80,7 @@ struct SFCRequest {
     std::string service_type;
     std::string network_domain = "open5gs";
     std::vector<VNFRequirement> vnf_sequence;
+    std::vector<CoreDependency> core_dependencies;
     std::string source_node;
     std::string destination_node;
     float max_latency_ms = 0.0f;
@@ -96,6 +107,7 @@ public:
     NetworkGraph clone() const;
 
     void update_node_resources(const std::string& node_id, float cpu_delta, float mem_delta, float disk_delta = 0.0f);
+    void update_node_business_load(const std::string& node_id, const CoreBusinessLoad& delta);
     void update_link_bandwidth(const std::string& src, const std::string& tgt, float bw_delta);
 
 private:

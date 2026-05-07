@@ -1,4 +1,4 @@
-"""DRL Agent（A2C，支持扩展输入特征）"""
+"""DRL Agent（A2C，open5gs核心网部署输入特征）"""
 from typing import List, Tuple
 
 import torch
@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, node_dim=192, vnf_dim=8, context_dim=48, hidden_dim=384):
+    def __init__(self, node_dim=192, vnf_dim=24, context_dim=32, hidden_dim=384):
         super().__init__()
         combined_dim = node_dim + vnf_dim + context_dim
         self.fc = nn.Sequential(
@@ -60,8 +60,8 @@ class DRLAgent:
     def __init__(
         self,
         node_dim=192,
-        vnf_dim=8,
-        context_dim=48,
+        vnf_dim=24,
+        context_dim=32,
         actor_lr=1e-4,
         critic_lr=3e-4,
         gamma=0.99,

@@ -54,44 +54,90 @@ std::unordered_map<std::string, float> HeuristicPruner::dijkstra_single_source(
     return distances;
 }
 
-float HeuristicPruner::compute_score(const Node& node, const VNFRequirement&, float dist_from_prev, float dist_to_dest) const {
+static std::string nf_type_of(const VNFRequirement& vnf) {
+    return !vnf.nf_type.empty() ? vnf.nf_type : (!vnf.core_nf_type.empty() ? vnf.core_nf_type : vnf.vnf_type);
+}
+
+float HeuristicPruner::compute_score(
+    const Node& node,
+    const VNFRequirement& vnf,
+    float dependency_delay,
+    float dependency_hops,
+    float dependency_count) const {
     float cpu_util = 1.0f - (node.resources.cpu_total > 1e-6f ? node.resources.cpu_available / node.resources.cpu_total : 0.0f);
     float mem_util = 1.0f - (node.resources.mem_total > 1e-6f ? node.resources.mem_available / node.resources.mem_total : 0.0f);
     float disk_util = 1.0f - (node.resources.disk_total > 1e-6f ? node.resources.disk_available / node.resources.disk_total : 0.0f);
 
     float resource_score = 0.5f * cpu_util + 0.3f * mem_util + 0.2f * disk_util;
-    float latency_score = (dist_from_prev + dist_to_dest) / 1000.0f;
+    float business_pressure = std::max({
+        node.core_business_load.signaling_load + vnf.business_load_demand.signaling_load,
+        node.core_business_load.session_load + vnf.business_load_demand.session_load,
+        node.core_business_load.user_plane_load + vnf.business_load_demand.user_plane_load,
+        node.core_business_load.mobility_load + vnf.business_load_demand.mobility_load,
+        node.core_business_load.policy_load + vnf.business_load_demand.policy_load,
+        node.core_business_load.auth_load + vnf.business_load_demand.auth_load,
+    });
+    float hotspot_penalty = std::max(0.0f, business_pressure - 0.78f) * 5.0f
+        + std::max(0, node.deployed_core_nf_count - 2) * 1.5f;
+    if (nf_type_of(vnf) == "upf") {
+        hotspot_penalty += std::max(0.0f, business_pressure - 0.55f) * 4.0f;
+    }
+    float latency_score = (dependency_delay + 1.7f * dependency_hops) / 120.0f;
+    float dependency_bonus = -0.08f * dependency_count;
 
-    return config_.w_res * resource_score + config_.w_lat * latency_score;
+    return config_.w_res * resource_score + config_.w_lat * latency_score + hotspot_penalty + dependency_bonus;
 }
 
 std::vector<std::string> HeuristicPruner::get_candidate_nodes(
     const NetworkGraph& graph,
     const VNFRequirement& vnf,
-    const std::string& prev_node,
-    const std::string& dest_node,
+    const std::unordered_map<std::string, std::string>& deployed_by_type,
+    const std::vector<CoreDependency>& dependencies,
     float remaining_delay) {
-    auto dist_from_prev = dijkstra_single_source(graph, prev_node, false);
-    auto dist_to_dest = dijkstra_single_source(graph, dest_node, true);
-
     std::vector<std::pair<float, std::string>> scored_candidates;
+    const std::string current_type = nf_type_of(vnf);
 
     for (const auto& node : graph.get_nodes()) {
         if (!node.resources.has_sufficient_resources(vnf.cpu_required, vnf.mem_required, vnf.disk_required_gb)) {
             continue;
         }
 
-        float d1 = dist_from_prev[node.id];
-        float d2 = dist_to_dest[node.id];
+        float dependency_delay = 0.0f;
+        float dependency_hops = 0.0f;
+        float dependency_count = 0.0f;
+        bool feasible = true;
+        for (const auto& dep : dependencies) {
+            std::string src_node;
+            std::string dst_node;
+            if (dep.source == current_type) {
+                auto it = deployed_by_type.find(dep.target);
+                if (it == deployed_by_type.end()) continue;
+                src_node = node.id;
+                dst_node = it->second;
+            } else if (dep.target == current_type) {
+                auto it = deployed_by_type.find(dep.source);
+                if (it == deployed_by_type.end()) continue;
+                src_node = it->second;
+                dst_node = node.id;
+            } else {
+                continue;
+            }
 
-        if (d1 == std::numeric_limits<float>::infinity() || d2 == std::numeric_limits<float>::infinity()) {
+            auto dist = dijkstra_single_source(graph, src_node, false);
+            auto it_dist = dist.find(dst_node);
+            if (it_dist == dist.end() || it_dist->second == std::numeric_limits<float>::infinity()) {
+                feasible = false;
+                break;
+            }
+            dependency_delay += it_dist->second * dep.latency_weight;
+            dependency_hops += std::max(1.0f, it_dist->second / 3.0f);
+            dependency_count += 1.0f;
+        }
+        if (!feasible || dependency_delay > remaining_delay * 1.08f) {
             continue;
         }
-        if (d1 + d2 > remaining_delay) {
-            continue;
-        }
 
-        float score = compute_score(node, vnf, d1, d2);
+        float score = compute_score(node, vnf, dependency_delay, dependency_hops, dependency_count);
         scored_candidates.emplace_back(score, node.id);
     }
 
