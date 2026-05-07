@@ -20,7 +20,7 @@ $SKIP_BUILD = 0
 $SKIP_INFER = 0
 
 $DEVICE = "auto"
-$EPOCHS = 6
+$EPOCHS = 40
 $MAX_REQUESTS_PER_FILE = 8
 $MAX_DATA_FILES = 10
 $WARMUP_EPOCHS = 6
@@ -36,11 +36,11 @@ $REL_CURR_STRICT_RAMP_RATIO = 0.24
 $SHARED_RESOURCES_PROB_MIN = 0.18
 $SHARED_RESOURCES_PROB_MAX = 0.42
 
-$TRAIN_TOPOLOGIES = 12
+$TRAIN_TOPOLOGIES = 8
 $TRAIN_GROUPS_PER_TOPOLOGY = 3
 $TRAIN_REQUESTS_PER_GROUP = 80
 $TRAIN_SCALES = "300,800,2500,5000,6000"
-$SCALE_DISTRIBUTION = "2,2,4,2,2"
+$SCALE_DISTRIBUTION = "2,2,2,1,1"
 $VAL_TOPOLOGIES = 4
 $VAL_REQUESTS_PER_TOPOLOGY = 80
 
@@ -172,6 +172,23 @@ function Resolve-BenchmarkExe {
     }
 
     return $null
+}
+
+function Resolve-Checkpoint {
+    param(
+        [string]$BestPath,
+        [string]$FinalPath
+    )
+
+    if (Test-Path -LiteralPath $BestPath -PathType Leaf) {
+        return $BestPath
+    }
+
+    if (Test-Path -LiteralPath $FinalPath -PathType Leaf) {
+        return $FinalPath
+    }
+
+    Die "Missing model file: $BestPath or $FinalPath"
 }
 
 function Need-Value {
@@ -350,6 +367,7 @@ while ($i -lt $args.Count) {
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PROJECT_ROOT = Split-Path -Parent $SCRIPT_DIR
 $MODEL_EXPORT_DIR = Join-Path $PROJECT_ROOT "models\exported"
+$MODEL_CHECKPOINT_DIR = Join-Path $PROJECT_ROOT "models\checkpoints"
 $RESULT_JSON = Join-Path $SCRIPT_DIR "results\results.json"
 
 Set-Location $SCRIPT_DIR
@@ -442,15 +460,23 @@ else {
 # ============================================================
 
 if ($SKIP_EXPORT -eq 0) {
-    Require-File "models\checkpoints\gnn_best.pth"
-    Require-File "models\checkpoints\model_best.pth"
+    $gnnCheckpoint = Resolve-Checkpoint `
+        (Join-Path $MODEL_CHECKPOINT_DIR "gnn_best.pth") `
+        (Join-Path $MODEL_CHECKPOINT_DIR "gnn_final.pth")
+    $actorCheckpoint = Resolve-Checkpoint `
+        (Join-Path $MODEL_CHECKPOINT_DIR "model_best.pth") `
+        (Join-Path $MODEL_CHECKPOINT_DIR "model_final.pth")
 
     Log-Step "3/5" "Exporting ONNX models..."
+    Write-Host "  GNN checkpoint: $gnnCheckpoint"
+    Write-Host "  Actor checkpoint: $actorCheckpoint"
 
     New-Item -ItemType Directory -Force -Path $MODEL_EXPORT_DIR | Out-Null
 
     $exportArgs = @(
         "-m", "training.models.model_export",
+        "--gnn-checkpoint", "$gnnCheckpoint",
+        "--actor-checkpoint", "$actorCheckpoint",
         "--output-dir", "$MODEL_EXPORT_DIR"
     )
 

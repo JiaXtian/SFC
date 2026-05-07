@@ -43,6 +43,7 @@ TEST_REQUESTS_FILE="data/val/requests/requests_000.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MODEL_EXPORT_DIR="${PROJECT_ROOT}/models/exported"
+MODEL_CHECKPOINT_DIR="${PROJECT_ROOT}/models/checkpoints"
 RESULT_JSON="${SCRIPT_DIR}/results/results.json"
 
 usage() {
@@ -103,6 +104,19 @@ jobs_for_make() {
 
 require_file() { [[ -f "$1" ]] || die "缺少文件: $1"; }
 require_dir_nonempty() { [[ -d "$1" ]] || die "缺少目录: $1"; find "$1" -type f | head -n 1 >/dev/null || die "目录为空: $1"; }
+resolve_checkpoint() {
+  local best_path="$1"
+  local final_path="$2"
+  if [[ -f "$best_path" ]]; then
+    printf '%s\n' "$best_path"
+    return 0
+  fi
+  if [[ -f "$final_path" ]]; then
+    printf '%s\n' "$final_path"
+    return 0
+  fi
+  die "缺少模型文件: $best_path 或 $final_path"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -201,10 +215,15 @@ fi
 
 # 3) Export ONNX
 if [[ "$SKIP_EXPORT" -eq 0 ]]; then
-  require_file "models/checkpoints/gnn_best.pth"
-  require_file "models/checkpoints/model_best.pth"
+  GNN_CHECKPOINT="$(resolve_checkpoint "${MODEL_CHECKPOINT_DIR}/gnn_best.pth" "${MODEL_CHECKPOINT_DIR}/gnn_final.pth")"
+  ACTOR_CHECKPOINT="$(resolve_checkpoint "${MODEL_CHECKPOINT_DIR}/model_best.pth" "${MODEL_CHECKPOINT_DIR}/model_final.pth")"
   log "3/5" "导出ONNX模型..."
-  python -m training.models.model_export --output-dir "${MODEL_EXPORT_DIR}"
+  echo "  GNN checkpoint: ${GNN_CHECKPOINT}"
+  echo "  Actor checkpoint: ${ACTOR_CHECKPOINT}"
+  python -m training.models.model_export \
+    --gnn-checkpoint "${GNN_CHECKPOINT}" \
+    --actor-checkpoint "${ACTOR_CHECKPOINT}" \
+    --output-dir "${MODEL_EXPORT_DIR}"
 else
   log "3/5" "跳过ONNX导出"
 fi
