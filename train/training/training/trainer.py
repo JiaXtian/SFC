@@ -33,6 +33,7 @@ class SFCTrainer:
         history_window=0,
         backend_align_context=True,
         max_probe_candidates=5,
+        max_decision_ms=460.0,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -41,6 +42,7 @@ class SFCTrainer:
         self.history_window = int(max(0, history_window))
         self.backend_align_context = bool(backend_align_context)
         self.max_probe_candidates = int(max(4, max_probe_candidates))
+        self.max_decision_ms = float(max(120.0, max_decision_ms))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -499,10 +501,22 @@ class SFCTrainer:
             selected = None
             selected_plan = None
             for probe_idx in probe_order[:max_probe]:
+                if probe_candidates and (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
+                    break
                 selected_node = nodes_list[candidate_indices[probe_idx]]
                 plan = env.plan_candidate(selected_node)
                 if plan:
                     probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
+            if not probe_candidates:
+                fallback_limit = min(max_probe + 8, len(probe_order))
+                for probe_idx in probe_order[max_probe:fallback_limit]:
+                    if (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
+                        break
+                    selected_node = nodes_list[candidate_indices[probe_idx]]
+                    plan = env.plan_candidate(selected_node)
+                    if plan:
+                        probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
+                        break
             if probe_candidates:
                 probe_candidates.sort(key=lambda x: x[0])
                 _score, action_idx, selected, selected_plan = probe_candidates[0]

@@ -20,13 +20,15 @@ $SKIP_BUILD = 0
 $SKIP_INFER = 0
 
 $DEVICE = "auto"
-$EPOCHS = 50
-$MAX_REQUESTS_PER_FILE = 8
-$MAX_DATA_FILES = 10
+$EPOCHS = 80
+$MAX_REQUESTS_PER_FILE = 10
+$MAX_DATA_FILES = 16
 $WARMUP_EPOCHS = 6
 $TIME_BUDGET_HOURS = 0.0
 $MIN_EPOCHS = 0
-$HEURISTIC_TOP_M = 80
+$HEURISTIC_TOP_M = 64
+$EVAL_DATA_FILES = 10
+$EVAL_REQUESTS_PER_FILE = 8
 
 $REL_CURR_START_EPOCH = 1
 $REL_CURR_END_EPOCH = 32
@@ -36,13 +38,13 @@ $REL_CURR_STRICT_RAMP_RATIO = 0.24
 $SHARED_RESOURCES_PROB_MIN = 0.18
 $SHARED_RESOURCES_PROB_MAX = 0.42
 
-$TRAIN_TOPOLOGIES = 12
-$TRAIN_GROUPS_PER_TOPOLOGY = 3
-$TRAIN_REQUESTS_PER_GROUP = 80
+$TRAIN_TOPOLOGIES = 20
+$TRAIN_GROUPS_PER_TOPOLOGY = 4
+$TRAIN_REQUESTS_PER_GROUP = 100
 $TRAIN_SCALES = "300,800,2500,5000,6000"
-$SCALE_DISTRIBUTION = "2,2,4,2,2"
-$VAL_TOPOLOGIES = 4
-$VAL_REQUESTS_PER_TOPOLOGY = 80
+$SCALE_DISTRIBUTION = "3,3,4,3,3"
+$VAL_TOPOLOGIES = 10
+$VAL_REQUESTS_PER_TOPOLOGY = 100
 
 $TOP_M = 80
 $ONNXRUNTIME_DIR_ARG = ""
@@ -75,6 +77,8 @@ Training/data options:
   --time-budget-hours N
   --min-epochs N
   --heuristic-top-m N
+  --eval-data-files N
+  --eval-requests-per-file N
   --train-topologies N
   --train-groups-per-topology N
   --train-requests-per-group N
@@ -266,6 +270,14 @@ while ($i -lt $args.Count) {
             $HEURISTIC_TOP_M = [int](Need-Value $arg $i $args)
             $i += 2
         }
+        "--eval-data-files" {
+            $EVAL_DATA_FILES = [int](Need-Value $arg $i $args)
+            $i += 2
+        }
+        "--eval-requests-per-file" {
+            $EVAL_REQUESTS_PER_FILE = [int](Need-Value $arg $i $args)
+            $i += 2
+        }
         "--rel-curr-start-epoch" {
             $REL_CURR_START_EPOCH = [int](Need-Value $arg $i $args)
             $i += 2
@@ -437,6 +449,8 @@ if ($SKIP_TRAIN -eq 0) {
         "--time_budget_hours", "$TIME_BUDGET_HOURS",
         "--min_epochs", "$MIN_EPOCHS",
         "--heuristic_top_m", "$HEURISTIC_TOP_M",
+        "--eval_data_files", "$EVAL_DATA_FILES",
+        "--eval_requests_per_file", "$EVAL_REQUESTS_PER_FILE",
         "--rel_curr_start_epoch", "$REL_CURR_START_EPOCH",
         "--rel_curr_end_epoch", "$REL_CURR_END_EPOCH",
         "--rel_curr_min_scale", "$REL_CURR_MIN_SCALE",

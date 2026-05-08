@@ -46,9 +46,9 @@ class HeuristicPruner:
     def _prefilter_limit(self, graph_size, top_m):
         top_m = int(max(16, top_m))
         if graph_size >= 4000:
-            return min(self.fast_prefilter_limit, max(top_m + 24, int(top_m * 1.35)))
+            return min(self.fast_prefilter_limit, max(top_m + 8, int(top_m * 1.10)))
         if graph_size >= 2000:
-            return min(self.fast_prefilter_limit, max(top_m + 36, int(top_m * 1.65)))
+            return min(self.fast_prefilter_limit, max(top_m + 16, int(top_m * 1.25)))
         return self.fast_prefilter_limit
 
     @staticmethod
@@ -411,6 +411,32 @@ def _build_scale_balanced_data(train_topos, train_reqs):
     return balanced
 
 
+def _select_scale_coverage(data_pairs, max_files):
+    if not data_pairs or max_files <= 0:
+        return []
+    by_scale = {}
+    for topo_file, req_file in data_pairs:
+        scale = _read_topology_scale(topo_file)
+        scale_key = int(round(scale / 100.0) * 100) if scale > 0 else 0
+        by_scale.setdefault(scale_key, []).append((topo_file, req_file))
+    selected = []
+    scale_keys = sorted(by_scale.keys())
+    cursor = 0
+    while len(selected) < max_files and scale_keys:
+        progressed = False
+        for scale in scale_keys:
+            bucket = by_scale[scale]
+            if cursor < len(bucket):
+                selected.append(bucket[cursor])
+                progressed = True
+                if len(selected) >= max_files:
+                    break
+        if not progressed:
+            break
+        cursor += 1
+    return selected
+
+
 def _training_quality_score(metrics, prefix=""):
     """Scale-independent checkpoint score.
 
@@ -447,12 +473,12 @@ def _training_quality_score(metrics, prefix=""):
 def main():
     os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=40, help="训练轮次")
+    parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
-    parser.add_argument("--heuristic_top_m", type=int, default=80, help="候选剪枝上限")
-    parser.add_argument("--max_requests_per_file", type=int, default=8)
+    parser.add_argument("--heuristic_top_m", type=int, default=64, help="候选剪枝上限")
+    parser.add_argument("--max_requests_per_file", type=int, default=10)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
-    parser.add_argument("--max_data_files", type=int, default=10, help="每个epoch最多使用的训练文件数，0表示全部")
+    parser.add_argument("--max_data_files", type=int, default=16, help="每个epoch最多使用的训练文件数，0表示全部")
     parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
     parser.add_argument("--time_budget_hours", type=float, default=0.0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--min_epochs", type=int, default=0, help="保留兼容参数；当前训练不按时间预算早停")
@@ -465,8 +491,8 @@ def main():
     parser.add_argument("--shared_resources_prob_max", type=float, default=0.45, help="训练后期共享资源模式概率")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
-    parser.add_argument("--eval_data_files", type=int, default=4, help="每轮固定验证使用的文件数")
-    parser.add_argument("--eval_requests_per_file", type=int, default=4, help="每个验证文件使用的请求数")
+    parser.add_argument("--eval_data_files", type=int, default=10, help="每轮固定验证使用的文件数")
+    parser.add_argument("--eval_requests_per_file", type=int, default=8, help="每个验证文件使用的请求数")
     parser.add_argument("--no_save_checkpoints", action="store_true", help="调试/smoke test时不写入正式checkpoint")
     parser.add_argument("--init_model_checkpoint", type=str, default="", help="初始化Actor/Critic权重路径")
     parser.add_argument("--init_gnn_checkpoint", type=str, default="", help="初始化GNN权重路径")
@@ -537,9 +563,9 @@ def main():
     print(f"训练数据池: {len(full_train_data)} 组 (拓扑: {len(train_topos)}, 请求文件: {len(train_reqs)})")
     fixed_eval_data = _build_scale_balanced_data(val_topos, val_reqs) if val_topos and val_reqs else []
     if not fixed_eval_data:
-        fixed_eval_data = full_train_data[: max(1, min(len(full_train_data), args.eval_data_files))]
+        fixed_eval_data = _select_scale_coverage(full_train_data, max(1, min(len(full_train_data), args.eval_data_files)))
     else:
-        fixed_eval_data = fixed_eval_data[: max(1, min(len(fixed_eval_data), args.eval_data_files))]
+        fixed_eval_data = _select_scale_coverage(fixed_eval_data, max(1, min(len(fixed_eval_data), args.eval_data_files)))
     print(
         f"固定验证集: {len(fixed_eval_data)} 组 × 每组 {args.eval_requests_per_file} 请求 "
         "(用于稳定评估reward/quality趋势)"
@@ -672,22 +698,29 @@ def main():
             max_step_fail = top_fails.get("max_steps_reached", 0)
             no_candidate_fail = top_fails.get("no_candidates", 0) + top_fails.get("invalid_candidates", 0)
             if max_step_fail > 0.5 * max(1, epoch_metrics.get("total_requests", 1)):
-                heuristic.top_m = min(120, heuristic.top_m + 5)
+                heuristic.top_m = min(96, heuristic.top_m + 4)
                 epsilon = max(epsilon, 0.22)
             if no_candidate_fail > 0:
-                heuristic.top_m = min(120, heuristic.top_m + 8)
+                heuristic.top_m = min(96, heuristic.top_m + 6)
                 epsilon = max(epsilon, 0.20)
 
             # 2) 时延优化：在成功率较高时收紧候选规模，提高推理速度
+            latency_pressure = max(
+                float(epoch_metrics.get("p95_algorithm_latency_ms", 0.0)),
+                float(epoch_metrics.get("eval_p95_algorithm_latency_ms", 0.0)),
+            )
             if (
                 epoch_metrics["success_rate"] >= 99.0
                 and (
                     epoch_metrics["avg_algorithm_latency_ms"] > 300
-                    or epoch_metrics.get("p95_algorithm_latency_ms", 0.0) > 450
+                    or latency_pressure > 450
                 )
                 and no_candidate_fail == 0
             ):
-                heuristic.top_m = max(64, heuristic.top_m - 4)
+                heuristic.top_m = max(48, heuristic.top_m - 6)
+                trainer.max_probe_candidates = max(4, trainer.max_probe_candidates - 1)
+            elif latency_pressure > 500:
+                heuristic.top_m = max(48, heuristic.top_m - 8)
                 trainer.max_probe_candidates = max(4, trainer.max_probe_candidates - 1)
 
             # 3) 崩塌保护：成功率明显低于历史最佳时触发
@@ -724,7 +757,7 @@ def main():
 
                 # 增强探索，扩大候选，帮助跳出局部最优
                 epsilon = max(epsilon, 0.28)
-                heuristic.top_m = min(120, heuristic.top_m + 10)
+                heuristic.top_m = min(96, heuristic.top_m + 8)
                 collapse_count = 0
 
             # 4) Full SLA长期为0时，前期保持宽松可靠性目标，避免无效训练

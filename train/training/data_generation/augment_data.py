@@ -107,7 +107,7 @@ def augment_training_data(
             total_train_requests += req_count
 
     print("\n[3/3] 生成验证集...")
-    val_scales = [scale for scale in parsed_scales if scale > 1200] or parsed_scales
+    val_scales = parsed_scales
     val_scale_plan = _distribute_counts(val_topologies, val_scales, scale_distribution)
     val_topos = generate_scaled_topologies(
         val_scale_plan,
