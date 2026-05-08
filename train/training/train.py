@@ -411,21 +411,26 @@ def _build_scale_balanced_data(train_topos, train_reqs):
     return balanced
 
 
-def _training_quality_score(metrics):
+def _training_quality_score(metrics, prefix=""):
     """Scale-independent checkpoint score.
 
     Raw algorithm latency grows with topology size, so using it directly made
     warmup epochs look better than full-scale epochs.  This score emphasizes
     deployment quality and only applies a bounded speed term.
     """
-    success = float(metrics.get("success_rate", 0.0))
-    full_sla = float(metrics.get("full_sla_satisfaction_rate", metrics.get("sla_satisfaction_rate", 0.0)))
-    dep = float(metrics.get("dependency_satisfaction_rate", 0.0))
-    quality = 100.0 * float(metrics.get("avg_quality_score", 0.0))
-    resource = 100.0 * float(metrics.get("resource_balance_score", 0.0))
-    business = 100.0 * float(metrics.get("business_balance_score", 0.0))
-    link_good = 100.0 * (1.0 - float(metrics.get("link_congestion_score", 0.0)))
-    alg_latency = float(metrics.get("avg_algorithm_latency_ms", 0.0))
+    success = float(metrics.get(f"{prefix}success_rate", metrics.get("success_rate", 0.0)))
+    full_sla = float(
+        metrics.get(
+            f"{prefix}full_sla_satisfaction_rate",
+            metrics.get(f"{prefix}sla_satisfaction_rate", metrics.get("sla_satisfaction_rate", success)),
+        )
+    )
+    dep = float(metrics.get(f"{prefix}dependency_satisfaction_rate", metrics.get("dependency_satisfaction_rate", 0.0)))
+    quality = 100.0 * float(metrics.get(f"{prefix}avg_quality_score", metrics.get("avg_quality_score", 0.0)))
+    resource = 100.0 * float(metrics.get(f"{prefix}resource_balance_score", metrics.get("resource_balance_score", 0.0)))
+    business = 100.0 * float(metrics.get(f"{prefix}business_balance_score", metrics.get("business_balance_score", 0.0)))
+    link_good = 100.0 * (1.0 - float(metrics.get(f"{prefix}link_congestion_score", metrics.get("link_congestion_score", 0.0))))
+    alg_latency = float(metrics.get(f"{prefix}avg_algorithm_latency_ms", metrics.get("avg_algorithm_latency_ms", 0.0)))
     speed = 100.0 * max(0.0, 1.0 - min(1.0, alg_latency / 500.0))
     return (
         0.24 * success
@@ -460,6 +465,9 @@ def main():
     parser.add_argument("--shared_resources_prob_max", type=float, default=0.45, help="训练后期共享资源模式概率")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
+    parser.add_argument("--eval_data_files", type=int, default=4, help="每轮固定验证使用的文件数")
+    parser.add_argument("--eval_requests_per_file", type=int, default=4, help="每个验证文件使用的请求数")
+    parser.add_argument("--no_save_checkpoints", action="store_true", help="调试/smoke test时不写入正式checkpoint")
     parser.add_argument("--init_model_checkpoint", type=str, default="", help="初始化Actor/Critic权重路径")
     parser.add_argument("--init_gnn_checkpoint", type=str, default="", help="初始化GNN权重路径")
     args = parser.parse_args()
@@ -515,6 +523,8 @@ def main():
 
     train_topos = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "topologies" / "*.json")))
     train_reqs = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "requests" / "*.json")))
+    val_topos = sorted(glob.glob(str(TRAIN_ROOT / "data" / "val" / "topologies" / "*.json")))
+    val_reqs = sorted(glob.glob(str(TRAIN_ROOT / "data" / "val" / "requests" / "*.json")))
 
     if not train_topos or not train_reqs:
         print("错误: 训练数据未生成，请先运行数据增强")
@@ -525,6 +535,15 @@ def main():
     if not full_train_data:
         full_train_data = list(zip(train_topos * (len(train_reqs) // len(train_topos) + 1), train_reqs))[: len(train_reqs)]
     print(f"训练数据池: {len(full_train_data)} 组 (拓扑: {len(train_topos)}, 请求文件: {len(train_reqs)})")
+    fixed_eval_data = _build_scale_balanced_data(val_topos, val_reqs) if val_topos and val_reqs else []
+    if not fixed_eval_data:
+        fixed_eval_data = full_train_data[: max(1, min(len(full_train_data), args.eval_data_files))]
+    else:
+        fixed_eval_data = fixed_eval_data[: max(1, min(len(fixed_eval_data), args.eval_data_files))]
+    print(
+        f"固定验证集: {len(fixed_eval_data)} 组 × 每组 {args.eval_requests_per_file} 请求 "
+        "(用于稳定评估reward/quality趋势)"
+    )
 
     os.makedirs("models/checkpoints", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
@@ -532,6 +551,8 @@ def main():
     epsilon = 0.35
     best_score = -1e9
     best_success_rate = 0.0
+    best_eval_quality = 0.0
+    best_eval_reward = -1e9
     history = []
     collapse_count = 0
     reliability_curriculum = {
@@ -571,8 +592,12 @@ def main():
             if warmup_pool:
                 candidate_pool = warmup_pool
 
-        random.shuffle(candidate_pool)
-        train_data = candidate_pool[: min(len(candidate_pool), epoch_files)]
+        if candidate_pool:
+            rotation = ((epoch - 1) * max(1, epoch_files)) % len(candidate_pool)
+            rotated_pool = candidate_pool[rotation:] + candidate_pool[:rotation]
+        else:
+            rotated_pool = []
+        train_data = rotated_pool[: min(len(rotated_pool), epoch_files)]
 
         epoch_metrics = trainer.train_epoch(
             epoch,
@@ -584,9 +609,22 @@ def main():
             total_epochs=args.epochs,
             reliability_curriculum=reliability_curriculum,
         )
+        eval_metrics = trainer.evaluate_epoch(
+            epoch,
+            fixed_eval_data,
+            heuristic,
+            max_requests_per_file=args.eval_requests_per_file,
+            shared_resources=False,
+        )
+        epoch_metrics.update(eval_metrics)
+        best_eval_quality = max(best_eval_quality, float(eval_metrics.get("eval_avg_quality_score", 0.0)))
+        best_eval_reward = max(best_eval_reward, float(eval_metrics.get("eval_avg_reward", 0.0)))
+        epoch_metrics["eval_quality_best_so_far"] = best_eval_quality
+        epoch_metrics["eval_reward_best_so_far"] = best_eval_reward
         history.append(epoch_metrics)
 
         composite_score = _training_quality_score(epoch_metrics)
+        eval_score = _training_quality_score(epoch_metrics, prefix="eval_")
         if epoch == args.warmup_epochs + 1:
             best_score = -1e9
             print("  ℹ 进入完整规模训练阶段，重置最佳模型评分基准")
@@ -595,26 +633,33 @@ def main():
         print(
             f"Epoch {epoch} | Score={composite_score:.2f} | Reward={epoch_metrics['avg_reward']:.2f} | "
             f"Quality={epoch_metrics.get('avg_quality_score', 0.0):.3f} | "
+            f"EvalReward={epoch_metrics.get('eval_avg_reward', 0.0):.2f} | "
+            f"EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f} "
+            f"(Best={epoch_metrics.get('eval_quality_best_so_far', 0.0):.3f}) | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
+            f"AlgP95={epoch_metrics.get('p95_algorithm_latency_ms', 0.0):.2f}ms | "
             f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"
         )
 
         eligible_for_best = epoch > args.warmup_epochs or best_score <= -1e8
-        if eligible_for_best and composite_score > best_score:
-            best_score = composite_score
+        if eligible_for_best and eval_score > best_score:
+            best_score = eval_score
             best_success_rate = max(best_success_rate, epoch_metrics["success_rate"])
-            agent.save("models/checkpoints/model_best.pth")
-            torch.save(gnn.state_dict(), "models/checkpoints/gnn_best.pth")
+            if not args.no_save_checkpoints:
+                agent.save("models/checkpoints/model_best.pth")
+                torch.save(gnn.state_dict(), "models/checkpoints/gnn_best.pth")
             print(
                 "  ✓ 新最佳模型: "
-                f"Score={composite_score:.2f}, Success={epoch_metrics['success_rate']:.2f}%"
+                f"EvalScore={eval_score:.2f}, EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f}, "
+                f"Success={epoch_metrics['success_rate']:.2f}%"
             )
             collapse_count = 0
 
         if epoch % 10 == 0:
-            agent.save(f"models/checkpoints/model_epoch_{epoch}.pth")
-            torch.save(gnn.state_dict(), f"models/checkpoints/gnn_epoch_{epoch}.pth")
-            print(f"  ✓ 检查点已保存 (epoch {epoch})")
+            if not args.no_save_checkpoints:
+                agent.save(f"models/checkpoints/model_epoch_{epoch}.pth")
+                torch.save(gnn.state_dict(), f"models/checkpoints/gnn_epoch_{epoch}.pth")
+                print(f"  ✓ 检查点已保存 (epoch {epoch})")
 
         # 自适应控制：抑制中后期性能崩塌，并平衡成功率/SLA/时延
         if args.adaptive_control:
@@ -636,10 +681,14 @@ def main():
             # 2) 时延优化：在成功率较高时收紧候选规模，提高推理速度
             if (
                 epoch_metrics["success_rate"] >= 99.0
-                and epoch_metrics["avg_algorithm_latency_ms"] > 300
+                and (
+                    epoch_metrics["avg_algorithm_latency_ms"] > 300
+                    or epoch_metrics.get("p95_algorithm_latency_ms", 0.0) > 450
+                )
                 and no_candidate_fail == 0
             ):
                 heuristic.top_m = max(64, heuristic.top_m - 4)
+                trainer.max_probe_candidates = max(4, trainer.max_probe_candidates - 1)
 
             # 3) 崩塌保护：成功率明显低于历史最佳时触发
             collapse_threshold = max(10.0, best_success_rate * 0.55)
@@ -693,13 +742,14 @@ def main():
 
     best_actor_path = "models/checkpoints/model_best.pth"
     best_gnn_path = "models/checkpoints/gnn_best.pth"
-    if os.path.exists(best_actor_path) and os.path.exists(best_gnn_path):
+    if not args.no_save_checkpoints and os.path.exists(best_actor_path) and os.path.exists(best_gnn_path):
         agent.load(best_actor_path, load_optimizer=False)
         gnn.load_state_dict(torch.load(best_gnn_path, map_location=args.device))
         print(f"  ✓ 已恢复最佳策略作为最终模型: Score={best_score:.2f}")
 
-    agent.save("models/checkpoints/model_final.pth")
-    torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")
+    if not args.no_save_checkpoints:
+        agent.save("models/checkpoints/model_final.pth")
+        torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")
 
     json_path, csv_path, plot_path = save_metrics(history, output_dir="logs")
     total_time = time.time() - start_time

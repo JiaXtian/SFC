@@ -66,6 +66,7 @@ class DRLAgent:
         critic_lr=3e-4,
         gamma=0.99,
         entropy_coef=0.01,
+        imitation_coef=0.04,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         device="cpu",
@@ -73,6 +74,7 @@ class DRLAgent:
         self.device = device
         self.gamma = gamma
         self.entropy_coef = entropy_coef
+        self.imitation_coef = imitation_coef
         self.value_loss_coef = value_loss_coef
         self.max_grad_norm = max_grad_norm
         self.node_dim = node_dim
@@ -166,6 +168,10 @@ class DRLAgent:
             targets = rewards_tensor + self.gamma * next_values * (1 - dones_tensor)
 
         advantages = targets - values
+        if advantages.numel() > 1:
+            actor_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
+        else:
+            actor_advantages = advantages
         critic_loss = F.mse_loss(values, targets)
 
         self.critic_optimizer.zero_grad()
@@ -193,11 +199,12 @@ class DRLAgent:
             if action < 0 or action >= len(candidates):
                 continue
 
-            advantage = advantages[i].detach()
+            advantage = actor_advantages[i].detach()
             actor_loss = -log_probs[action] * advantage
+            imitation_loss = -log_probs[action]
 
             entropy = Categorical(probs).entropy()
-            actor_loss_total += actor_loss - self.entropy_coef * entropy
+            actor_loss_total += actor_loss + self.imitation_coef * imitation_loss - self.entropy_coef * entropy
             entropy_total += entropy.item()
             valid_count += 1
 

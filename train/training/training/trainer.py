@@ -32,7 +32,7 @@ class SFCTrainer:
         context_dim=CONTEXT_FEATURE_DIM,
         history_window=0,
         backend_align_context=True,
-        max_probe_candidates=8,
+        max_probe_candidates=5,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -40,7 +40,7 @@ class SFCTrainer:
         self.context_dim = int(context_dim)
         self.history_window = int(max(0, history_window))
         self.backend_align_context = bool(backend_align_context)
-        self.max_probe_candidates = int(max(6, max_probe_candidates))
+        self.max_probe_candidates = int(max(4, max_probe_candidates))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -145,12 +145,14 @@ class SFCTrainer:
         max_business_load = 0.0
         avg_business_load = 0.0
         if graph is not None:
-            cpu_total = sum(float(graph.nodes[n].get("cpu_total", 0.0)) for n in graph.nodes())
-            cpu_used = sum(float(graph.nodes[n].get("cpu_total", 0.0)) - float(graph.nodes[n].get("cpu_available", 0.0)) for n in graph.nodes())
-            mem_total = sum(float(graph.nodes[n].get("mem_total", 0.0)) for n in graph.nodes())
-            mem_used = sum(float(graph.nodes[n].get("mem_total", 0.0)) - float(graph.nodes[n].get("mem_available", 0.0)) for n in graph.nodes())
-            disk_total = sum(float(graph.nodes[n].get("disk_total", 0.0)) for n in graph.nodes())
-            disk_used = sum(float(graph.nodes[n].get("disk_total", 0.0)) - float(graph.nodes[n].get("disk_available", 0.0)) for n in graph.nodes())
+            sampled_nodes = self._sampled_graph_nodes(graph)
+            sampled_edges = self._sampled_graph_edges(graph)
+            cpu_total = sum(float(node.get("cpu_total", 0.0)) for _, node in sampled_nodes)
+            cpu_used = sum(float(node.get("cpu_total", 0.0)) - float(node.get("cpu_available", 0.0)) for _, node in sampled_nodes)
+            mem_total = sum(float(node.get("mem_total", 0.0)) for _, node in sampled_nodes)
+            mem_used = sum(float(node.get("mem_total", 0.0)) - float(node.get("mem_available", 0.0)) for _, node in sampled_nodes)
+            disk_total = sum(float(node.get("disk_total", 0.0)) for _, node in sampled_nodes)
+            disk_used = sum(float(node.get("disk_total", 0.0)) - float(node.get("disk_available", 0.0)) for _, node in sampled_nodes)
             resource_util = {
                 "cpu_utilization": cpu_used / cpu_total if cpu_total > 0 else 0.0,
                 "mem_utilization": mem_used / mem_total if mem_total > 0 else 0.0,
@@ -158,11 +160,11 @@ class SFCTrainer:
             }
             bw_ratios = []
             node_business = []
-            for _, _, edge in graph.edges(data=True):
+            for _, _, edge in sampled_edges:
                 total = float(edge.get("bandwidth_gbps", 0.0))
                 if total > 1e-9:
                     bw_ratios.append(1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total)
-            for _, node in graph.nodes(data=True):
+            for _, node in sampled_nodes:
                 load = node.get("core_business_load", {})
                 node_business.append(max(float(load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS))
             avg_bw_util = float(np.mean(bw_ratios)) if bw_ratios else 0.0
@@ -206,6 +208,22 @@ class SFCTrainer:
                 break
             ctx[idx] = float(value)
         return ctx
+
+    @staticmethod
+    def _sample_view(items, limit):
+        values = list(items)
+        if len(values) <= limit:
+            return values
+        stride = max(1, len(values) // limit)
+        return values[::stride][:limit]
+
+    @classmethod
+    def _sampled_graph_nodes(cls, graph, limit=768):
+        return cls._sample_view(graph.nodes(data=True), limit)
+
+    @classmethod
+    def _sampled_graph_edges(cls, graph, limit=1536):
+        return cls._sample_view(graph.edges(data=True), limit)
 
     @staticmethod
     def _build_vnf_features(vnf):
@@ -345,7 +363,17 @@ class SFCTrainer:
             node_index,
         )
 
-    def _train_episode(self, env, graph, request, epsilon, heuristic_pruner, reset_resources=True):
+    def _train_episode(
+        self,
+        env,
+        graph,
+        request,
+        epsilon,
+        heuristic_pruner,
+        reset_resources=True,
+        update_model=True,
+        deterministic_policy=False,
+    ):
         del graph
         state = env.reset(request, reset_resources=reset_resources)
         trajectories = []
@@ -357,7 +385,7 @@ class SFCTrainer:
 
         def finish_episode(success, failure_reason_local, info_obj=None):
             did_update = False
-            if trajectories:
+            if update_model and trajectories:
                 self.agent.update(trajectories)
                 did_update = True
 
@@ -391,7 +419,11 @@ class SFCTrainer:
             }
 
         node_features, edge_index, nodes_list, node_index = self._get_graph_data(env.topology)
-        node_embeddings = self.gnn(node_features, edge_index)
+        if update_model:
+            node_embeddings = self.gnn(node_features, edge_index)
+        else:
+            with torch.no_grad():
+                node_embeddings = self.gnn(node_features, edge_index)
         max_steps = max(12, len(request.get("core_nfs", [])))
 
         for step in range(max_steps):
@@ -415,8 +447,23 @@ class SFCTrainer:
             )
 
             if not candidates:
-                failure_reason = "no_candidates"
-                return finish_episode(False, failure_reason)
+                candidates = heuristic_pruner.prune(
+                    env.topology,
+                    vnf,
+                    deployed_by_type=state.get("deployed_by_type", {}),
+                    dependencies=state.get("dependencies", []),
+                    remaining_delay=float("inf"),
+                    top_m=max(heuristic_pruner.top_m, 128),
+                    current_nf_idx=int(state.get("current_nf_idx", 0)),
+                    total_core_nfs=int(state.get("total_core_nfs", 12)),
+                    accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
+                    reliability_requirement=float(state.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(state.get("accumulated_hops", 0)),
+                    max_dependency_hops=max(24, int(state.get("max_dependency_hops", 16))),
+                )
+                if not candidates:
+                    failure_reason = "no_candidates"
+                    return finish_episode(False, failure_reason)
 
             candidate_indices = [node_index[c] for c in candidates if c in node_index]
             if not candidate_indices:
@@ -426,7 +473,15 @@ class SFCTrainer:
             vnf_feat = self._build_vnf_features(vnf).to(self.device)
             ctx_feat = self._build_context_features(state).to(self.device)
 
-            if random.random() < epsilon:
+            if deterministic_policy:
+                action_idx, _ = self.agent.select_action(
+                    node_embeddings,
+                    candidate_indices,
+                    vnf_feat,
+                    ctx_feat,
+                    deterministic=True,
+                )
+            elif random.random() < epsilon:
                 action_idx = random.randint(0, len(candidate_indices) - 1)
             else:
                 action_idx, _ = self.agent.select_action(
@@ -471,7 +526,7 @@ class SFCTrainer:
                 "done": done,
             }
 
-            if not done and next_state is not None and next_state.get("core_nf") is not None:
+            if update_model and not done and next_state is not None and next_state.get("core_nf") is not None:
                 traj["next_node_embeddings"] = node_embeddings.detach()
                 traj["next_vnf_features"] = self._build_vnf_features(next_state["core_nf"]).to(self.device)
                 traj["next_context_features"] = self._build_context_features(next_state).to(self.device)
@@ -549,7 +604,8 @@ class SFCTrainer:
             with open(req_file) as f:
                 req_data = json.load(f)
 
-            use_shared = random.random() < shared_resources_prob
+            shared_gate = ((epoch * 997 + topo_idx * 37) % 1000) / 1000.0
+            use_shared = shared_gate < shared_resources_prob
             env = SFCEnvironment(graph, self.device, shared_resources=use_shared)
 
             requests = req_data.get("requests", [])[:max_requests_per_file]
@@ -557,7 +613,8 @@ class SFCTrainer:
                 total_requests += 1
                 request_for_train = dict(request)
                 request_for_train["reliability_scale"] = reliability_scale
-                request_for_train["strict_reliability"] = random.random() < strict_reliability_prob
+                strict_gate = ((epoch * 991 + topo_idx * 53 + req_idx * 17) % 1000) / 1000.0
+                request_for_train["strict_reliability"] = strict_gate < strict_reliability_prob
 
                 episode_result = self._train_episode(
                     env,
@@ -657,3 +714,88 @@ class SFCTrainer:
             metrics["top_failure_reasons"],
         )
         return metrics
+
+    def evaluate_epoch(
+        self,
+        epoch,
+        eval_data,
+        heuristic_pruner,
+        max_requests_per_file=4,
+        shared_resources=False,
+    ):
+        from training.environment.sfc_env import SFCEnvironment
+
+        total_requests = 0
+        success_count = 0
+        rewards = []
+        quality_scores = []
+        episode_delays = []
+        decision_lat_means = []
+        decision_lat_p95s = []
+        dependency_rates = []
+        resource_balance_scores = []
+        link_congestion_scores = []
+        business_balance_scores = []
+        failure_reason_counts = {}
+
+        was_training = self.gnn.training
+        self.gnn.eval()
+        self.agent.actor.eval()
+        self.agent.critic.eval()
+
+        for topo_file, req_file in eval_data:
+            with open(topo_file) as f:
+                topo_data = json.load(f)
+            graph = self._build_graph_from_json(topo_data)
+            with open(req_file) as f:
+                req_data = json.load(f)
+            env = SFCEnvironment(graph, self.device, shared_resources=shared_resources)
+            for request in req_data.get("requests", [])[:max_requests_per_file]:
+                total_requests += 1
+                result = self._train_episode(
+                    env,
+                    graph,
+                    request,
+                    epsilon=0.0,
+                    heuristic_pruner=heuristic_pruner,
+                    reset_resources=(not shared_resources),
+                    update_model=False,
+                    deterministic_policy=True,
+                )
+                rewards.append(result["episode_reward"])
+                quality_scores.append(float(result.get("quality_score", 0.0)))
+                episode_delays.append(result["episode_delay_ms"])
+                decision_lat_means.append(result["decision_latency_ms_mean"])
+                decision_lat_p95s.append(result["decision_latency_ms_p95"])
+                dependency_rates.append(float(result.get("dependency_satisfaction_rate", 0.0)))
+                resource_balance_scores.append(float(result.get("resource_balance", 0.0)))
+                link_congestion_scores.append(float(result.get("link_congestion", 0.0)))
+                business_balance_scores.append(float(result.get("business_balance", 0.0)))
+                if result["success"]:
+                    success_count += 1
+                failure_reason = str(result.get("failure_reason", ""))
+                if not result["success"] and failure_reason and failure_reason.lower() != "none":
+                    failure_reason_counts[failure_reason] = failure_reason_counts.get(failure_reason, 0) + 1
+
+        if was_training:
+            self.gnn.train()
+            self.agent.actor.train()
+            self.agent.critic.train()
+
+        return {
+            "eval_epoch": epoch,
+            "eval_avg_reward": float(np.mean(rewards)) if rewards else 0.0,
+            "eval_avg_quality_score": float(np.mean(quality_scores)) if quality_scores else 0.0,
+            "eval_success_rate": 100.0 * success_count / max(1, total_requests),
+            "eval_dependency_satisfaction_rate": float(np.mean(dependency_rates)) if dependency_rates else 0.0,
+            "eval_resource_balance_score": float(np.mean(resource_balance_scores)) if resource_balance_scores else 0.0,
+            "eval_link_congestion_score": float(np.mean(link_congestion_scores)) if link_congestion_scores else 0.0,
+            "eval_business_balance_score": float(np.mean(business_balance_scores)) if business_balance_scores else 0.0,
+            "eval_avg_episode_delay_ms": float(np.mean(episode_delays)) if episode_delays else 0.0,
+            "eval_avg_algorithm_latency_ms": float(np.mean(decision_lat_means)) if decision_lat_means else 0.0,
+            "eval_p95_algorithm_latency_ms": float(np.percentile(decision_lat_p95s, 95)) if decision_lat_p95s else 0.0,
+            "eval_total_requests": total_requests,
+            "eval_top_failure_reasons": sorted(
+                failure_reason_counts.items(), key=lambda kv: kv[1], reverse=True
+            )[:5],
+        }

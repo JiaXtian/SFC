@@ -65,6 +65,7 @@ class SFCEnvironment:
         self.min_dependency_reliability = 1.0
         self.satisfied_dependency_keys = set()
         self.last_quality_score = 0.0
+        self._path_cache = {}
 
     @staticmethod
     def _clamp01(value: float) -> float:
@@ -114,6 +115,7 @@ class SFCEnvironment:
         self.min_dependency_reliability = 1.0
         self.satisfied_dependency_keys = set()
         self.last_quality_score = 0.0
+        self._path_cache = {}
         return self._build_state()
 
     def get_state(self) -> Optional[Dict]:
@@ -287,6 +289,11 @@ class SFCEnvironment:
         return paths
 
     def _find_constrained_path(self, source: str, target: str, bw_req: float, max_hops: int):
+        cache_key = (source, target, round(float(bw_req), 4), int(max_hops))
+        cached = self._path_cache.get(cache_key)
+        if cached is not None:
+            path, delay, rel, hops, bottleneck = cached
+            return list(path), delay, rel, hops, bottleneck
         if source == target:
             return [source], 0.0, 1.0, 0, float("inf")
         if source not in self.topology.nodes or target not in self.topology.nodes:
@@ -339,7 +346,9 @@ class SFCEnvironment:
         path.reverse()
         hop_count = len(path) - 1
         rel = float(max(0.0, min(1.0, rel_raw.get(target, 1.0) ** (1.0 / max(1, hop_count)))))
-        return path, float(latency.get(target, 0.0)), rel, hop_count, float(bottleneck.get(target, 0.0))
+        result = (path, float(latency.get(target, 0.0)), rel, hop_count, float(bottleneck.get(target, 0.0)))
+        self._path_cache[cache_key] = (tuple(path), result[1], result[2], result[3], result[4])
+        return result
 
     def plan_candidate(self, selected_node: str) -> Optional[Dict]:
         if self.current_nf_idx >= len(self.core_nfs):
@@ -482,6 +491,7 @@ class SFCEnvironment:
                     float(self.topology[u][v].get("bandwidth_available_gbps", 0.0)) - bw_req
                 )
             self.satisfied_dependency_keys.add(item["key"])
+        self._path_cache = {}
 
         self.deployed_nfs.append(
             {
@@ -571,7 +581,8 @@ class SFCEnvironment:
 
     def _resource_balance_score(self) -> float:
         utils = []
-        for _, node in self.topology.nodes(data=True):
+        nodes = self._sampled_nodes()
+        for _, node in nodes:
             for avail_key, total_key in [
                 ("cpu_available", "cpu_total"),
                 ("mem_available", "mem_total"),
@@ -585,7 +596,8 @@ class SFCEnvironment:
 
     def _business_balance_score(self) -> float:
         values = []
-        for _, node in self.topology.nodes(data=True):
+        nodes = self._sampled_nodes()
+        for _, node in nodes:
             load = node.get("core_business_load", {})
             values.append(max(float(load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS))
         if not values:
@@ -594,7 +606,8 @@ class SFCEnvironment:
 
     def _link_congestion_score(self) -> float:
         ratios = []
-        for _, _, edge in self.topology.edges(data=True):
+        edges = self._sampled_edges()
+        for _, _, edge in edges:
             total = float(edge.get("bandwidth_gbps", 0.0))
             if total <= 1e-9:
                 continue
@@ -602,6 +615,20 @@ class SFCEnvironment:
         if not ratios:
             return 0.0
         return self._clamp01(float(np.percentile(ratios, 95)))
+
+    def _sampled_nodes(self, limit: int = 768):
+        nodes = list(self.topology.nodes(data=True))
+        if len(nodes) <= limit:
+            return nodes
+        stride = max(1, len(nodes) // limit)
+        return nodes[::stride][:limit]
+
+    def _sampled_edges(self, limit: int = 1536):
+        edges = list(self.topology.edges(data=True))
+        if len(edges) <= limit:
+            return edges
+        stride = max(1, len(edges) // limit)
+        return edges[::stride][:limit]
 
     def get_topology_state(self):
         node_features, edge_index = self._graph_features(self.topology)
