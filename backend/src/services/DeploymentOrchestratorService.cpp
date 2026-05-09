@@ -283,6 +283,8 @@ void DeploymentOrchestratorService::enqueue_deployment(
         {"per_vnf", candidate_json.value("per_vnf", nlohmann::json::array())},
         {"per_core_nf", candidate_json.value("per_core_nf", nlohmann::json::array())},
         {"total_latency_ms", candidate_json.value("total_latency_ms", 0.0)},
+        {"registration_latency_ms", candidate_json.value("registration_latency_ms", 0.0)},
+        {"pdu_session_latency_ms", candidate_json.value("pdu_session_latency_ms", 0.0)},
         {"link_details", candidate_json.value("link_details", nlohmann::json::array())},
         {"estimated_reliability", candidate_json.value("estimated_reliability", 0.0)},
         {"bottleneck_bandwidth_gbps", candidate_json.value("bottleneck_bandwidth_gbps", 0.0)},

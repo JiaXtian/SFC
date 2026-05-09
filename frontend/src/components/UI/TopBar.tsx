@@ -9,13 +9,19 @@ export default function TopBar() {
   const [open, setOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const { user, logout } = useAuth()
-  const { satCount, linkCount, deployCount, orch, decisionTraces } = useStore((s) => ({
-    satCount: s.satellites.length,
-    linkCount: s.links.length,
-    deployCount: s.deployments.length,
-    orch: s.simulation.orchestration,
-    decisionTraces: s.decisionTraces,
-  }), shallow)
+  const { satCount, linkCount, linkBreakdown, deployCount, orch, decisionTraces } = useStore((s) => {
+    const activeLinks = s.links.filter((l: any) => String(l?.status ?? 'active') !== 'down')
+    const intra = activeLinks.filter((l: any) => String(l?.link_type ?? '') === 'intra_orbit').length
+    const inter = activeLinks.length - intra
+    return {
+      satCount: s.satellites.length,
+      linkCount: activeLinks.length,
+      linkBreakdown: `轨道内 ${intra} / 轨道间 ${inter}`,
+      deployCount: s.deployments.length,
+      orch: s.simulation.orchestration,
+      decisionTraces: s.decisionTraces,
+    }
+  }, shallow)
   const p95LatencyMs = useMemo(() => {
     const direct = Number(orch?.latency_p95_ms ?? 0)
     if (direct > 0) return direct
@@ -63,7 +69,7 @@ export default function TopBar() {
           </div>
           <div>
             <div className="text-sm font-bold text-white leading-none tracking-tight">核心网智能编排系统</div>
-            <div className="text-[9px] text-cyan-300/70 leading-none mt-0.5 tracking-widest uppercase">LEO · 服务功能链编排 · 核心网编排决策自动化</div>
+            <div className="text-[9px] text-cyan-300/70 leading-none mt-0.5 tracking-widest uppercase">LEO · Open5GS 核心网编排 · 智能重调度</div>
           </div>
         </div>
 
@@ -75,6 +81,7 @@ export default function TopBar() {
             <span className="text-cyan-200/70">在轨卫星</span>
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+            title={linkBreakdown}
             style={{ background: 'rgba(96,165,250,0.1)', border: '1px solid rgba(96,165,250,0.25)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-blue-300 animate-pulse" />
             <span className="text-blue-300 font-semibold">{linkCount}</span>
@@ -84,7 +91,7 @@ export default function TopBar() {
             style={{ background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(196,181,253,0.25)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-violet-300 animate-pulse" />
             <span className="text-violet-300 font-semibold">{deployCount}</span>
-            <span className="text-violet-300/70">SFC 部署</span>
+            <span className="text-violet-300/70">核心网部署</span>
           </div>
           {orch && (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
@@ -142,7 +149,7 @@ export default function TopBar() {
                 }}
               >
                 {[
-                  ['系统概览', '动态卫星拓扑与SFC智能编排可视化系统'],
+                  ['系统概览', '动态卫星拓扑与 Open5GS 核心网智能编排可视化系统'],
                 ].map(([k, v]) => (
                   <div key={k} className="px-2.5 py-1.5 rounded-lg hover:bg-white/5">
                     <div className="text-[11px] text-cyan-100 font-medium">{k}</div>

@@ -7,21 +7,24 @@ import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
 
 function sanitizeLinkDetails(linkDetails: any[]): any[] {
   if (!Array.isArray(linkDetails)) return []
-  const seen = new Set<string>()
   const out: any[] = []
   linkDetails.forEach((l: any) => {
     const src = String(l?.src ?? '')
     const dst = String(l?.dst ?? '')
     if (!src || !dst || src === dst) return
-    const key = `${src}|${dst}`
-    if (seen.has(key)) return
-    seen.add(key)
-    out.push({ ...l, src, dst })
+    const dep = l?.core_nf_dependency ?? {}
+    out.push({
+      ...l,
+      src,
+      dst,
+      dependency_source_nf: String(l?.dependency_source_nf ?? dep?.source ?? ''),
+      dependency_target_nf: String(l?.dependency_target_nf ?? dep?.target ?? ''),
+    })
   })
   return out
 }
 
-function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackDst?: string): string[] {
+function buildPathNodesFromDeployment(cand: any): string[] {
   const fromCandidatePath = Array.isArray(cand?.path_nodes)
     ? cand.path_nodes.map((n: any) => String(n)).filter(Boolean)
     : []
@@ -34,16 +37,21 @@ function buildPathNodesFromDeployment(cand: any, fallbackSrc?: string, fallbackD
   const core = fromPerVnf.length > 0
     ? fromPerVnf
     : (Array.isArray(cand?.deployed_nodes) ? cand.deployed_nodes.map((n: any) => String(n)).filter(Boolean) : [])
-  const seq = [fallbackSrc ?? '', ...core, fallbackDst ?? ''].filter(Boolean)
+  const seq = [...core].filter(Boolean)
   const dedup = seq.filter((n, idx) => idx === 0 || n !== seq[idx - 1])
   if (dedup.length >= 2) return dedup
-  if (fallbackSrc && fallbackDst && fallbackSrc !== fallbackDst) return [fallbackSrc, fallbackDst]
-  return fallbackSrc ? [fallbackSrc] : []
+  return dedup
 }
 
 function buildViolationDetails(
   cand: any,
-  constraints: { max_latency_ms: number; min_bandwidth_gbps: number; min_reliability: number }
+  constraints: {
+    max_latency_ms: number
+    registration_latency_ms?: number
+    pdu_session_latency_ms?: number
+    min_bandwidth_gbps: number
+    min_reliability: number
+  }
 ): string[] {
   if (Array.isArray(cand?.violation_details) && cand.violation_details.length > 0) {
     return toChineseFailureList(cand.violation_details)
@@ -54,6 +62,16 @@ function buildViolationDetails(
   const rel = Number(cand?.estimated_reliability ?? 0)
   if (constraints.max_latency_ms > 0 && latency > constraints.max_latency_ms) {
     reasons.push(`端到端时延超限: ${latency.toFixed(2)}ms > ${constraints.max_latency_ms}ms`)
+  }
+  const registrationLatency = Number(cand?.registration_latency_ms ?? 0)
+  const registrationSla = Number(constraints.registration_latency_ms ?? 0)
+  if (registrationSla > 0 && registrationLatency > registrationSla) {
+    reasons.push(`注册时延超限: ${registrationLatency.toFixed(2)}ms > ${registrationSla}ms`)
+  }
+  const pduLatency = Number(cand?.pdu_session_latency_ms ?? 0)
+  const pduSla = Number(constraints.pdu_session_latency_ms ?? 0)
+  if (pduSla > 0 && pduLatency > pduSla) {
+    reasons.push(`PDU Session时延超限: ${pduLatency.toFixed(2)}ms > ${pduSla}ms`)
   }
   if (constraints.min_bandwidth_gbps > 0 && bw < constraints.min_bandwidth_gbps) {
     reasons.push(`瓶颈带宽不足: ${bw.toFixed(3)}Gbps < ${constraints.min_bandwidth_gbps}Gbps`)
@@ -91,8 +109,6 @@ export default function CandidateModal() {
     scoringConfig,
     fallbackOnly,
     deployableCount,
-    sourceNode,
-    destinationNode,
     requestPayload,
     sessionConfig,
   } = candidateResult
@@ -101,6 +117,8 @@ export default function CandidateModal() {
 
   const constraints = scoringConfig?.constraints ?? {
     max_latency_ms: 150,
+    registration_latency_ms: 85,
+    pdu_session_latency_ms: 75,
     min_bandwidth_gbps: 0.5,
     min_reliability: 0.95,
   }
@@ -144,7 +162,7 @@ export default function CandidateModal() {
     if (!cand.satisfies_constraints) {
       openSystemPopup(
         '方案不满足约束',
-        `该方案不满足SLA约束，无法部署。\n\n详细原因:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`,
+        `该方案不满足核心网部署约束，无法部署。\n\n详细原因:\n${violationDetails.map((d: string) => `- ${d}`).join('\n')}`,
         'warning',
       )
       return
@@ -163,18 +181,18 @@ export default function CandidateModal() {
         },
       })
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
-      const pathNodes = buildPathNodesFromDeployment(cand, sourceNode, destinationNode)
+      const pathNodes = buildPathNodesFromDeployment(cand)
       const deployResp = await apiClient.deploySFC({
         request_id: requestId,
         candidate_index: sel,
         candidate: cand,
+        core_nf_dependencies: Array.isArray((requestPayload as any)?.core_nf_dependencies)
+          ? (requestPayload as any).core_nf_dependencies
+          : [],
         custom_nf_bindings: Array.isArray((requestPayload as any)?.custom_nf_bindings)
           ? (requestPayload as any).custom_nf_bindings
           : [],
         sfc_name: sfcName || requestId,
-        source_node: sourceNode,
-        destination_node: destinationNode,
-        path_nodes: pathNodes,
         inference_latency_ms: Number(inferenceTime ?? 0),
         score_breakdown: {
           latency: scoreBreakdown.latencyScore,
@@ -201,8 +219,6 @@ export default function CandidateModal() {
           ...(requestPayload ?? {
             request_id: requestId,
             topology_version: candidateResult.topologyVersion,
-            source_node: sourceNode,
-            destination_node: destinationNode,
             core_nfs: (cand.per_core_nf ?? cand.per_vnf ?? []).map((v: any, idx: number) => ({
               name: String(v.core_nf ?? v.vnf ?? `core-nf-${idx + 1}`),
               core_nf_id: String(v.core_nf ?? v.vnf ?? `core-nf-${idx + 1}`),
@@ -257,9 +273,10 @@ export default function CandidateModal() {
         sfc_name: sfcName || requestId,
         candidate_index: sel,
         status: 'completed',
-        source_node: sourceNode,
-        destination_node: destinationNode,
         path_nodes: pathNodes,
+        core_nf_dependencies: Array.isArray((requestPayload as any)?.core_nf_dependencies)
+          ? (requestPayload as any).core_nf_dependencies
+          : [],
         satisfies_constraints: !!cand.satisfies_constraints,
         violation_details: violationDetails,
         bottleneck_bandwidth_gbps: Number(cand.bottleneck_bandwidth_gbps ?? 0),
@@ -349,15 +366,10 @@ export default function CandidateModal() {
           style={{ borderBottom: '1px solid rgba(92,124,150,0.22)', background: 'linear-gradient(135deg, rgba(32,104,151,0.18), rgba(21,62,91,0.2))' }}
         >
           <div>
-            <div className="text-base font-bold text-white">{sfcName} - 规划结果</div>
+            <div className="text-base font-bold text-white">{sfcName} - 核心网规划结果</div>
             <div className="text-[11px] text-slate-400 mt-1">
               请求 <span className="text-slate-300 font-mono">{requestId}</span>
               {inferenceTime != null && <span className="ml-3 text-cyan-300">推理时延 {inferenceTime.toFixed(1)}ms</span>}
-              {sourceNode && destinationNode && (
-                <span className="ml-3 text-amber-300">
-                  路径端点 {sourceNode} → {destinationNode}
-                </span>
-              )}
             </div>
           </div>
           <button onClick={() => setCandidateResult(null)} className="p-1.5 rounded-lg hover:bg-white/5 transition">
@@ -428,7 +440,7 @@ export default function CandidateModal() {
                 <div className="font-semibold text-slate-100 mb-2">当前评分策略</div>
                 <div className="space-y-1">
                   <div>策略模式: <span className="text-cyan-300 font-mono">{scoringConfig?.scoreWeights ? 'custom' : scoringConfig?.optimize || 'latency'}</span></div>
-                  <div>约束基准: 时延≤{constraints.max_latency_ms}ms, 带宽≥{constraints.min_bandwidth_gbps}Gbps, 可靠性≥{constraints.min_reliability.toFixed(3)}</div>
+                  <div>约束基准: 注册≤{constraints.registration_latency_ms ?? '-'}ms, PDU≤{constraints.pdu_session_latency_ms ?? '-'}ms, 带宽≥{constraints.min_bandwidth_gbps}Gbps, 可靠性≥{constraints.min_reliability.toFixed(3)}</div>
                   <div>
                     权重: latency {activeWeights.latency.toFixed(2)} / resource {activeWeights.resource.toFixed(2)} / reliability {activeWeights.reliability.toFixed(2)} /
                     bandwidth {activeWeights.bandwidth.toFixed(2)} / dispersion {activeWeights.dispersion.toFixed(2)}
@@ -437,7 +449,7 @@ export default function CandidateModal() {
                     总分 = w_lat*时延得分 + w_res*资源得分 + w_rel*可靠性得分 + w_bw*带宽得分 + w_disp*分散度得分
                   </div>
                   <div className="text-slate-500">
-                    时延/带宽/可靠性采用连续曲线评分，不再“满足阈值即 100 分”，以区分不同候选策略质量。
+                    时延/带宽/可靠性采用连续曲线评分，用于区分不同核心网候选策略质量。
                   </div>
                 </div>
               </div>
@@ -470,9 +482,9 @@ export default function CandidateModal() {
           <div className="grid grid-cols-4 gap-3">
             {[
               { label: '总评分', value: `${(score * 100).toFixed(1)}`, color: '#67e8f9', bg: 'rgba(31,84,118,0.28)' },
-              { label: '路径时延', value: `${cand.total_latency_ms?.toFixed(1) ?? '—'}ms`, color: '#34d399', bg: 'rgba(22,92,82,0.26)' },
+              { label: '注册时延', value: `${Number(cand.registration_latency_ms ?? 0).toFixed(1)}ms`, color: '#34d399', bg: 'rgba(22,92,82,0.26)' },
+              { label: 'PDU时延', value: `${Number(cand.pdu_session_latency_ms ?? 0).toFixed(1)}ms`, color: '#38bdf8', bg: 'rgba(21,76,112,0.24)' },
               { label: '卫星节点', value: `${cand.deployed_nodes?.length ?? 0}`, color: '#c4b5fd', bg: 'rgba(65,56,108,0.25)' },
-              { label: 'ISL链路', value: `${cand.link_details?.length ?? 0}`, color: '#fbbf24', bg: 'rgba(110,83,25,0.24)' },
             ].map(m => (
               <div key={m.label} className="rounded-xl p-3 text-center" style={{ background: m.bg, border: '1px solid rgba(99,125,146,0.2)' }}>
                 <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1">{m.label}</div>
@@ -524,12 +536,17 @@ export default function CandidateModal() {
                 <ChevronRight className="w-3.5 h-3.5 text-cyan-300" />星间链路 ({cand.link_details.length} 跳)
               </div>
               <div className="space-y-1.5">
-                {cand.link_details.map((l: any, i: number) => (
+                {cand.link_details.map((l: any, i: number) => {
+                  const depLabel = l.dependency_source_nf && l.dependency_target_nf
+                    ? `${String(l.dependency_source_nf).toUpperCase()}→${String(l.dependency_target_nf).toUpperCase()}`
+                    : ''
+                  return (
                   <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg text-[11px]" style={{ background: 'rgba(13,24,40,0.85)', border: '1px solid rgba(87,116,139,0.22)' }}>
                     <div className="flex items-center gap-2 font-mono">
                       <span className="text-cyan-200">{l.src}</span>
                       <ChevronRight className="w-3 h-3 text-slate-600" />
                       <span className="text-cyan-200">{l.dst}</span>
+                      {depLabel && <span className="text-[9px] text-cyan-300">{depLabel}</span>}
                     </div>
                     <div className="flex gap-4 text-right">
                       <div className="text-slate-400">
@@ -541,7 +558,8 @@ export default function CandidateModal() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}

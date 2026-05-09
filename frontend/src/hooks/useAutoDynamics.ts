@@ -123,10 +123,15 @@ function buildDynamicLinkPlan(sats: any[], prevLinks: any[]) {
         String(l?.link_type ?? '') === 'intra_orbit' ? 'intra_orbit' : 'inter_orbit'
       add(source, target, linkType)
     })
-    if (out.length > 0) return out
+    const hasOrbitLayout = sats.some((sat: any) =>
+      Number.isFinite(Number(sat?.orbital_params?.plane)) &&
+      Number.isFinite(Number(sat?.orbital_params?.position_in_plane))
+    )
+    if (out.length > 0 && !hasOrbitLayout) return out
   }
 
-  // Fallback for the very first local frame when no links exist yet.
+  // Complete the local ISL plan from orbit metadata when backend/imported links
+  // omit adjacent-plane wraparound links.
   const byPlane = new Map<number, any[]>()
   sats.forEach((sat) => {
     const plane = Number(sat?.orbital_params?.plane ?? 0)

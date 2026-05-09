@@ -28,6 +28,29 @@ function toXYZ(x: number, y: number, z: number): [number, number, number] {
   return [x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U]
 }
 
+function bulgedLinkPoints(
+  a: [number, number, number],
+  b: [number, number, number],
+): [number, number, number][] {
+  const va = new THREE.Vector3(a[0], a[1], a[2])
+  const vb = new THREE.Vector3(b[0], b[1], b[2])
+  const delta = new THREE.Vector3().subVectors(vb, va)
+  const length = delta.length()
+  if (length < 1e-6) return [a, b]
+
+  const start = va.clone().addScaledVector(delta, 0.055)
+  const end = vb.clone().addScaledVector(delta, -0.055)
+  const mid = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5)
+  const outward = mid.clone().normalize()
+  const bulge = Math.max(0.018, Math.min(0.11, length * 0.028))
+  mid.addScaledVector(outward, bulge)
+  return [
+    [start.x, start.y, start.z],
+    [mid.x, mid.y, mid.z],
+    [end.x, end.y, end.z],
+  ]
+}
+
 function createGeometry(segments: Array<{ a: [number, number, number]; b: [number, number, number] }>) {
   const arr = new Float32Array(segments.length * 6)
   let o = 0
@@ -191,15 +214,15 @@ export default function Links() {
         if (!a || !b) return
         out.push({
           key: `hl-cur-${dep.deployment_id}-${l.src}-${l.dst}-${i}`,
-          points: [
+          points: bulgedLinkPoints(
             toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z),
             toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
-          ],
+          ),
           link: l,
-          color: '#ffffff',
-          glowColor: '#e2f1ff',
-          lineWidth: 3.6,
-          opacity: 0.95,
+          color: '#22d3ee',
+          glowColor: '#fbbf24',
+          lineWidth: 1.85,
+          opacity: 0.9,
           isGhost: false,
         })
       })
@@ -364,27 +387,27 @@ export default function Links() {
         </group>
       ))}
 
-      {/* Deployed SFC links: static white thick glow */}
+      {/* Deployed core-network dependency links */}
       {highlightedLines.map(item => (
         <group key={item.key}>
           <Line
             points={item.points}
             color={item.color}
-            lineWidth={heavyHighlightMode ? Math.max(2.1, item.lineWidth - 1.1) : item.lineWidth}
+            lineWidth={heavyHighlightMode ? 1.35 : item.lineWidth}
             transparent
-            opacity={heavyHighlightMode ? Math.max(0.7, item.opacity * 0.88) : item.opacity}
+            opacity={heavyHighlightMode ? Math.max(0.62, item.opacity * 0.78) : item.opacity}
+            depthWrite={false}
             raycast={() => null}
           />
-          {!heavyHighlightMode && (
-            <Line
-              points={item.points}
-              color={item.glowColor}
-              lineWidth={item.isGhost ? 6.2 : 8.5}
-              transparent
-              opacity={item.isGhost ? Math.max(0.08, item.opacity * 0.55) : 0.24}
-              raycast={() => null}
-            />
-          )}
+          <Line
+            points={item.points}
+            color={item.glowColor}
+            lineWidth={heavyHighlightMode ? 2.6 : 4.2}
+            transparent
+            opacity={heavyHighlightMode ? 0.12 : 0.16}
+            depthWrite={false}
+            raycast={() => null}
+          />
         </group>
       ))}
 

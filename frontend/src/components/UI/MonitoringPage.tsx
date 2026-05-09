@@ -53,13 +53,15 @@ function navigateTo(path: string) {
 function rescheduleReasonLabel(trigger: string): string {
   switch (trigger) {
     case 'source_node_down':
-      return '源节点故障'
+      return '核心网相关节点故障'
     case 'destination_node_down':
-      return '宿节点故障'
+      return '核心网相关节点故障'
     case 'deployment_node_down':
-      return '部署节点故障'
+      return '承载网元卫星故障'
     case 'anchor_path_disconnected':
-      return '锚点路径断连'
+      return '核心网依赖路径断连'
+    case 'core_dependency_endpoint_missing':
+      return '核心网网元映射缺失'
     case 'topology_tick_bootstrap':
       return '初始策略构建'
     case 'session_start':
@@ -722,7 +724,7 @@ export default function MonitoringPage() {
             </div>
             <div className="grid grid-cols-2 gap-2 mt-2 text-[11px]">
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">活跃SFC</div>
+                <div className="text-slate-400">活跃核心网</div>
                 <div className="text-cyan-200 text-lg font-semibold">{orch?.active_sessions ?? 0}</div>
               </div>
               <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
@@ -862,16 +864,16 @@ export default function MonitoringPage() {
           <div className="col-span-12 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <ShieldCheck className="w-4 h-4 text-cyan-300" />SFC稳定性与重调度原因
+              <ShieldCheck className="w-4 h-4 text-cyan-300" />核心网稳定性与重调度原因
             </div>
             <div className="text-[10px] text-slate-500 mb-2">
-              说明：仅统计“必要重调度”触发（节点故障/路径断连），用于评估各SFC在动态拓扑中的稳定运行能力。
+              说明：仅统计“必要重调度”触发（网元承载节点故障/依赖路径断连），用于评估各核心网在动态拓扑中的稳定运行能力。
             </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[980px] text-[11px] border-separate border-spacing-y-1">
                 <thead>
                   <tr className="text-slate-400">
-                    <th className="text-left font-medium px-2 py-1">SFC</th>
+                    <th className="text-left font-medium px-2 py-1">核心网</th>
                     <th className="text-left font-medium px-2 py-1">稳定性</th>
                     <th className="text-left font-medium px-2 py-1">必要重调度</th>
                     <th className="text-left font-medium px-2 py-1">路径重算</th>
@@ -920,7 +922,7 @@ export default function MonitoringPage() {
                   ))}
                   {stabilityRows.length === 0 && (
                     <tr>
-                      <td className="px-2 py-2 text-slate-500" colSpan={7}>暂无已部署SFC稳定性数据</td>
+                      <td className="px-2 py-2 text-slate-500" colSpan={7}>暂无已部署核心网稳定性数据</td>
                     </tr>
                   )}
                 </tbody>

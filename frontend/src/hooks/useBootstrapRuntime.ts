@@ -139,7 +139,7 @@ export function useBootstrapRuntime() {
         const cfg = configRes.value ?? {}
         setAutoDynamics({
           resource_update_sec: Math.max(10, Math.min(30, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
-          time_scale: Math.max(0.1, Math.min(20, toNumber(cfg?.simulation_speed ?? 1, 1))),
+          time_scale: Math.max(0.1, Math.min(8, toNumber(cfg?.simulation_speed ?? 1, 1))),
         })
       }
     })()

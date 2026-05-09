@@ -348,6 +348,159 @@ static bool apply_custom_nf_bindings(
     return true;
 }
 
+static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw);
+static CoreBusinessLoad apply_nf_business_weights(
+    const CoreBusinessLoad& request_load,
+    const CoreBusinessLoad& nf_weights
+);
+
+static const std::vector<std::string>& open5gs_core_nf_types() {
+    static const std::vector<std::string> types = {
+        "nrf", "scp", "sepp", "amf", "smf", "upf",
+        "ausf", "udm", "udr", "pcf", "nssf", "bsf"
+    };
+    return types;
+}
+
+static std::vector<CoreNFDependency> default_open5gs_dependencies() {
+    return {
+        {"nrf", "scp", 0.88, 0.55, 0.80, 0.82, 0.0},
+        {"scp", "amf", 1.00, 0.72, 1.00, 1.00, 0.0},
+        {"scp", "smf", 1.00, 0.76, 1.00, 1.00, 0.0},
+        {"scp", "ausf", 0.78, 0.42, 0.72, 0.78, 0.0},
+        {"scp", "udm", 0.82, 0.44, 0.76, 0.82, 0.0},
+        {"scp", "pcf", 0.62, 0.34, 0.58, 0.62, 0.0},
+        {"scp", "nssf", 0.58, 0.28, 0.54, 0.58, 0.0},
+        {"scp", "bsf", 0.48, 0.24, 0.48, 0.48, 0.0},
+        {"scp", "sepp", 0.54, 0.30, 0.54, 0.56, 0.0},
+        {"amf", "ausf", 0.92, 0.46, 0.92, 0.90, 0.0},
+        {"amf", "udm", 0.92, 0.48, 0.90, 0.92, 0.0},
+        {"amf", "smf", 1.00, 0.86, 1.00, 1.00, 0.0},
+        {"amf", "nssf", 0.66, 0.34, 0.64, 0.66, 0.0},
+        {"smf", "upf", 1.00, 1.00, 1.00, 1.00, 0.0},
+        {"smf", "pcf", 0.82, 0.44, 0.78, 0.80, 0.0},
+        {"smf", "bsf", 0.58, 0.30, 0.54, 0.58, 0.0},
+        {"smf", "udm", 0.72, 0.38, 0.70, 0.72, 0.0},
+        {"udm", "udr", 0.86, 0.56, 0.78, 0.86, 0.0},
+        {"pcf", "udr", 0.64, 0.34, 0.56, 0.64, 0.0},
+        {"pcf", "bsf", 0.52, 0.28, 0.50, 0.52, 0.0}
+    };
+}
+
+static VNF make_default_core_nf(
+    const std::string& nf_type_raw,
+    const std::string& request_id,
+    const CoreBusinessLoad& request_business_load
+) {
+    const std::string nf_type = normalize_nf_type(nf_type_raw);
+    const CoreNFProfile profile = get_core_nf_profile(nf_type);
+
+    struct ResourceDefaults {
+        double cpu;
+        double mem;
+        double disk;
+        double bw;
+    };
+    static const std::unordered_map<std::string, ResourceDefaults> defaults = {
+        {"nrf", {0.70, 1.35, 6.0, 0.07}},
+        {"scp", {0.98, 1.80, 7.5, 0.13}},
+        {"sepp", {0.92, 1.65, 7.5, 0.11}},
+        {"amf", {1.32, 2.50, 9.0, 0.17}},
+        {"smf", {1.50, 2.80, 10.5, 0.22}},
+        {"upf", {2.50, 4.00, 16.0, 0.82}},
+        {"ausf", {0.80, 1.50, 6.5, 0.07}},
+        {"udm", {1.00, 2.15, 13.0, 0.09}},
+        {"udr", {1.08, 2.50, 21.0, 0.09}},
+        {"pcf", {0.95, 2.00, 8.5, 0.09}},
+        {"nssf", {0.68, 1.35, 6.0, 0.055}},
+        {"bsf", {0.75, 1.50, 6.5, 0.07}},
+    };
+    const auto it = defaults.find(nf_type);
+    const ResourceDefaults r = it == defaults.end()
+        ? ResourceDefaults{1.0, 2.0, 8.0, 0.1}
+        : it->second;
+
+    VNF vnf;
+    vnf.name = request_id.empty() ? nf_type : request_id + "_" + nf_type;
+    vnf.nf_type = nf_type;
+    vnf.nf_role = profile.nf_role;
+    vnf.resource_profile = profile.resource_profile;
+    vnf.processing_weight = 1.0;
+    vnf.stateful = nf_type != "scp" && nf_type != "nrf";
+    vnf.cpu = std::max(profile.min_cpu, r.cpu);
+    vnf.mem = std::max(profile.min_mem, r.mem);
+    vnf.disk = std::max(profile.min_disk, r.disk);
+    vnf.bw_in = std::max(profile.min_bw, r.bw);
+    vnf.bw_out = vnf.bw_in;
+    vnf.business_load_demand = apply_nf_business_weights(request_business_load, profile.business_weights);
+    return vnf;
+}
+
+static void complete_open5gs_core_request(SFCRequest* request) {
+    if (!request) return;
+
+    std::unordered_map<std::string, VNF> by_type;
+    for (auto& vnf : request->vnfs) {
+        std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        if (nf_type.empty()) continue;
+        vnf.nf_type = nf_type;
+        by_type[nf_type] = vnf;
+    }
+
+    std::vector<VNF> ordered;
+    ordered.reserve(open5gs_core_nf_types().size());
+    for (const auto& nf_type : open5gs_core_nf_types()) {
+        auto it = by_type.find(nf_type);
+        if (it != by_type.end()) {
+            ordered.push_back(it->second);
+        } else {
+            ordered.push_back(make_default_core_nf(nf_type, request->request_id, request->core_business_load));
+        }
+    }
+    request->vnfs = std::move(ordered);
+}
+
+static void finalize_dependency_bandwidths(SFCRequest* request) {
+    if (!request) return;
+    std::unordered_set<std::string> nf_types;
+    std::unordered_map<std::string, double> bw_by_type;
+    double request_bw = std::max(0.01, request->constraints.min_bandwidth_gbps);
+    for (const auto& vnf : request->vnfs) {
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        if (nf_type.empty()) continue;
+        nf_types.insert(nf_type);
+        const double bw = std::max({0.01, vnf.bw_in, vnf.bw_out});
+        bw_by_type[nf_type] = std::max(bw_by_type[nf_type], bw);
+        request_bw = std::max(request_bw, bw);
+    }
+
+    if (request->core_nf_dependencies.empty()) {
+        request->core_nf_dependencies = default_open5gs_dependencies();
+    }
+
+    std::vector<CoreNFDependency> filtered;
+    std::unordered_set<std::string> seen;
+    for (auto dep : request->core_nf_dependencies) {
+        dep.source = normalize_nf_type(dep.source);
+        dep.target = normalize_nf_type(dep.target);
+        if (dep.source.empty() || dep.target.empty() || dep.source == dep.target) continue;
+        if (nf_types.find(dep.source) == nf_types.end() || nf_types.find(dep.target) == nf_types.end()) continue;
+        const std::string key = dep.source + "->" + dep.target;
+        if (!seen.insert(key).second) continue;
+        dep.criticality = std::max(0.0, std::min(1.0, dep.criticality));
+        dep.bandwidth_scale = std::max(0.05, std::min(2.0, dep.bandwidth_scale));
+        dep.latency_weight = std::max(0.1, std::min(2.0, dep.latency_weight));
+        dep.reliability_weight = std::max(0.1, std::min(2.0, dep.reliability_weight));
+        if (dep.bandwidth_required_gbps <= 1e-9) {
+            const double src_bw = bw_by_type.count(dep.source) ? bw_by_type[dep.source] : request_bw;
+            const double dst_bw = bw_by_type.count(dep.target) ? bw_by_type[dep.target] : request_bw;
+            dep.bandwidth_required_gbps = std::max({0.01, src_bw, dst_bw, request_bw * 0.18}) * dep.bandwidth_scale;
+        }
+        filtered.push_back(dep);
+    }
+    request->core_nf_dependencies = std::move(filtered);
+}
+
 static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw) {
     const std::string nf_type = normalize_nf_type(nf_type_raw);
     if (nf_type == "amf") {
@@ -491,6 +644,18 @@ static std::vector<std::string> build_constraint_violations(
         oss << "时延超限: " << cand.total_latency_ms << "ms > " << req.constraints.max_latency_ms << "ms";
         violations.push_back(oss.str());
     }
+    if (cand.registration_latency_ms > req.constraints.registration_latency_ms) {
+        std::ostringstream oss;
+        oss << "注册时延超限: " << cand.registration_latency_ms << "ms > "
+            << req.constraints.registration_latency_ms << "ms";
+        violations.push_back(oss.str());
+    }
+    if (cand.pdu_session_latency_ms > req.constraints.pdu_session_latency_ms) {
+        std::ostringstream oss;
+        oss << "PDU Session时延超限: " << cand.pdu_session_latency_ms << "ms > "
+            << req.constraints.pdu_session_latency_ms << "ms";
+        violations.push_back(oss.str());
+    }
     if (cand.bottleneck_bandwidth_gbps + 1e-9 < req.constraints.min_bandwidth_gbps) {
         std::ostringstream oss;
         oss << "带宽不足: " << cand.bottleneck_bandwidth_gbps << "Gbps < " << req.constraints.min_bandwidth_gbps << "Gbps";
@@ -578,6 +743,14 @@ static bool parse_candidate_from_json(const Json::Value& cand_json, DeploymentCa
             DeploymentCandidate::LinkDetail ld;
             ld.src = ld_json.get("src", "").asString();
             ld.dst = ld_json.get("dst", "").asString();
+            ld.dependency_source_nf = ld_json.get("dependency_source_nf", "").asString();
+            ld.dependency_target_nf = ld_json.get("dependency_target_nf", "").asString();
+            if ((ld.dependency_source_nf.empty() || ld.dependency_target_nf.empty()) &&
+                ld_json.isMember("core_nf_dependency") &&
+                ld_json["core_nf_dependency"].isObject()) {
+                ld.dependency_source_nf = ld_json["core_nf_dependency"].get("source", ld.dependency_source_nf).asString();
+                ld.dependency_target_nf = ld_json["core_nf_dependency"].get("target", ld.dependency_target_nf).asString();
+            }
             ld.latency_ms = ld_json.get("latency_ms", 0.0).asDouble();
             ld.bandwidth_gbps = ld_json.get("bandwidth_gbps", 0.0).asDouble();
             ld.bandwidth_available_gbps = ld_json.get("bandwidth_available_gbps", ld.bandwidth_gbps).asDouble();
@@ -633,19 +806,32 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         request.score_weights.bandwidth = sw.get("bandwidth", -1.0).asDouble();
         request.score_weights.dispersion = sw.get("dispersion", 0.0).asDouble();
     }
+    request.custom_nf_bindings = parse_custom_nf_bindings(json.get("custom_nf_bindings", Json::arrayValue));
     
     if (json.isMember("constraints")) {
         const auto& constraints = json["constraints"];
         request.constraints.max_latency_ms = constraints.get("max_latency_ms", 150.0).asDouble();
+        request.constraints.registration_latency_ms = constraints.get("registration_latency_ms", 120.0).asDouble();
+        request.constraints.registration_access_latency_ms = constraints.get("registration_access_latency_ms", 8.0).asDouble();
+        request.constraints.pdu_session_latency_ms = constraints.get("pdu_session_latency_ms", 100.0).asDouble();
+        request.constraints.pdu_access_latency_ms = constraints.get("pdu_access_latency_ms", 10.0).asDouble();
         request.constraints.min_bandwidth_gbps = constraints.get("min_bandwidth_gbps", 0.5).asDouble();
         request.constraints.min_reliability = constraints.get("min_reliability", 0.95).asDouble();
     } else if (json.isMember("sla")) {
         const auto& sla = json["sla"];
         request.constraints.max_latency_ms = sla.get("latency_requirement_ms", 150.0).asDouble();
+        request.constraints.registration_latency_ms = sla.get("registration_latency_ms", 120.0).asDouble();
+        request.constraints.registration_access_latency_ms = sla.get("registration_access_latency_ms", 8.0).asDouble();
+        request.constraints.pdu_session_latency_ms = sla.get("pdu_session_latency_ms", 100.0).asDouble();
+        request.constraints.pdu_access_latency_ms = sla.get("pdu_access_latency_ms", 10.0).asDouble();
         request.constraints.min_bandwidth_gbps = sla.get("bandwidth_demand_gbps", 0.5).asDouble();
         request.constraints.min_reliability = sla.get("reliability_requirement", 0.95).asDouble();
     } else {
         request.constraints.max_latency_ms = json.get("max_latency_ms", 150.0).asDouble();
+        request.constraints.registration_latency_ms = json.get("registration_latency_ms", 120.0).asDouble();
+        request.constraints.registration_access_latency_ms = json.get("registration_access_latency_ms", 8.0).asDouble();
+        request.constraints.pdu_session_latency_ms = json.get("pdu_session_latency_ms", 100.0).asDouble();
+        request.constraints.pdu_access_latency_ms = json.get("pdu_access_latency_ms", 10.0).asDouble();
         request.constraints.min_bandwidth_gbps = json.get("bandwidth_demand_gbps", 0.5).asDouble();
         request.constraints.min_reliability = json.get("reliability_requirement", 0.95).asDouble();
     }
@@ -668,28 +854,44 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         }
     }
 
+    const Json::Value* dep_array = nullptr;
+    if (json.isMember("core_nf_dependencies")) {
+        dep_array = &json["core_nf_dependencies"];
+    } else if (json.isMember("nf_dependencies")) {
+        dep_array = &json["nf_dependencies"];
+    } else if (json.isMember("dependencies")) {
+        dep_array = &json["dependencies"];
+    }
+    if (dep_array && dep_array->isArray()) {
+        for (const auto& dep_json : *dep_array) {
+            if (!dep_json.isObject()) continue;
+            CoreNFDependency dep;
+            dep.source = dep_json.get("source", dep_json.get("src", "")).asString();
+            dep.target = dep_json.get("target", dep_json.get("dst", "")).asString();
+            dep.criticality = dep_json.get("criticality", 1.0).asDouble();
+            dep.bandwidth_scale = dep_json.get("bandwidth_scale", 0.5).asDouble();
+            dep.latency_weight = dep_json.get("latency_weight", 1.0).asDouble();
+            dep.reliability_weight = dep_json.get("reliability_weight", 1.0).asDouble();
+            dep.bandwidth_required_gbps = dep_json.get("bandwidth_required_gbps", 0.0).asDouble();
+            request.core_nf_dependencies.push_back(dep);
+        }
+    }
+
     request.topk = std::max(1, std::min(5, request.topk));
     request.core_business_load.normalize_inplace();
+    complete_open5gs_core_request(&request);
     request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
     request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
+    request.constraints.registration_latency_ms = std::max(5.0, request.constraints.registration_latency_ms);
+    request.constraints.registration_access_latency_ms = std::max(0.0, request.constraints.registration_access_latency_ms);
+    request.constraints.pdu_session_latency_ms = std::max(5.0, request.constraints.pdu_session_latency_ms);
+    request.constraints.pdu_access_latency_ms = std::max(0.0, request.constraints.pdu_access_latency_ms);
     request.constraints.min_bandwidth_gbps = std::max(0.01, request.constraints.min_bandwidth_gbps);
     request.constraints.min_reliability = std::max(0.45, std::min(0.995, request.constraints.min_reliability));
+    finalize_dependency_bandwidths(&request);
 
-    double reliability_cap = 0.95;
-    if (request.vnfs.size() >= 12) {
-        reliability_cap = 0.60;
-    } else if (request.vnfs.size() >= 10) {
-        reliability_cap = 0.64;
-    } else if (request.vnfs.size() >= 8) {
-        reliability_cap = 0.68;
-    } else if (request.vnfs.size() >= 6) {
-        reliability_cap = 0.72;
-    } else if (request.vnfs.size() >= 4) {
-        reliability_cap = 0.78;
-    } else if (request.vnfs.size() >= 2) {
-        reliability_cap = 0.86;
-    }
+    double reliability_cap = 0.995;
     if (request.constraints.min_reliability > reliability_cap) {
         spdlog::warn(
             "Request {} reliability {:.4f} too strict for {} core NFs, capped to {:.4f}",
@@ -728,44 +930,8 @@ void SFCController::plan(
         if (sfc_request.vnfs.empty()) {
             Json::Value error;
             error["code"] = 400;
-            error["message"] = "Invalid SFC request";
+            error["message"] = "Invalid core-network request";
             error["details"] = "core_nfs/core_nf_sequence (or vnfs/vnf_sequence) must not be empty";
-            auto resp = HttpResponse::newHttpJsonResponse(error);
-            resp->setStatusCode(k400BadRequest);
-            callback(resp);
-            return;
-        }
-
-        if (sfc_request.source_node.empty() || sfc_request.destination_node.empty()) {
-            Json::Value error;
-            error["code"] = 400;
-            error["message"] = "Invalid SFC request";
-            error["details"] = "source_node and destination_node are required";
-            auto resp = HttpResponse::newHttpJsonResponse(error);
-            resp->setStatusCode(k400BadRequest);
-            callback(resp);
-            return;
-        }
-        if (sfc_request.source_node == sfc_request.destination_node) {
-            Json::Value error;
-            error["code"] = 400;
-            error["message"] = "Invalid SFC request";
-            error["details"] = "source_node and destination_node must be different";
-            auto resp = HttpResponse::newHttpJsonResponse(error);
-            resp->setStatusCode(k400BadRequest);
-            callback(resp);
-            return;
-        }
-
-        std::unordered_set<std::string> topo_nodes;
-        topo_nodes.reserve(topology.nodes.size() * 2);
-        for (const auto& node : topology.nodes) topo_nodes.insert(node.id);
-        if (topo_nodes.find(sfc_request.source_node) == topo_nodes.end() ||
-            topo_nodes.find(sfc_request.destination_node) == topo_nodes.end()) {
-            Json::Value error;
-            error["code"] = 400;
-            error["message"] = "Invalid SFC request";
-            error["details"] = "source_node or destination_node not found in current topology";
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -816,6 +982,9 @@ void SFCController::plan(
             response["error"] = "No feasible deployment found";
             response["details"] = "All generated candidates violate constraints";
             response["core_business_load"] = nlohmann_to_jsoncpp(sfc_request.core_business_load.to_json());
+            nlohmann::json trace_dependencies = nlohmann::json::array();
+            for (const auto& dep : sfc_request.core_nf_dependencies) trace_dependencies.push_back(dep.to_json());
+            response["core_nf_dependencies"] = nlohmann_to_jsoncpp(trace_dependencies);
             
             response["failure_reasons"] = "No SLA-feasible candidate returned by inference engine.";
             response["topology_version"] = topology.metadata.topology_version;
@@ -864,6 +1033,9 @@ void SFCController::plan(
         response["fallback_only"] = feasible_candidates.empty();
         response["decision_process"] = nlohmann_to_jsoncpp(decision_process);
         response["core_business_load"] = nlohmann_to_jsoncpp(sfc_request.core_business_load.to_json());
+        nlohmann::json trace_dependencies = nlohmann::json::array();
+        for (const auto& dep : sfc_request.core_nf_dependencies) trace_dependencies.push_back(dep.to_json());
+        response["core_nf_dependencies"] = nlohmann_to_jsoncpp(trace_dependencies);
 
         std::vector<DeploymentCandidate> response_candidates;
         if (!feasible_candidates.empty()) {
@@ -912,6 +1084,8 @@ void SFCController::plan(
                 trace_link_details.push_back({
                     {"src", ld.src},
                     {"dst", ld.dst},
+                    {"dependency_source_nf", ld.dependency_source_nf},
+                    {"dependency_target_nf", ld.dependency_target_nf},
                     {"latency_ms", ld.latency_ms},
                     {"bandwidth_gbps", ld.bandwidth_gbps},
                     {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
@@ -972,6 +1146,7 @@ void SFCController::plan(
             {"fallback_only", feasible_candidates.empty()},
             {"request_vnfs", trace_request_vnfs},
             {"request_core_nfs", trace_request_vnfs},
+            {"core_nf_dependencies", trace_dependencies},
             {"candidates", trace_candidates},
             {"decision_process", decision_process}
         });
@@ -1077,6 +1252,14 @@ void SFCController::deploy(
                     DeploymentCandidate::LinkDetail ld;
                     ld.src = ld_json.get("src", "").asString();
                     ld.dst = ld_json.get("dst", "").asString();
+                    ld.dependency_source_nf = ld_json.get("dependency_source_nf", "").asString();
+                    ld.dependency_target_nf = ld_json.get("dependency_target_nf", "").asString();
+                    if ((ld.dependency_source_nf.empty() || ld.dependency_target_nf.empty()) &&
+                        ld_json.isMember("core_nf_dependency") &&
+                        ld_json["core_nf_dependency"].isObject()) {
+                        ld.dependency_source_nf = ld_json["core_nf_dependency"].get("source", ld.dependency_source_nf).asString();
+                        ld.dependency_target_nf = ld_json["core_nf_dependency"].get("target", ld.dependency_target_nf).asString();
+                    }
                     ld.latency_ms = ld_json.get("latency_ms", 0.0).asDouble();
                     ld.bandwidth_gbps = ld_json.get("bandwidth_gbps", 0.0).asDouble();
                     ld.bandwidth_available_gbps = ld_json.get("bandwidth_available_gbps", ld.bandwidth_gbps).asDouble();
@@ -1197,6 +1380,15 @@ void SFCController::deploy(
                 dep_json["score_constraints"] = nlohmann::json::parse((*json)["score_constraints"].toStyledString());
             } catch (...) {}
         }
+        if (json->isMember("core_nf_dependencies")) {
+            try {
+                dep_json["core_nf_dependencies"] = nlohmann::json::parse((*json)["core_nf_dependencies"].toStyledString());
+            } catch (...) {}
+        } else if (json->isMember("candidate") && (*json)["candidate"].isMember("core_nf_dependencies")) {
+            try {
+                dep_json["core_nf_dependencies"] = nlohmann::json::parse((*json)["candidate"]["core_nf_dependencies"].toStyledString());
+            } catch (...) {}
+        }
 
         auto now_ts = std::chrono::system_clock::now();
         auto time_t = std::chrono::system_clock::to_time_t(now_ts);
@@ -1237,6 +1429,8 @@ void SFCController::deploy(
             links_json.push_back({
                 {"src", ld.src},
                 {"dst", ld.dst},
+                {"dependency_source_nf", ld.dependency_source_nf},
+                {"dependency_target_nf", ld.dependency_target_nf},
                 {"latency_ms", ld.latency_ms},
                 {"bandwidth_gbps", ld.bandwidth_gbps},
                 {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
@@ -1312,8 +1506,8 @@ void SFCController::deploy(
             {"type", "deployment_action"},
             {"sim_time", updated_topology.metadata.sim_time},
             {"level", "success"},
-            {"title", "SFC部署完成"},
-            {"message", "SFC deployment committed"},
+            {"title", "核心网部署完成"},
+            {"message", "Core-network deployment committed"},
             {"detail", "deployment_id=" + deployment_id + ", request_id=" + request_id},
             {"deployment_id", deployment_id},
             {"request_id", request_id},
@@ -1570,7 +1764,7 @@ void SFCController::rollback(
         WSHandler::broadcast_json({
             {"type", "deployment_action"},
             {"level", success ? "warning" : "error"},
-            {"title", success ? "SFC回滚完成" : "SFC回滚失败"},
+            {"title", success ? "核心网回滚完成" : "核心网回滚失败"},
             {"message", success ? "Deployment rollback completed" : "Deployment rollback failed"},
             {"detail", "deployment_id=" + deployment_id},
             {"deployment_id", deployment_id}
@@ -1661,11 +1855,11 @@ void SFCController::startSession(
             initial_inference_time_ms = request_json["initial_inference_time_ms"].asDouble();
         }
         auto sfc_request = parse_sfc_request(request_json);
-        if (sfc_request.vnfs.empty() || sfc_request.source_node.empty() || sfc_request.destination_node.empty()) {
+        if (sfc_request.vnfs.empty()) {
             Json::Value error;
             error["code"] = 400;
             error["message"] = "Invalid session request";
-            error["details"] = "source_node/destination_node and core_nfs are required";
+            error["details"] = "core_nfs are required";
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

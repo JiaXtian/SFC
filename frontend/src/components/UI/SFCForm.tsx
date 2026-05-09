@@ -1,16 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Send,
   Loader2,
   Plus,
   Trash2,
   Settings2,
-  ChevronDown,
-  ChevronUp,
   Info,
   FolderKanban,
   SlidersHorizontal,
-  Radar,
 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useAuth } from '@/auth/AuthContext'
@@ -34,8 +31,34 @@ const vnfTemplates = {
 }
 
 type VNFTemplateName = keyof typeof vnfTemplates
-const DEFAULT_SOURCE_NODE = 'SAT_000_000'
-const DEFAULT_DESTINATION_NODE = 'SAT_000_001'
+
+const CORE_NF_TYPES = [
+  'nrf', 'scp', 'sepp', 'amf', 'smf', 'upf',
+  'ausf', 'udm', 'udr', 'pcf', 'nssf', 'bsf',
+] as const
+
+const CORE_NF_DEPENDENCIES = [
+  { source: 'nrf', target: 'scp', criticality: 0.88, bandwidth_scale: 0.55, latency_weight: 0.8, reliability_weight: 0.82 },
+  { source: 'scp', target: 'amf', criticality: 1.0, bandwidth_scale: 0.72, latency_weight: 1.0, reliability_weight: 1.0 },
+  { source: 'scp', target: 'smf', criticality: 1.0, bandwidth_scale: 0.76, latency_weight: 1.0, reliability_weight: 1.0 },
+  { source: 'scp', target: 'ausf', criticality: 0.78, bandwidth_scale: 0.42, latency_weight: 0.72, reliability_weight: 0.78 },
+  { source: 'scp', target: 'udm', criticality: 0.82, bandwidth_scale: 0.44, latency_weight: 0.76, reliability_weight: 0.82 },
+  { source: 'scp', target: 'pcf', criticality: 0.62, bandwidth_scale: 0.34, latency_weight: 0.58, reliability_weight: 0.62 },
+  { source: 'scp', target: 'nssf', criticality: 0.58, bandwidth_scale: 0.28, latency_weight: 0.54, reliability_weight: 0.58 },
+  { source: 'scp', target: 'bsf', criticality: 0.48, bandwidth_scale: 0.24, latency_weight: 0.48, reliability_weight: 0.48 },
+  { source: 'scp', target: 'sepp', criticality: 0.54, bandwidth_scale: 0.3, latency_weight: 0.54, reliability_weight: 0.56 },
+  { source: 'amf', target: 'ausf', criticality: 0.92, bandwidth_scale: 0.46, latency_weight: 0.92, reliability_weight: 0.9 },
+  { source: 'amf', target: 'udm', criticality: 0.92, bandwidth_scale: 0.48, latency_weight: 0.9, reliability_weight: 0.92 },
+  { source: 'amf', target: 'smf', criticality: 1.0, bandwidth_scale: 0.86, latency_weight: 1.0, reliability_weight: 1.0 },
+  { source: 'amf', target: 'nssf', criticality: 0.66, bandwidth_scale: 0.34, latency_weight: 0.64, reliability_weight: 0.66 },
+  { source: 'smf', target: 'upf', criticality: 1.0, bandwidth_scale: 1.0, latency_weight: 1.0, reliability_weight: 1.0 },
+  { source: 'smf', target: 'pcf', criticality: 0.82, bandwidth_scale: 0.44, latency_weight: 0.78, reliability_weight: 0.8 },
+  { source: 'smf', target: 'bsf', criticality: 0.58, bandwidth_scale: 0.3, latency_weight: 0.54, reliability_weight: 0.58 },
+  { source: 'smf', target: 'udm', criticality: 0.72, bandwidth_scale: 0.38, latency_weight: 0.7, reliability_weight: 0.72 },
+  { source: 'udm', target: 'udr', criticality: 0.86, bandwidth_scale: 0.56, latency_weight: 0.78, reliability_weight: 0.86 },
+  { source: 'pcf', target: 'udr', criticality: 0.64, bandwidth_scale: 0.34, latency_weight: 0.56, reliability_weight: 0.64 },
+  { source: 'pcf', target: 'bsf', criticality: 0.52, bandwidth_scale: 0.28, latency_weight: 0.5, reliability_weight: 0.52 },
+]
 
 interface VNFConfig {
   type: VNFTemplateName
@@ -49,16 +72,41 @@ interface VNFConfig {
 
 const sfcTemplates = [
   {
-    name: 'SA-Basic-9',
-    vnfs: ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf'] as VNFTemplateName[],
-    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.72 },
+    name: 'Open5GS-Core-12',
+    vnfs: [...CORE_NF_TYPES] as VNFTemplateName[],
+    constraints: {
+      max_latency_ms: 320,
+      registration_latency_ms: 85,
+      registration_access_latency_ms: 8,
+      pdu_session_latency_ms: 75,
+      pdu_access_latency_ms: 10,
+      min_bandwidth_gbps: 1.0,
+      min_reliability: 0.72,
+    },
   },
 ]
 
-const UE_READY_REQUIRED_NFS: VNFTemplateName[] = ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf']
-const FULL_CHAIN_REQUIRED_NFS: VNFTemplateName[] = ['nrf', 'ausf', 'udm', 'udr', 'amf', 'smf', 'upf', 'pcf', 'nssf', 'scp', 'bsf', 'sepp']
-
 const normalizeNfType = (v: string) => String(v || '').trim().toLowerCase().replace(/[-\s]+/g, '_')
+
+const makeNfConfig = (type: VNFTemplateName, idx: number): VNFConfig => ({
+  type,
+  name: `${String(type).toUpperCase()}-${idx + 1}`,
+  ...vnfTemplates[type],
+})
+
+const normalizeFullCoreNfs = (vnfs: VNFConfig[]): VNFConfig[] => {
+  const byType = new Map<string, VNFConfig>()
+  vnfs.forEach((v) => {
+    const key = normalizeNfType(v.type)
+    if (key) byType.set(key, v)
+  })
+  return CORE_NF_TYPES.map((type, idx) => {
+    const existing = byType.get(type)
+    return existing
+      ? { ...makeNfConfig(type, idx), ...existing, type }
+      : makeNfConfig(type, idx)
+  })
+}
 
 function InfoHint({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
@@ -81,32 +129,6 @@ function InfoHint({ text }: { text: string }) {
   )
 }
 
-function FoldHeader({
-  icon,
-  title,
-  open,
-  onToggle,
-}: {
-  icon: ReactNode
-  title: string
-  open: boolean
-  onToggle: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className="w-full flex items-center justify-between text-[10px] text-slate-300 uppercase tracking-wider font-semibold hover:text-white transition"
-    >
-      <span className="inline-flex items-center gap-1.5">
-        {icon}
-        {title}
-      </span>
-      {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-    </button>
-  )
-}
-
 export default function SFCForm() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
@@ -117,22 +139,17 @@ export default function SFCForm() {
   const [hoverTemplate, setHoverTemplate] = useState<number | null>(null)
 
   const [customSFC, setCustomSFC] = useState({
-    name: '自定义SFC',
-    vnfs: [
-      { type: 'nrf', name: 'NRF-1', ...vnfTemplates.nrf },
-      { type: 'ausf', name: 'AUSF-2', ...vnfTemplates.ausf },
-      { type: 'udm', name: 'UDM-3', ...vnfTemplates.udm },
-      { type: 'udr', name: 'UDR-4', ...vnfTemplates.udr },
-      { type: 'amf', name: 'AMF-5', ...vnfTemplates.amf },
-      { type: 'smf', name: 'SMF-6', ...vnfTemplates.smf },
-      { type: 'upf', name: 'UPF-7', ...vnfTemplates.upf },
-      { type: 'pcf', name: 'PCF-8', ...vnfTemplates.pcf },
-      { type: 'nssf', name: 'NSSF-9', ...vnfTemplates.nssf },
-      { type: 'scp', name: 'SCP-10', ...vnfTemplates.scp },
-      { type: 'bsf', name: 'BSF-11', ...vnfTemplates.bsf },
-      { type: 'sepp', name: 'SEPP-12', ...vnfTemplates.sepp },
-    ] as VNFConfig[],
-    constraints: { max_latency_ms: 320, min_bandwidth_gbps: 1.0, min_reliability: 0.82 },
+    name: '自定义核心网',
+    vnfs: CORE_NF_TYPES.map((type, idx) => makeNfConfig(type, idx)) as VNFConfig[],
+    constraints: {
+      max_latency_ms: 320,
+      registration_latency_ms: 85,
+      registration_access_latency_ms: 8,
+      pdu_session_latency_ms: 75,
+      pdu_access_latency_ms: 10,
+      min_bandwidth_gbps: 1.0,
+      min_reliability: 0.82,
+    },
     optimize: 'latency',
   })
   const [bindingGroups, setBindingGroups] = useState<Array<{ id: string; members: number[] }>>([])
@@ -142,11 +159,6 @@ export default function SFCForm() {
     planning_time_budget_ms: 450,
     auto_redeploy: true,
   }
-  const [trafficEndpoints, setTrafficEndpoints] = useState({
-    source_node: DEFAULT_SOURCE_NODE,
-    destination_node: DEFAULT_DESTINATION_NODE,
-  })
-
   const [templateAdvanced, setTemplateAdvanced] = useState({ optimize: 'latency' })
   const [enableCustomWeights, setEnableCustomWeights] = useState(false)
   const [scoreWeights, setScoreWeights] = useState({
@@ -161,21 +173,6 @@ export default function SFCForm() {
     () => scoreWeights.latency + scoreWeights.resource + scoreWeights.reliability + scoreWeights.bandwidth,
     [scoreWeights]
   )
-  const satelliteIds = useMemo(() => satellites.map(s => s.id), [satellites])
-
-  const customNfTypes = useMemo(
-    () => Array.from(new Set(customSFC.vnfs.map(v => normalizeNfType(v.type)))),
-    [customSFC.vnfs]
-  )
-  const missingUeReadyNfs = useMemo(
-    () => UE_READY_REQUIRED_NFS.filter(t => !customNfTypes.includes(t)),
-    [customNfTypes]
-  )
-  const missingFullChainNfs = useMemo(
-    () => FULL_CHAIN_REQUIRED_NFS.filter(t => !customNfTypes.includes(t)),
-    [customNfTypes]
-  )
-
   useEffect(() => {
     setBindingGroups(prev =>
       prev
@@ -186,30 +183,6 @@ export default function SFCForm() {
         .filter(g => g.members.length > 0)
     )
   }, [customSFC.vnfs.length])
-
-  const addVNF = () => {
-    setCustomSFC(prev => {
-      const idx = prev.vnfs.length + 1
-      return {
-        ...prev,
-        vnfs: [...prev.vnfs, { type: 'amf', name: `AMF-${idx}`, ...vnfTemplates.amf }],
-      }
-    })
-  }
-
-  const removeVNF = (index: number) => {
-    setCustomSFC(prev => ({ ...prev, vnfs: prev.vnfs.filter((_, i) => i !== index) }))
-    setBindingGroups(prev =>
-      prev
-        .map(g => ({
-          ...g,
-          members: g.members
-            .filter(m => m !== index)
-            .map(m => (m > index ? m - 1 : m)),
-        }))
-        .filter(g => g.members.length > 0)
-    )
-  }
 
   const updateVNFType = (index: number, value: VNFTemplateName) => {
     setCustomSFC(prev => {
@@ -303,32 +276,7 @@ export default function SFCForm() {
       openSystemPopup('参数校验失败', `自定义评分权重总和必须为 1.0，当前为 ${scoreWeightSum.toFixed(3)}。`, 'warning')
       return
     }
-    if (satelliteIds.length < 2) {
-      openSystemPopup('参数校验失败', '当前拓扑卫星数量不足，至少需要 2 颗卫星才能配置 source_node/destination_node。', 'warning')
-      return
-    }
-    if (!trafficEndpoints.source_node || !trafficEndpoints.destination_node) {
-      openSystemPopup('参数校验失败', '请填写 SFC 流量入口（source_node）和出口（destination_node）。', 'warning')
-      return
-    }
-    if (!satelliteIds.includes(trafficEndpoints.source_node) || !satelliteIds.includes(trafficEndpoints.destination_node)) {
-      openSystemPopup('参数校验失败', 'source_node 或 destination_node 不存在于当前星座，请从下拉候选选择或输入正确卫星 ID。', 'warning')
-      return
-    }
-    if (trafficEndpoints.source_node === trafficEndpoints.destination_node) {
-      openSystemPopup('参数校验失败', 'source_node 与 destination_node 不能相同。', 'warning')
-      return
-    }
     if (mode === 'custom') {
-      if (missingUeReadyNfs.length > 0) {
-        openSystemPopup(
-          '必要网元缺失',
-          `当前自定义链路缺少基础可服务网元：${missingUeReadyNfs.map(v => v.toUpperCase()).join('、')}。\n请补齐后再生成部署策略。`,
-          'warning'
-        )
-        return
-      }
-
       if (isAdmin && bindingGroups.length > 0) {
         const usedMembers = new Set<number>()
         for (const group of bindingGroups) {
@@ -356,16 +304,13 @@ export default function SFCForm() {
         mode === 'template'
           ? {
               name: selectedTpl.name,
-              vnfs: selectedTpl.vnfs.map((type, idx) => ({
-                name: `${String(type).toUpperCase()}-${idx + 1}`,
-                type,
-                ...vnfTemplates[type],
-              })),
+              vnfs: selectedTpl.vnfs.map((type, idx) => makeNfConfig(type, idx)),
               constraints: selectedTpl.constraints,
               optimize: templateAdvanced.optimize,
             }
           : customSFC
 
+      const fullCoreVnfs = normalizeFullCoreNfs(sfc.vnfs as VNFConfig[])
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
       const customBindingPayload =
@@ -373,12 +318,12 @@ export default function SFCForm() {
           ? bindingGroups
               .map(group =>
                 Array.from(new Set(group.members))
-                  .map(idx => sfc.vnfs[idx]?.name?.trim() || `core-nf-${idx + 1}`)
+                  .map(idx => normalizeNfType(fullCoreVnfs[idx]?.type || ''))
                   .filter(Boolean)
               )
               .filter(group => group.length >= 2)
           : []
-      const coreNfs = sfc.vnfs.map((v: any, idx: number) => {
+      const coreNfs = fullCoreVnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
         return {
@@ -397,13 +342,13 @@ export default function SFCForm() {
       const payload = {
         request_id: reqId,
         network_domain: 'open5gs',
+        service_type: 'open5gs_full_core',
         topology_version: topologyVersion,
         sim_time: simulation.sim_time,
-        source_node: trafficEndpoints.source_node,
-        destination_node: trafficEndpoints.destination_node,
         core_nfs: coreNfs,
         core_nf_sequence: coreNfs,
         vnfs: coreNfs,
+        core_nf_dependencies: CORE_NF_DEPENDENCIES,
         constraints: sfc.constraints,
         optimize: optimizeMode,
         topk: 1,
@@ -493,8 +438,6 @@ export default function SFCForm() {
         sfcName: sfc.name,
         candidates: finalCandidates,
         inferenceTime: result.inference_time_ms,
-        sourceNode: result.source_node || trafficEndpoints.source_node,
-        destinationNode: result.destination_node || trafficEndpoints.destination_node,
         topologyVersion: Number(result.topology_version ?? topologyVersion),
         requestedTopk: 1,
         warning: result.warning || '',
@@ -522,7 +465,7 @@ export default function SFCForm() {
         },
       })
 
-      addToast(`生成 ${finalCandidates.length} 个候选方案`, 'success')
+      addToast(`生成 ${finalCandidates.length} 个核心网候选方案`, 'success')
       if (result.warning) {
         openSystemPopup(
           '候选方案提示',
@@ -613,10 +556,14 @@ export default function SFCForm() {
                         <div className="text-[9px] text-slate-400 font-mono">{tpl.vnfs.length} Core NFs</div>
                       </div>
 
-                      <div className="grid grid-cols-3 gap-1.5 mb-2">
+                      <div className="grid grid-cols-4 gap-1.5 mb-2">
                         <div className="rounded-md px-2 py-1" style={{ background: 'rgba(10,20,34,0.9)', border: '1px solid rgba(83,114,138,0.2)' }}>
-                          <div className="text-[8px] text-slate-500 uppercase">时延</div>
-                          <div className="text-[10px] text-slate-200 font-semibold">≤ {tpl.constraints.max_latency_ms}ms</div>
+                          <div className="text-[8px] text-slate-500 uppercase">注册时延</div>
+                          <div className="text-[10px] text-slate-200 font-semibold">≤ {tpl.constraints.registration_latency_ms}ms</div>
+                        </div>
+                        <div className="rounded-md px-2 py-1" style={{ background: 'rgba(10,20,34,0.9)', border: '1px solid rgba(83,114,138,0.2)' }}>
+                          <div className="text-[8px] text-slate-500 uppercase">PDU时延</div>
+                          <div className="text-[10px] text-slate-200 font-semibold">≤ {tpl.constraints.pdu_session_latency_ms}ms</div>
                         </div>
                         <div className="rounded-md px-2 py-1" style={{ background: 'rgba(10,20,34,0.9)', border: '1px solid rgba(83,114,138,0.2)' }}>
                           <div className="text-[8px] text-slate-500 uppercase">带宽</div>
@@ -707,45 +654,40 @@ export default function SFCForm() {
       {mode === 'custom' && (
         <div className="space-y-3">
           <div>
-            <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5 font-semibold">SFC名称</div>
+            <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5 font-semibold">核心网服务名称</div>
             <input
               type="text"
               value={customSFC.name}
               onChange={e => setCustomSFC(prev => ({ ...prev, name: e.target.value }))}
               className="w-full px-3 py-2 rounded-lg text-sm"
               style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
-              placeholder="输入SFC名称"
+              placeholder="输入核心网服务名称"
             />
           </div>
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">核心网网元列表 ({customSFC.vnfs.length})</div>
-              <button onClick={addVNF} className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition hover:bg-white/5" style={{ color: '#67e8f9' }}>
-                <Plus className="w-3 h-3" /> 添加
-              </button>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">完整核心网网元列表 ({customSFC.vnfs.length}/12)</div>
             </div>
 
             <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
               {customSFC.vnfs.map((vnf, i) => (
                 <div key={i} className="p-2.5 rounded-lg" style={{ background: 'rgba(12,22,38,0.86)', border: '1px solid rgba(96,125,149,0.23)' }}>
-                  <div className="grid grid-cols-[48px_1fr_28px] gap-2 mb-2 items-center">
+                  <div className="grid grid-cols-[48px_1fr] gap-2 mb-2 items-center">
                     <span className="text-[10px] text-slate-500 font-mono">#{i + 1}</span>
                     <select
                       value={vnf.type}
                       onChange={e => updateVNFType(i, e.target.value as VNFTemplateName)}
+                      disabled
                       className="w-full px-2 py-1 rounded text-xs"
-                      style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
+                      style={{ background: 'rgba(9,17,31,0.52)', border: '1px solid rgba(98,128,152,0.25)', color: '#c7e7ff' }}
                     >
-                      {Object.keys(vnfTemplates).map(name => (
+                      {CORE_NF_TYPES.map(name => (
                         <option key={name} value={name}>
                           {name.toUpperCase()}
                         </option>
                       ))}
                     </select>
-                    <button onClick={() => removeVNF(i)} className="p-1 rounded hover:bg-red-900/30 transition">
-                      <Trash2 className="w-3.5 h-3.5 text-slate-500 hover:text-red-400" />
-                    </button>
                   </div>
 
                   <div className="mb-2">
@@ -782,26 +724,6 @@ export default function SFCForm() {
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-
-          <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
-            <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold mb-1.5">完整性检查</div>
-            <div className="text-[11px] leading-relaxed">
-              {missingUeReadyNfs.length === 0 ? (
-                <div className="text-emerald-300">基础可服务网元已齐全（可用于 UE 基础验证）。</div>
-              ) : (
-                <div className="text-amber-300">
-                  缺少基础可服务网元：{missingUeReadyNfs.map(v => v.toUpperCase()).join('、')}
-                </div>
-              )}
-              {missingFullChainNfs.length === 0 ? (
-                <div className="text-emerald-300 mt-1">12 种完整核心网网元已齐全。</div>
-              ) : (
-                <div className="text-slate-300 mt-1">
-                  当前未包含完整 12 网元，还缺少：{missingFullChainNfs.map(v => v.toUpperCase()).join('、')}
-                </div>
-              )}
             </div>
           </div>
 
@@ -845,14 +767,50 @@ export default function SFCForm() {
             </div>
           )}
 
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             <div>
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">最大时延 (ms)</div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">注册时延 SLA (ms)</div>
               <input
                 type="number"
-                value={customSFC.constraints.max_latency_ms}
+                value={customSFC.constraints.registration_latency_ms}
                 onChange={e =>
-                  setCustomSFC(prev => ({ ...prev, constraints: { ...prev.constraints, max_latency_ms: parseInt(e.target.value) || 10 } }))
+                  setCustomSFC(prev => ({ ...prev, constraints: { ...prev.constraints, registration_latency_ms: parseInt(e.target.value) || 10 } }))
+                }
+                className="w-full px-3 py-2 rounded-lg text-sm"
+                style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">注册固定接入时延 (ms)</div>
+              <input
+                type="number"
+                value={customSFC.constraints.registration_access_latency_ms}
+                onChange={e =>
+                  setCustomSFC(prev => ({ ...prev, constraints: { ...prev.constraints, registration_access_latency_ms: parseFloat(e.target.value) || 0 } }))
+                }
+                className="w-full px-3 py-2 rounded-lg text-sm"
+                style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">PDU Session SLA (ms)</div>
+              <input
+                type="number"
+                value={customSFC.constraints.pdu_session_latency_ms}
+                onChange={e =>
+                  setCustomSFC(prev => ({ ...prev, constraints: { ...prev.constraints, pdu_session_latency_ms: parseInt(e.target.value) || 10 } }))
+                }
+                className="w-full px-3 py-2 rounded-lg text-sm"
+                style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">PDU固定接入时延 (ms)</div>
+              <input
+                type="number"
+                value={customSFC.constraints.pdu_access_latency_ms}
+                onChange={e =>
+                  setCustomSFC(prev => ({ ...prev, constraints: { ...prev.constraints, pdu_access_latency_ms: parseFloat(e.target.value) || 0 } }))
                 }
                 className="w-full px-3 py-2 rounded-lg text-sm"
                 style={{ background: 'rgba(14,24,39,0.9)', border: '1px solid rgba(99,130,158,0.25)', color: '#fff' }}
@@ -922,51 +880,6 @@ export default function SFCForm() {
           </div>
         </div>
       )}
-
-      <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
-        <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold mb-2 flex items-center gap-1.5">
-          <Radar className="w-3.5 h-3.5 text-cyan-300" />
-          流量入口与出口
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-[10px]">
-          <div>
-            <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-              source_node
-              <InfoHint text="SFC 流量入口卫星，必须存在于当前星座。" />
-            </div>
-            <input
-              type="text"
-              list="sfc-satellite-options"
-              value={trafficEndpoints.source_node}
-              onChange={e => setTrafficEndpoints(prev => ({ ...prev, source_node: e.target.value.trim() }))}
-              className="w-full px-2 py-1 rounded"
-              placeholder="SAT_000_000"
-              style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-            />
-          </div>
-          <div>
-            <div className="text-slate-500 mb-0.5 flex items-center gap-1">
-              destination_node
-              <InfoHint text="SFC 流量出口卫星，必须存在于当前星座。" />
-            </div>
-            <input
-              type="text"
-              list="sfc-satellite-options"
-              value={trafficEndpoints.destination_node}
-              onChange={e => setTrafficEndpoints(prev => ({ ...prev, destination_node: e.target.value.trim() }))}
-              className="w-full px-2 py-1 rounded"
-              placeholder="SAT_000_001"
-              style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
-            />
-          </div>
-          <div />
-        </div>
-        <datalist id="sfc-satellite-options">
-          {satelliteIds.map(id => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
-      </div>
 
       <button
         onClick={submit}

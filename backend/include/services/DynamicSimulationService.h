@@ -22,6 +22,8 @@ public:
         int ttl_ticks = 0;
         std::string fault_type;
         std::string injection_mode; // random/manual
+        double duration_sec = 0.0;
+        std::chrono::steady_clock::time_point expires_at;
     };
 
     DynamicSimulationService(

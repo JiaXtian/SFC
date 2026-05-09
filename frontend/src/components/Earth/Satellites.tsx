@@ -12,15 +12,6 @@ function satToVec3(x: number, y: number, z: number): THREE.Vector3 {
   return new THREE.Vector3(x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U)
 }
 
-function blendColors(colors: string[]): string {
-  if (colors.length === 0) return '#39ff6a'
-  const c = colors.map(hex => new THREE.Color(hex))
-  const out = new THREE.Color(0, 0, 0)
-  c.forEach(col => out.add(col))
-  out.multiplyScalar(1 / c.length)
-  return `#${out.getHexString()}`
-}
-
 function isNodeFault(sat: any): boolean {
   const status = String(sat?.status ?? 'active').toLowerCase()
   const faultTag = String(sat?.fault_tag ?? '').trim()
@@ -55,19 +46,6 @@ export default function Satellites() {
       dep.deployed_nodes.forEach(nodeId => nodes.add(nodeId))
     })
     return nodes
-  }, [deployments, highlightedDeploymentIds])
-
-  const endpointSets = useMemo(() => {
-    const ingress = new Set<string>()
-    const egress = new Set<string>()
-    if (highlightedDeploymentIds.length === 0) return { ingress, egress }
-    const active = new Set(highlightedDeploymentIds)
-    deployments.forEach(dep => {
-      if (!active.has(dep.deployment_id)) return
-      if ((dep as any).source_node) ingress.add((dep as any).source_node)
-      if ((dep as any).destination_node) egress.add((dep as any).destination_node)
-    })
-    return { ingress, egress }
   }, [deployments, highlightedDeploymentIds])
 
   const satelliteIndexById = useMemo(() => {
@@ -208,10 +186,8 @@ export default function Satellites() {
   const markedSatIds = useMemo(() => {
     const ids = new Set<string>()
     vnfHighlightSet.forEach((id) => ids.add(id))
-    endpointSets.ingress.forEach((id) => ids.add(id))
-    endpointSets.egress.forEach((id) => ids.add(id))
     return Array.from(ids)
-  }, [vnfHighlightSet, endpointSets])
+  }, [vnfHighlightSet])
 
   const faultSatIds = useMemo(() => {
     const out: string[] = []
@@ -271,22 +247,15 @@ export default function Satellites() {
         </group>
       )}
 
-      {/* Static bulging overlays for deployed nodes (VNF / ingress / egress) */}
+      {/* Static bulging overlays for deployed core-network nodes */}
       {highlightedDeploymentIds.length > 0 && markedSatIds.map((satId) => {
         const idx = satelliteIndexById.get(satId)
         if (idx == null || idx < 0) return null
         const p = getDisplayPosition(idx)
         if (!p) return null
         const isVnf = vnfHighlightSet.has(satId)
-        const isIngress = endpointSets.ingress.has(satId)
-        const isEgress = endpointSets.egress.has(satId)
-        if (!isVnf && !isIngress && !isEgress) return null
-
-        const roleColors: string[] = []
-        if (isVnf) roleColors.push('#f5f9f7')
-        if (isIngress) roleColors.push('#0097fb')
-        if (isEgress) roleColors.push('#f67904')
-        const core = blendColors(roleColors)
+        if (!isVnf) return null
+        const core = '#f5f9f7'
 
         return (
           <group key={`mark-${satId}`} position={vecToTuple(p)}>

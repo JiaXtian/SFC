@@ -121,24 +121,24 @@ export default function SatelliteDetail() {
 
   const safeDeployments = deployments ?? []
 
-  const trafficRoles = safeDeployments
-    .map((d: any) => {
-      const roles: string[] = []
-      if (d?.source_node === sat?.id) roles.push('入口')
-      if (d?.destination_node === sat?.id) roles.push('出口')
-      if (roles.length === 0) return null
+  const coreNfsOnNode = safeDeployments
+    .flatMap((d: any) => {
       const label = resolveSfcLabel(safeDeployments as any, {
         deploymentId: String(d?.deployment_id ?? ''),
         sessionId: String(d?.session_id ?? ''),
         requestId: String(d?.request_id ?? ''),
       })
-      return {
-        deployment_id: d?.deployment_id,
-        sfc_name: label,
-        roles,
-      }
+      const per = Array.isArray(d?.per_vnf) ? d.per_vnf : []
+      return per
+        .filter((p: any) => String(p?.node ?? '') === String(sat?.id ?? ''))
+        .map((p: any) => ({
+          deployment_id: String(d?.deployment_id ?? ''),
+          sfc_name: label,
+          nf_type: String(p?.nf_type ?? p?.core_nf ?? p?.vnf ?? ''),
+          nf_name: String(p?.core_nf ?? p?.vnf ?? p?.nf_type ?? ''),
+        }))
     })
-    .filter(Boolean) as Array<{ deployment_id: string; sfc_name: string; roles: string[] }>
+    .filter((x: any) => x && x.nf_type) as Array<{ deployment_id: string; sfc_name: string; nf_type: string; nf_name: string }>
 
   return (
     <div
@@ -391,12 +391,12 @@ export default function SatelliteDetail() {
         <div>
           <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
             <Navigation className="w-3 h-3" />
-            流量端点角色 ({trafficRoles.length})
+            承载核心网网元 ({coreNfsOnNode.length})
           </div>
 
-          {trafficRoles.length > 0 ? (
+          {coreNfsOnNode.length > 0 ? (
             <div className="space-y-1.5">
-              {trafficRoles.map((item, i) => (
+              {coreNfsOnNode.map((item, i) => (
                 <div
                   key={`${item.deployment_id}-${i}`}
                   className="px-2.5 py-2 rounded-lg"
@@ -404,14 +404,14 @@ export default function SatelliteDetail() {
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-slate-200">{item.sfc_name}</span>
-                    <span className="text-[9px] text-cyan-300">{item.roles.join(' / ')}</span>
+                    <span className="text-[9px] text-cyan-300 font-mono">{item.nf_type.toUpperCase()}</span>
                   </div>
                 </div>
               ))}
             </div>
           ) : (
             <div className="text-[10px] text-gray-600 text-center py-2.5 rounded-lg" style={{ background: 'rgba(50,50,60,0.2)' }}>
-              该节点当前未作为任何 SFC 的流量入口/出口
+              该节点当前未承载核心网网元
             </div>
           )}
         </div>

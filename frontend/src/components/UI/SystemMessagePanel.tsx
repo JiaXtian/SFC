@@ -5,7 +5,7 @@ import { toChineseFailureText } from '@/utils/failureText'
 import { buildSfcLabelMaps, formatSfcSeq, resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
 function extractSfcLabel(raw: string): string {
-  const m = /\bSFC-(\d{1,})\b/i.exec(String(raw ?? ''))
+  const m = /\b(?:CORE|SFC)-(\d{1,})\b/i.exec(String(raw ?? ''))
   if (!m) return ''
   const seq = Number(m[1])
   if (!Number.isFinite(seq) || seq <= 0) return ''
@@ -28,10 +28,11 @@ function faultTypeLabel(tag: string): string {
 
 function triggerLabel(trigger: string): string {
   switch (trigger) {
-    case 'source_node_down': return '源节点故障'
-    case 'destination_node_down': return '宿节点故障'
-    case 'deployment_node_down': return '部署节点故障'
-    case 'anchor_path_disconnected': return '业务路径中断'
+    case 'source_node_down': return '核心网相关节点故障'
+    case 'destination_node_down': return '核心网相关节点故障'
+    case 'deployment_node_down': return '承载网元卫星故障'
+    case 'anchor_path_disconnected': return '核心网依赖路径中断'
+    case 'core_dependency_endpoint_missing': return '核心网网元映射缺失'
     case 'recovery_resume': return '故障恢复后继续编排'
     case 'topology_tick_bootstrap': return '系统拓扑初始化'
     case 'session_start': return '会话启动'
@@ -118,7 +119,7 @@ export default function SystemMessagePanel() {
     ;[...bySession.values(), ...byRequest.values(), ...byDeployment.values()].forEach((x) => usedLabels.add(String(x)))
 
     const parseSeq = (label: string) => {
-      const m = /^SFC-(\d{3,})$/.exec(label.trim())
+      const m = /^(?:CORE|SFC)-(\d{3,})$/.exec(label.trim())
       return m ? Number(m[1]) : 0
     }
     let nextSeq = Math.max(
@@ -203,7 +204,7 @@ export default function SystemMessagePanel() {
             time,
             tone: 'warn',
             title: '触发重调度',
-            text: short(`${sfcLabel} 因${trig}进入重调度流程`),
+              text: short(`${sfcLabel} 因${trig}进入核心网重调度流程`),
           }
         }
 
@@ -216,7 +217,7 @@ export default function SystemMessagePanel() {
             id: e.id,
             time,
             tone: ok ? 'ok' : 'warn',
-            title: ok ? '重调度完成' : '重调度失败',
+            title: ok ? '核心网恢复完成' : '核心网恢复失败',
             text: ok
               ? short(`${sfcLabel} 已恢复，触发原因：${trig}`)
               : short(`${sfcLabel} 恢复失败，请检查资源与链路状态`),
@@ -262,7 +263,7 @@ export default function SystemMessagePanel() {
               : (isBootstrap ? '初始策略构建失败' : '路径重算未通过'),
             text: deployable > 0
               ? short(`${sfcLabel} 已生成可部署方案（${deployable}/${returned}）`)
-              : short(`${sfcLabel} 未找到满足约束的可部署方案`),
+                : short(`${sfcLabel} 未找到满足核心网约束的可部署方案`),
           }
         }
 
@@ -308,8 +309,8 @@ export default function SystemMessagePanel() {
               id: e.id,
               time,
               tone: 'ok',
-              title: '重部署完成',
-              text: short(`${sfcLabel} 已切换到新路径（${trig}）`),
+              title: '核心网重部署完成',
+              text: short(`${sfcLabel} 已切换到新部署/路径（${trig}）`),
             }
           }
           if (st === 'deployed') {
@@ -317,7 +318,7 @@ export default function SystemMessagePanel() {
               id: e.id,
               time,
               tone: 'ok',
-              title: '部署成功',
+              title: '核心网部署成功',
               text: short(`${sfcLabel} 已完成部署并进入运行态`),
             }
           }
@@ -336,7 +337,7 @@ export default function SystemMessagePanel() {
               time,
               tone: 'warn',
               title: '等待可部署方案',
-              text: short(`${sfcLabel} 暂无可部署方案，系统将持续重算（${trig}）`),
+              text: short(`${sfcLabel} 暂无可部署方案，系统将持续重算核心网路径/承载节点（${trig}）`),
             }
           }
           if (st === 'stable') {
@@ -344,8 +345,8 @@ export default function SystemMessagePanel() {
               id: e.id,
               time,
               tone: 'info',
-              title: '会话保持稳定',
-              text: short(`${sfcLabel} 当前路径保持稳定，无需迁移`),
+              title: '核心网保持稳定',
+              text: short(`${sfcLabel} 当前依赖路径保持稳定，无需迁移`),
             }
           }
           return null
@@ -361,7 +362,7 @@ export default function SystemMessagePanel() {
             time,
             tone: 'warn',
             title: '路径重算触发',
-            text: short(`${sfcLabel} 因${trig}启动路径重算`),
+            text: short(`${sfcLabel} 因${trig}启动核心网依赖路径重算`),
           }
         }
 
@@ -503,7 +504,7 @@ export default function SystemMessagePanel() {
       .filter(Boolean)
       .slice(0, 90) as Array<{ id: string; time: string; tone: string; title: string; text: string }>
 
-    // Deduplicate noisy repeated messages for the same SFC and same action.
+    // Deduplicate noisy repeated messages for the same core-network service and same action.
     const seen = new Set<string>()
     const deduped: Array<{ id: string; time: string; tone: string; title: string; text: string }> = []
     mapped.forEach((r) => {

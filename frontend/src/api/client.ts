@@ -109,8 +109,8 @@ class APIClient {
     link_id?: string
     link_ids?: string[]
     fault_type?: string
-    ttl_ticks?: number
-    delta_ttl_ticks?: number
+    duration_sec?: number
+    duration_seconds?: number
     delta_seconds?: number
     batch_count?: number
     only_active?: boolean
@@ -145,6 +145,7 @@ class APIClient {
     request_id: string; 
     candidate_index: number;
     candidate: any; // 完整的候选方案
+    core_nf_dependencies?: any[];
     custom_nf_bindings?: string[][];
     sfc_name?: string;
     source_node?: string;

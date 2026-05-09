@@ -514,7 +514,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                 </th>
                 <th className="px-2 py-2 text-left">服务探测</th>
                 <th className="px-2 py-2 text-left">业务负载</th>
-                <th className="px-2 py-2 text-left">已部署SFC名称</th>
+                <th className="px-2 py-2 text-left">已部署核心网</th>
                 <th className="px-2 py-2 text-left">核心网网元类型</th>
                 <th className="px-2 py-2 text-left">操作</th>
               </tr>

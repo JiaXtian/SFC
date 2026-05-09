@@ -62,7 +62,7 @@ export default function DynamicPanel() {
           metrics: res.metrics ?? null,
         })
         setIntervalSec(Math.max(10, Math.min(30, Number(res.sampling_interval_sec ?? 15))))
-        setSpeed(Math.max(0.1, Math.min(20, Number(res.simulation_speed ?? 1))))
+        setSpeed(Math.max(0.1, Math.min(8, Number(res.simulation_speed ?? 1))))
       })
       .catch(() => {})
     return () => { mounted = false }
@@ -210,8 +210,8 @@ export default function DynamicPanel() {
           </label>
           <label className="space-y-1">
             <div className="text-[10px] text-slate-400">仿真倍速</div>
-            <input type="number" min={0.1} max={20} step={0.1} value={speed}
-              onChange={e => setSpeed(Math.max(0.1, Math.min(20, Number(e.target.value) || 1)))}
+            <input type="number" min={0.1} max={8} step={0.1} value={speed}
+              onChange={e => setSpeed(Math.max(0.1, Math.min(8, Number(e.target.value) || 1)))}
               className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
           </label>
         </div>
@@ -398,7 +398,7 @@ export default function DynamicPanel() {
             {selectedTrace && (
               <>
                 <div className="rounded p-2 bg-slate-900/60 border border-slate-800 text-[10px]">
-                  <div>输入: {selectedTrace.source_node} → {selectedTrace.destination_node}</div>
+                  <div>核心网依赖边: {Array.isArray((selectedTrace as any).core_nf_dependencies) ? (selectedTrace as any).core_nf_dependencies.length : 20}</div>
                   <div>约束结果: 返回候选 {selectedTrace.returned_topk}，可部署 {selectedTrace.deployable_count}</div>
                   <div>推理时延: {selectedTrace.inference_time_ms?.toFixed?.(2) ?? selectedTrace.inference_time_ms}ms</div>
                   <div>触发: {selectedTrace.trigger ?? '-'}</div>

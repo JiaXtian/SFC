@@ -7,7 +7,6 @@ type NodeFault = {
   node_id: string
   fault_type: string
   injection_mode: string
-  ttl_ticks: number
   remaining_sec: number
   fetched_at_ms: number
 }
@@ -18,7 +17,6 @@ type LinkFault = {
   target: string
   fault_type: string
   injection_mode: string
-  ttl_ticks: number
   remaining_sec: number
   fetched_at_ms: number
 }
@@ -62,7 +60,6 @@ function readNodeFaults(status: any): NodeFault[] {
     node_id: String(f?.node_id ?? ''),
     fault_type: String(f?.fault_type ?? 'unknown'),
     injection_mode: String(f?.injection_mode ?? 'manual'),
-    ttl_ticks: Math.max(0, Number(f?.ttl_ticks ?? 0)),
     remaining_sec: Math.max(0, Number(f?.remaining_sec ?? 0)),
     fetched_at_ms: now,
   }))
@@ -82,7 +79,6 @@ function readLinkFaults(status: any): LinkFault[] {
         target,
         fault_type: String(f?.fault_type ?? 'unknown'),
         injection_mode: String(f?.injection_mode ?? 'manual'),
-        ttl_ticks: Math.max(0, Number(f?.ttl_ticks ?? 0)),
         remaining_sec: Math.max(0, Number(f?.remaining_sec ?? 0)),
         fetched_at_ms: now,
       } as LinkFault
@@ -273,11 +269,6 @@ export default function FaultInjectionControl() {
     setManualNodeIds((prev) => Array.from(new Set([...prev, ...valid])))
   }
 
-  const secToTicks = (seconds: number) => {
-    const samplingSec = Math.max(10, Number(simulation.sampling_interval_sec || 15))
-    return Math.max(1, Math.ceil(seconds / samplingSec))
-  }
-
   const injectNodeFault = async () => {
     setInjectingFaults(true)
     try {
@@ -285,7 +276,7 @@ export default function FaultInjectionControl() {
       const payload: any = {
         entity_type: 'node',
         action: 'inject',
-        ttl_ticks: secToTicks(durationSec),
+        duration_sec: durationSec,
         fault_type: injectFaultType || 'auto',
         overwrite_existing: true,
       }
@@ -333,7 +324,7 @@ export default function FaultInjectionControl() {
         source,
         target,
         fault_type: linkFaultType || 'auto',
-        ttl_ticks: secToTicks(Math.max(1, Math.min(3600, Number(linkFaultDurationSec || 1)))),
+        duration_sec: Math.max(1, Math.min(3600, Number(linkFaultDurationSec || 1))),
         overwrite_existing: true,
       })
       const injected = Number(res?.injected ?? 0)
@@ -645,14 +636,13 @@ export default function FaultInjectionControl() {
                     <th className="px-2 py-1.5 text-left font-medium">节点ID</th>
                     <th className="px-2 py-1.5 text-left font-medium">故障类型</th>
                     <th className="px-2 py-1.5 text-left font-medium">模式</th>
-                    <th className="px-2 py-1.5 text-left font-medium">TTL</th>
-                    <th className="px-2 py-1.5 text-left font-medium">剩余</th>
+                    <th className="px-2 py-1.5 text-left font-medium">真实剩余时间</th>
                     <th className="px-2 py-1.5 text-left font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sortedNodeFaults.length === 0 && (
-                    <tr><td colSpan={6} className="px-2 py-5 text-center text-slate-500">当前无节点故障</td></tr>
+                    <tr><td colSpan={5} className="px-2 py-5 text-center text-slate-500">当前无节点故障</td></tr>
                   )}
                   {sortedNodeFaults.map((f) => {
                     const remain = liveRemaining(f)
@@ -663,7 +653,6 @@ export default function FaultInjectionControl() {
                         <td className="px-2 py-2 font-mono">{f.node_id}</td>
                         <td className="px-2 py-2">{faultTypeLabel(f.fault_type)}</td>
                         <td className="px-2 py-2 text-slate-400">{f.injection_mode === 'manual' ? '手动' : f.injection_mode}</td>
-                        <td className="px-2 py-2 font-mono">{f.ttl_ticks}</td>
                         <td className={`px-2 py-2 font-semibold ${remainColor}`}>{remainLabel}</td>
                         <td className="px-2 py-2">
                           <div className="inline-flex items-center gap-1.5">
@@ -692,14 +681,13 @@ export default function FaultInjectionControl() {
                     <th className="px-2 py-1.5 text-left font-medium">宿节点</th>
                     <th className="px-2 py-1.5 text-left font-medium">故障类型</th>
                     <th className="px-2 py-1.5 text-left font-medium">模式</th>
-                    <th className="px-2 py-1.5 text-left font-medium">TTL</th>
-                    <th className="px-2 py-1.5 text-left font-medium">剩余</th>
+                    <th className="px-2 py-1.5 text-left font-medium">真实剩余时间</th>
                     <th className="px-2 py-1.5 text-left font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sortedLinkFaults.length === 0 && (
-                    <tr><td colSpan={7} className="px-2 py-5 text-center text-slate-500">当前无链路故障</td></tr>
+                    <tr><td colSpan={6} className="px-2 py-5 text-center text-slate-500">当前无链路故障</td></tr>
                   )}
                   {sortedLinkFaults.map((f) => {
                     const remain = liveRemaining(f)
@@ -711,7 +699,6 @@ export default function FaultInjectionControl() {
                         <td className="px-2 py-2 font-mono">{f.target}</td>
                         <td className="px-2 py-2">{linkFaultTypeLabel(f.fault_type)}</td>
                         <td className="px-2 py-2 text-slate-400">{f.injection_mode === 'manual' ? '手动' : f.injection_mode}</td>
-                        <td className="px-2 py-2 font-mono">{f.ttl_ticks}</td>
                         <td className={`px-2 py-2 font-semibold ${remainColor}`}>{remainLabel}</td>
                         <td className="px-2 py-2">
                           <div className="inline-flex items-center gap-1.5">

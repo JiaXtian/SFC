@@ -219,7 +219,7 @@ void TopologyController::generateTopology(
             kMinSamplingIntervalSec,
             kMaxSamplingIntervalSec
         );
-        double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
+        double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 8.0);
         g_dynamic_sim->stop();
         const int rolled_back_deployments = rollback_existing_deployments_before_topology_replace();
 
@@ -371,7 +371,7 @@ void TopologyController::generateTopology(
                     simulation_speed = clamp_double(
                         control_config.value("simulation_speed", simulation_speed),
                         0.1,
-                        20.0
+                        8.0
                     );
                 }
             }
@@ -474,7 +474,7 @@ void TopologyController::startDynamicSimulation(
                 kMinSamplingIntervalSec,
                 kMaxSamplingIntervalSec
             );
-            cfg["simulation_speed"] = clamp_double(sim_speed, 0.1, 20.0);
+            cfg["simulation_speed"] = clamp_double(sim_speed, 0.1, 8.0);
             cfg["running"] = started;
             g_runtime_state_service->save_control_config(cfg);
         }
@@ -944,7 +944,7 @@ void TopologyController::deleteSatellite(
             kMinSamplingIntervalSec,
             kMaxSamplingIntervalSec
         );
-        const double speed = clamp_double(dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
+        const double speed = clamp_double(dynamic_status.value("simulation_speed", 1.0), 0.1, 8.0);
         g_dynamic_sim->stop();
 
         g_res_mgr->reset_all_allocations();
@@ -1066,7 +1066,7 @@ void TopologyController::updateControlConfig(
         const double speed = clamp_double(
             json->get("simulation_speed", 1.0).asDouble(),
             0.1,
-            20.0
+            8.0
         );
         const bool apply_now = json_bool(*json, "apply_now", true);
 

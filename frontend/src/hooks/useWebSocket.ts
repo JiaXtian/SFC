@@ -242,11 +242,11 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               if (trigger === 'source_node_down' || trigger === 'destination_node_down') {
                 if (now - last > 12000) {
                   endpointFaultPopupCooldownRef.current[key] = now
-                  const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
+                  const label = '核心网相关节点'
                   pushRuntimeEvent({
                     type: 'reschedule_trigger',
                     sim_time: data.sim_time,
-                    message: `${sfcLabel} 触发重调度：${label}故障，系统正在重算可用路径`,
+                    message: `${sfcLabel} 触发重调度：${label}故障，系统正在重算核心网部署`,
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,
@@ -266,7 +266,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                   pushRuntimeEvent({
                     type: 'path_recompute_trigger',
                     sim_time: data.sim_time,
-                    message: `${sfcLabel} 触发路径重算：${trigger}`,
+                    message: `${sfcLabel} 触发核心网依赖路径重算：${trigger}`,
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,
@@ -291,7 +291,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `SFC编排更新 ${sfcLabel}: ${data.status}`,
+                message: `核心网编排更新 ${sfcLabel}: ${data.status}`,
                 raw: { ...data, sfc_name: sfcLabel },
               })
               return

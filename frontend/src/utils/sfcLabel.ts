@@ -7,16 +7,16 @@ function toMs(raw: string | undefined): number {
 
 export function formatSfcSeq(seq: number): string {
   const safe = Math.max(1, Math.floor(Number(seq) || 1))
-  return `SFC-${String(safe).padStart(3, '0')}`
+  return `CORE-${String(safe).padStart(3, '0')}`
 }
 
 function parseSeq(label: string) {
-  const m = /^SFC-(\d{1,})$/i.exec(String(label ?? '').trim())
+  const m = /^(?:CORE|SFC)-(\d{1,})$/i.exec(String(label ?? '').trim())
   return m ? Number(m[1]) : 0
 }
 
 function extractSfcLabel(raw: string): string {
-  const m = /\bSFC-(\d{1,})\b/i.exec(String(raw ?? ''))
+  const m = /\b(?:CORE|SFC)-(\d{1,})\b/i.exec(String(raw ?? ''))
   if (!m) return ''
   return formatSfcSeq(Number(m[1]))
 }
@@ -93,5 +93,5 @@ export function resolveSfcLabel(
   if (did && maps.byDeployment.has(did)) return String(maps.byDeployment.get(did))
   if (sid && maps.bySession.has(sid)) return String(maps.bySession.get(sid))
   if (rid && maps.byRequest.has(rid)) return String(maps.byRequest.get(rid))
-  return 'SFC-未编号'
+  return 'CORE-未编号'
 }

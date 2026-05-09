@@ -319,6 +319,29 @@ struct VNF {
     CoreBusinessLoad business_load_demand;
 };
 
+// 核心网网元功能依赖
+struct CoreNFDependency {
+    std::string source;
+    std::string target;
+    double criticality = 1.0;
+    double bandwidth_scale = 0.5;
+    double latency_weight = 1.0;
+    double reliability_weight = 1.0;
+    double bandwidth_required_gbps = 0.0;
+
+    json to_json() const {
+        return {
+            {"source", source},
+            {"target", target},
+            {"criticality", criticality},
+            {"bandwidth_scale", bandwidth_scale},
+            {"latency_weight", latency_weight},
+            {"reliability_weight", reliability_weight},
+            {"bandwidth_required_gbps", bandwidth_required_gbps}
+        };
+    }
+};
+
 // SFC请求
 struct SFCRequest {
     std::string request_id;
@@ -328,8 +351,14 @@ struct SFCRequest {
     std::string destination_node;
     std::string priority = "medium";
     std::vector<VNF> vnfs;
+    std::vector<CoreNFDependency> core_nf_dependencies;
+    std::vector<std::vector<std::string>> custom_nf_bindings;
     struct {
         double max_latency_ms;
+        double registration_latency_ms = 120.0;
+        double registration_access_latency_ms = 8.0;
+        double pdu_session_latency_ms = 100.0;
+        double pdu_access_latency_ms = 10.0;
         double min_bandwidth_gbps;
         double min_reliability;
     } constraints;
@@ -381,9 +410,13 @@ struct DeploymentCandidate {
     };
     std::vector<PerVNF> per_vnf;
     double total_latency_ms;
+    double registration_latency_ms = 0.0;
+    double pdu_session_latency_ms = 0.0;
     struct LinkDetail {
         std::string src;
         std::string dst;
+        std::string dependency_source_nf;
+        std::string dependency_target_nf;
         double latency_ms;
         double bandwidth_gbps;
         double bandwidth_available_gbps;
@@ -392,9 +425,11 @@ struct DeploymentCandidate {
         double reliability;
         
         json to_json() const {
-            return {
+            json out = {
                 {"src", src},
                 {"dst", dst},
+                {"dependency_source_nf", dependency_source_nf},
+                {"dependency_target_nf", dependency_target_nf},
                 {"latency_ms", latency_ms},
                 {"bandwidth_gbps", bandwidth_gbps},
                 {"bandwidth_available_gbps", bandwidth_available_gbps},
@@ -402,6 +437,13 @@ struct DeploymentCandidate {
                 {"status", status},
                 {"reliability", reliability}
             };
+            if (!dependency_source_nf.empty() || !dependency_target_nf.empty()) {
+                out["core_nf_dependency"] = {
+                    {"source", dependency_source_nf},
+                    {"target", dependency_target_nf}
+                };
+            }
+            return out;
         }
     };
     std::vector<LinkDetail> link_details;
@@ -427,6 +469,8 @@ struct DeploymentCandidate {
             {"per_vnf", per_vnf_json},
             {"per_core_nf", per_vnf_json},
             {"total_latency_ms", total_latency_ms},
+            {"registration_latency_ms", registration_latency_ms},
+            {"pdu_session_latency_ms", pdu_session_latency_ms},
             {"link_details", link_details_json},
             {"estimated_reliability", estimated_reliability},
             {"bottleneck_bandwidth_gbps", bottleneck_bandwidth_gbps},

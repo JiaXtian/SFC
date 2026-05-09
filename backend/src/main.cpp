@@ -242,6 +242,8 @@ sfc::DeploymentCandidate candidate_from_deployment_record(const nlohmann::json& 
     sfc::DeploymentCandidate candidate{};
     candidate.score = dep.value("score", 0.0);
     candidate.total_latency_ms = dep.value("total_latency_ms", 0.0);
+    candidate.registration_latency_ms = dep.value("registration_latency_ms", 0.0);
+    candidate.pdu_session_latency_ms = dep.value("pdu_session_latency_ms", 0.0);
     candidate.estimated_reliability = dep.value("estimated_reliability", 0.0);
     candidate.bottleneck_bandwidth_gbps = dep.value("bottleneck_bandwidth_gbps", 0.0);
     candidate.satisfies_constraints = dep.value("satisfies_constraints", true);

@@ -195,16 +195,6 @@ export default function DeploymentPanel() {
                       约束未满足（等待重算）
                     </span>
                   )}
-                  {dep.source_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
-                      入口 {dep.source_node}
-                    </span>
-                  )}
-                  {dep.destination_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
-                      出口 {dep.destination_node}
-                    </span>
-                  )}
                   {dep.deployed_nodes.slice(0,4).map(n => (
                     <span key={n} className="px-2 py-0.5 rounded font-mono text-[9px]"
                       style={{ background: 'rgba(0,255,136,0.12)', border: '1px solid rgba(0,255,136,0.25)', color: '#00ff88' }}>
@@ -225,7 +215,7 @@ export default function DeploymentPanel() {
                       <div className="space-y-0.5">
                         {(toChineseFailureList(dep.violation_details).length > 0
                           ? toChineseFailureList(dep.violation_details)
-                          : ['当前候选不满足SLA硬约束，系统正在持续路径重算/重调度']
+                          : ['当前候选不满足核心网部署约束，系统正在持续路径重算/重调度']
                         ).map((reason, idx) => (
                           <div key={idx} className="text-[10px] text-rose-100">- {reason}</div>
                         ))}
@@ -273,7 +263,10 @@ export default function DeploymentPanel() {
                           const usedPct = clampPercent(totalBw > 1e-9 ? (usedBw / totalBw) * 100 : 0)
                           const sfcPct = clampPercent(totalBw > 1e-9 ? (sfcUsedBw / totalBw) * 100 : 0)
                           const otherPct = clampPercent(totalBw > 1e-9 ? (otherUsedBw / totalBw) * 100 : 0)
-                          const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps`
+                          const depLabel = l.dependency_source_nf && l.dependency_target_nf
+                            ? `${String(l.dependency_source_nf).toUpperCase()}→${String(l.dependency_target_nf).toUpperCase()}`
+                            : '核心网依赖'
+                          const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps\n依赖边 ${depLabel}`
                           return (
                             <div key={i} className="px-2 py-1 rounded text-[10px]"
                               style={{ background: 'rgba(15,23,42,0.3)', border: '1px solid rgba(100,130,155,0.18)' }}>
@@ -283,6 +276,7 @@ export default function DeploymentPanel() {
                                   <span className="text-green-400">{l.src}</span>
                                   <span className="text-gray-700 mx-1">→</span>
                                   <span className="text-green-400">{l.dst}</span>
+                                  <span className="ml-2 text-[9px] text-cyan-300">{depLabel}</span>
                                 </span>
                                 <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
                               </div>
@@ -306,12 +300,12 @@ export default function DeploymentPanel() {
                                       width: `${sfcPct}%`,
                                       background: 'linear-gradient(90deg, rgba(74,222,128,0.88), rgba(16,185,129,0.76))',
                                     }}
-                                    title={`当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps`}
+                                    title={`当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps`}
                                   />
                                 </div>
                               </div>
                               <div className="mt-1 text-[9px] text-cyan-300 font-mono" title={hoverText}>
-                                SFC需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
+                                核心网需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
                               </div>
                             </div>
                           )
@@ -348,7 +342,7 @@ export default function DeploymentPanel() {
             </div>
             <div className="px-4 py-3">
               <p className="text-sm text-gray-300 leading-relaxed mb-2">
-                确定要回滚此 SFC 部署吗？
+                确定要回滚此核心网部署吗？
               </p>
               <p className="text-xs text-gray-500">
                 此操作将释放所有已分配的资源，且无法撤销。

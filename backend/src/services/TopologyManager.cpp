@@ -154,9 +154,9 @@ void TopologyManager::establish_links(Topology& topology) {
             
             topology.links.push_back(intra_link);
             
-            // 跨轨道链路
-            if (plane < num_planes - 1) {
-                int next_plane = plane + 1;
+            // 跨轨道链路：相邻轨道面形成闭环，避免最后一个轨道面缺少实时跨轨 ISL。
+            if (num_planes > 1 && !(num_planes == 2 && plane == 1)) {
+                int next_plane = (plane + 1) % num_planes;
                 int neighbor_idx = next_plane * sats_per_plane + pos;
                 
                 Link inter_link;

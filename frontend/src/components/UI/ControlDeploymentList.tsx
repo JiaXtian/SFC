@@ -101,7 +101,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     >
       <div className="flex items-center justify-between mb-2 gap-2">
         <div>
-          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold">已部署SFC详情</div>
+          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold">已部署核心网详情</div>
           <div className="text-[10px] text-slate-400 mt-0.5">展示运行态、SLA相关参数、编排进度及会话信息</div>
         </div>
         <button
@@ -117,9 +117,9 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
         <table className="w-full text-[10px]">
           <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-300">
             <tr>
-              <th className="px-2 py-2 text-left min-w-[90px]">SFC</th>
+              <th className="px-2 py-2 text-left min-w-[90px]">核心网</th>
               <th className="px-2 py-2 text-left">状态</th>
-              <th className="px-2 py-2 text-left min-w-[150px]">入口 → 出口</th>
+              <th className="px-2 py-2 text-left min-w-[150px]">网元/依赖</th>
               <th className="px-2 py-2 text-left">节点</th>
               <th className="px-2 py-2 text-left min-w-[95px]">编排阶段</th>
               <th className="px-2 py-2 text-left">容器启动</th>
@@ -163,9 +163,9 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
                   <td className="px-2 py-2 font-medium">{label}</td>
                   <td className="px-2 py-2">{statusLabel(String(dep?.status ?? 'completed'))}</td>
                   <td className="px-2 py-2 font-mono">
-                    <span>{String(dep?.source_node ?? '-')}</span>
-                    <span className="text-slate-500 mx-1">→</span>
-                    <span>{String(dep?.destination_node ?? '-')}</span>
+                    <span>{Array.isArray(dep?.per_vnf) ? dep.per_vnf.length : nTotal || 0}/12 NF</span>
+                    <span className="text-slate-500 mx-1">·</span>
+                    <span>{Array.isArray(dep?.core_nf_dependencies) ? dep.core_nf_dependencies.length : 20} edges</span>
                   </td>
                   <td className="px-2 py-2">{Array.isArray(dep?.deployed_nodes) ? dep.deployed_nodes.length : 0}</td>
                   <td className="px-2 py-2">
@@ -217,7 +217,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
             })}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={16} className="px-3 py-8 text-center text-slate-500">当前无已部署 SFC</td>
+                <td colSpan={16} className="px-3 py-8 text-center text-slate-500">当前无已部署核心网</td>
               </tr>
             )}
           </tbody>

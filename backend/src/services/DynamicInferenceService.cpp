@@ -127,6 +127,14 @@ nlohmann::json request_vnfs_json(const SFCRequest& request) {
     return arr;
 }
 
+nlohmann::json request_dependencies_json(const SFCRequest& request) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& dep : request.core_nf_dependencies) {
+        arr.push_back(dep.to_json());
+    }
+    return arr;
+}
+
 } // namespace
 
 DynamicInferenceService::DynamicInferenceService(
@@ -171,6 +179,12 @@ std::vector<std::string> DynamicInferenceService::build_constraint_violations(
     std::vector<std::string> violations;
     if (candidate.total_latency_ms > request.constraints.max_latency_ms) {
         violations.push_back("latency_exceeded");
+    }
+    if (candidate.registration_latency_ms > request.constraints.registration_latency_ms) {
+        violations.push_back("registration_latency_exceeded");
+    }
+    if (candidate.pdu_session_latency_ms > request.constraints.pdu_session_latency_ms) {
+        violations.push_back("pdu_session_latency_exceeded");
     }
     if (candidate.bottleneck_bandwidth_gbps + 1e-9 < request.constraints.min_bandwidth_gbps) {
         violations.push_back("bandwidth_insufficient");
@@ -287,15 +301,6 @@ std::string DynamicInferenceService::infer_required_recompute_trigger(
     std::string* disconnected_from,
     std::string* disconnected_to
 ) const {
-    const std::string source = session.request.source_node;
-    const std::string destination = session.request.destination_node;
-    if (!source.empty() && down_nodes.find(source) != down_nodes.end()) {
-        return "source_node_down";
-    }
-    if (!destination.empty() && down_nodes.find(destination) != down_nodes.end()) {
-        return "destination_node_down";
-    }
-
     if (session.has_last_candidate) {
         for (const auto& node : session.last_candidate.deployed_nodes) {
             if (!node.empty() && down_nodes.find(node) != down_nodes.end()) {
@@ -304,6 +309,38 @@ std::string DynamicInferenceService::infer_required_recompute_trigger(
         }
     }
 
+    if (!session.request.core_nf_dependencies.empty()) {
+        std::unordered_map<std::string, std::string> node_by_nf_type;
+        const auto per_vnf = ensure_per_vnf_filled(session.last_candidate, session.request);
+        node_by_nf_type.reserve(per_vnf.size() * 2);
+        for (const auto& pv : per_vnf) {
+            std::string nf_type = pv.nf_type.empty()
+                ? (pv.core_nf.empty() ? pv.vnf : pv.core_nf)
+                : pv.nf_type;
+            nf_type = to_lower(nf_type);
+            if (!nf_type.empty() && !pv.node.empty()) {
+                node_by_nf_type[nf_type] = pv.node;
+            }
+        }
+        for (const auto& dep : session.request.core_nf_dependencies) {
+            const std::string src_nf = to_lower(dep.source);
+            const std::string dst_nf = to_lower(dep.target);
+            const auto src_it = node_by_nf_type.find(src_nf);
+            const auto dst_it = node_by_nf_type.find(dst_nf);
+            if (src_it == node_by_nf_type.end() || dst_it == node_by_nf_type.end()) {
+                return "core_dependency_endpoint_missing";
+            }
+            if (!has_path_between_nodes(adjacency, src_it->second, dst_it->second)) {
+                if (disconnected_from) *disconnected_from = src_it->second;
+                if (disconnected_to) *disconnected_to = dst_it->second;
+                return "anchor_path_disconnected";
+            }
+        }
+        return "";
+    }
+
+    const std::string source = session.request.source_node;
+    const std::string destination = session.request.destination_node;
     std::vector<std::string> anchors;
     anchors.reserve(session.last_candidate.deployed_nodes.size() + 2);
     if (!source.empty()) anchors.push_back(source);
@@ -448,6 +485,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             link_details.push_back({
                 {"src", ld.src},
                 {"dst", ld.dst},
+                {"dependency_source_nf", ld.dependency_source_nf},
+                {"dependency_target_nf", ld.dependency_target_nf},
                 {"latency_ms", ld.latency_ms},
                 {"bandwidth_gbps", ld.bandwidth_gbps},
                 {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
@@ -488,6 +527,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"fallback_only", deployable_count == 0},
         {"request_vnfs", request_vnfs_json(session.request)},
         {"request_core_nfs", request_vnfs_json(session.request)},
+        {"core_nf_dependencies", request_dependencies_json(session.request)},
         {"candidates", trace_candidates},
         {"decision_process", decision_process}
     };
@@ -812,6 +852,8 @@ nlohmann::json DynamicInferenceService::start_session(
             link_details.push_back({
                 {"src", ld.src},
                 {"dst", ld.dst},
+                {"dependency_source_nf", ld.dependency_source_nf},
+                {"dependency_target_nf", ld.dependency_target_nf},
                 {"latency_ms", ld.latency_ms},
                 {"bandwidth_gbps", ld.bandwidth_gbps},
                 {"bandwidth_available_gbps", ld.bandwidth_available_gbps},
@@ -852,6 +894,7 @@ nlohmann::json DynamicInferenceService::start_session(
             {"fallback_only", !chosen.satisfies_constraints},
             {"request_vnfs", request_vnfs_json(sessions_[session.session_id].request)},
             {"request_core_nfs", request_vnfs_json(sessions_[session.session_id].request)},
+            {"core_nf_dependencies", request_dependencies_json(sessions_[session.session_id].request)},
             {"candidates", nlohmann::json::array({chosen_json})},
             {"decision_process", nlohmann::json::object()}
         };

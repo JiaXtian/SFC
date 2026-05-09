@@ -1,7 +1,8 @@
-import { Globe, Grid3x3, Zap, Map as MapIcon, Stars, Orbit, Search } from 'lucide-react'
+import { Globe, Grid3x3, Zap, Map as MapIcon, Stars, Orbit, Search, Gauge } from 'lucide-react'
 import { useStore } from '@/store/useStore'
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import FPSBadge from './FPSBadge'
+import { apiClient } from '@/api/client'
 
 interface IconButtonProps {
   active: boolean
@@ -44,9 +45,13 @@ export default function BottomHub() {
     setDisplay,
     setSelectedSatellite,
     setSelectedLink,
+    setAutoDynamics,
     addToast,
   } = useStore()
   const [searchInput, setSearchInput] = useState('')
+  const speedSyncTimerRef = useRef<number | null>(null)
+  const speed = Math.max(0.1, Math.min(8, Number(useStore((s) => s.autoDynamics.time_scale) || 1)))
+  const resourceUpdateSec = Math.max(10, Math.min(30, Number(useStore((s) => s.autoDynamics.resource_update_sec) || 15)))
 
   const satIndex = useMemo(() => {
     const exact = new Map<string, any>()
@@ -82,6 +87,29 @@ export default function BottomHub() {
     setSelectedSatellite(found)
     setSelectedLink(null)
     addToast(`已高亮卫星节点 ${String(found?.id ?? '-')}`, 'success')
+  }
+
+  useEffect(() => {
+    return () => {
+      if (speedSyncTimerRef.current != null) {
+        window.clearTimeout(speedSyncTimerRef.current)
+      }
+    }
+  }, [])
+
+  const updateSimulationSpeed = (nextSpeed: number) => {
+    const next = Math.max(0.1, Math.min(8, nextSpeed))
+    setAutoDynamics({ enabled: true, playing: true, time_scale: next })
+    if (speedSyncTimerRef.current != null) {
+      window.clearTimeout(speedSyncTimerRef.current)
+    }
+    speedSyncTimerRef.current = window.setTimeout(() => {
+      apiClient.updateControlConfig({
+        simulation_speed: next,
+        resource_sampling_interval_sec: resourceUpdateSec,
+        apply_now: true,
+      }).catch(() => {})
+    }, 350)
   }
 
   return (
@@ -162,6 +190,28 @@ export default function BottomHub() {
             />
           </div>
         )}
+
+        <label
+          className="ml-1 px-2.5 h-[34px] rounded-full flex items-center gap-2"
+          title="系统显示仿真倍率，不影响故障注入的真实世界持续时间"
+          style={{
+            background: 'rgba(7, 12, 20, 0.48)',
+            border: '1px solid rgba(118, 145, 171, 0.18)',
+            backdropFilter: 'blur(8px)',
+          }}
+        >
+          <Gauge size={14} className="text-sky-200/85" />
+          <input
+            type="range"
+            min="0.1"
+            max="8"
+            step="0.1"
+            value={speed}
+            onChange={(e) => updateSimulationSpeed(Number(e.target.value) || 1)}
+            className="w-24 h-1 cursor-pointer bg-transparent rounded-full appearance-none outline-none accent-sky-300"
+          />
+          <span className="min-w-[38px] text-[10px] text-sky-100 font-mono text-right">{speed.toFixed(1)}x</span>
+        </label>
 
         <div
           className="ml-1 px-2 h-[34px] rounded-full flex items-center gap-1"

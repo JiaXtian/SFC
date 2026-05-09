@@ -21,7 +21,7 @@ function StrategyDeployBody({ canManage }: { canManage: boolean }) {
             backdropFilter: 'blur(14px)',
           }}
         >
-          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold mb-2">策略部署</div>
+          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold mb-2">核心网策略部署</div>
           <div className="h-[calc(100%-28px)] overflow-y-auto pr-1">
             <SFCForm />
           </div>
@@ -116,7 +116,7 @@ export default function ControlPage() {
               onClick={() => setTab('strategy')}
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
-              策略部署
+              核心网部署
             </button>
           )}
           {visibleTabs.includes('fault') && (

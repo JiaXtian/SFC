@@ -36,7 +36,7 @@ export default function RightPanel({ mode = 'full' }: { mode?: 'full' | 'deployO
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold transition relative"
                 style={{ color: tab === t ? '#7dd3fc' : '#64748b' }}>
                 {t === 'sfc' ? <Layers className="w-3.5 h-3.5" /> : <List className="w-3.5 h-3.5" />}
-                {t === 'sfc' ? 'SFC 请求' : t === 'deploy' ? (
+                {t === 'sfc' ? '核心网部署' : t === 'deploy' ? (
                   <span className="flex items-center gap-1">
                     部署列表
                     {deploymentCount > 0 && (

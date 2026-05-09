@@ -1,32 +1,32 @@
 {
   "general": {
-    "global_min_attempt_floor": 48
+    "global_min_attempt_floor": 0
   },
   "offline": {
-    "target_feasible_min": 10,
-    "target_feasible_multiplier": 3,
-    "target_feasible_cap": 48,
-    "default_attempt_cap": 240,
-    "min_attempt_cap": 96,
-    "default_time_budget_ms": 480,
-    "min_time_budget_ms": 350
+    "target_feasible_min": 3,
+    "target_feasible_multiplier": 1,
+    "target_feasible_cap": 8,
+    "default_attempt_cap": 24,
+    "min_attempt_cap": 8,
+    "default_time_budget_ms": 420,
+    "min_time_budget_ms": 120
   },
   "realtime": {
-    "target_feasible_min": 4,
-    "target_feasible_multiplier": 2,
-    "target_feasible_cap": 12,
-    "default_attempt_cap": 56,
-    "min_attempt_cap": 18,
-    "default_time_budget_ms": 420,
-    "min_time_budget_ms": 220
+    "target_feasible_min": 1,
+    "target_feasible_multiplier": 1,
+    "target_feasible_cap": 4,
+    "default_attempt_cap": 10,
+    "min_attempt_cap": 4,
+    "default_time_budget_ms": 320,
+    "min_time_budget_ms": 100
   },
   "attempts": {
-    "strict_base": 24,
-    "strict_per_target": 4,
-    "relaxed_base": 20,
-    "relaxed_per_target": 3,
-    "extra_base": 32,
-    "extra_per_target": 5
+    "strict_base": 8,
+    "strict_per_target": 2,
+    "relaxed_base": 6,
+    "relaxed_per_target": 1,
+    "extra_base": 8,
+    "extra_per_target": 2
   },
   "reliability_relaxation": {
     "disable_when_min_reliability_below": 0.55,
@@ -34,11 +34,11 @@
     "levels": [1.0, 0.98, 0.95, 0.92, 0.88, 0.84, 0.8, 0.74, 0.68, 0.62]
   },
   "trace": {
-    "max_attempts_offline": 3,
+    "max_attempts_offline": 1,
     "max_attempts_realtime": 1
   },
   "returning": {
-    "offline_min_return_topk": 6,
+    "offline_min_return_topk": 2,
     "realtime_min_return_topk": 1
   }
 }
