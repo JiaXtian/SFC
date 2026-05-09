@@ -356,14 +356,14 @@ export default function CandidateModal() {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(10px)' }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(2,6,23,0.42)', backdropFilter: 'blur(12px)' }}>
       <div
-        className="w-[760px] max-h-[88vh] flex flex-col rounded-2xl overflow-hidden shadow-2xl"
-        style={{ background: 'linear-gradient(180deg, #111f32 0%, #0a1525 100%)', border: '1px solid rgba(87,146,191,0.32)' }}
+        className="w-[780px] max-h-[88vh] flex flex-col rounded-xl overflow-hidden shadow-2xl"
+        style={{ background: 'rgba(8,18,32,0.62)', border: '1px solid rgba(125,211,252,0.24)', backdropFilter: 'blur(18px)' }}
       >
         <div
-          className="px-5 py-4 flex items-start justify-between"
-          style={{ borderBottom: '1px solid rgba(92,124,150,0.22)', background: 'linear-gradient(135deg, rgba(32,104,151,0.18), rgba(21,62,91,0.2))' }}
+          className="px-4 py-3 flex items-start justify-between"
+          style={{ borderBottom: '1px solid rgba(125,211,252,0.18)', background: 'rgba(15,23,42,0.36)' }}
         >
           <div>
             <div className="text-base font-bold text-white">{sfcName} - 核心网规划结果</div>
@@ -383,7 +383,7 @@ export default function CandidateModal() {
           </div>
         )}
 
-        <div className="px-5 pt-3 pb-0 flex items-center gap-2 flex-wrap">
+        <div className="px-4 pt-3 pb-0 flex items-center gap-2 flex-wrap">
           {candidates.map((_: any, i: number) => (
             <button
               key={i}
@@ -413,7 +413,7 @@ export default function CandidateModal() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {!cand.satisfies_constraints && violationDetails.length > 0 && (
             <div className="rounded-xl p-3" style={{ background: 'rgba(127,29,29,0.25)', border: '1px solid rgba(248,113,113,0.35)' }}>
               <div className="text-[11px] font-semibold text-rose-300 mb-1.5">不满足约束原因</div>
@@ -425,7 +425,7 @@ export default function CandidateModal() {
             </div>
           )}
 
-          <div className="rounded-xl overflow-hidden" style={{ background: 'linear-gradient(135deg, rgba(38,109,157,0.2), rgba(23,55,84,0.18))', border: '1px solid rgba(86,139,177,0.35)' }}>
+          <div className="rounded-lg overflow-hidden" style={{ background: 'rgba(15,23,42,0.38)', border: '1px solid rgba(125,211,252,0.18)' }}>
             <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: '1px solid rgba(95,126,151,0.2)' }}>
               <Gauge className="w-4 h-4 text-cyan-300" />
               <span className="text-sm font-bold text-white">方案质量评分</span>
@@ -479,14 +479,14 @@ export default function CandidateModal() {
             </div>
           </div>
 
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-4 gap-2.5">
             {[
               { label: '总评分', value: `${(score * 100).toFixed(1)}`, color: '#67e8f9', bg: 'rgba(31,84,118,0.28)' },
               { label: '注册时延', value: `${Number(cand.registration_latency_ms ?? 0).toFixed(1)}ms`, color: '#34d399', bg: 'rgba(22,92,82,0.26)' },
               { label: 'PDU时延', value: `${Number(cand.pdu_session_latency_ms ?? 0).toFixed(1)}ms`, color: '#38bdf8', bg: 'rgba(21,76,112,0.24)' },
               { label: '卫星节点', value: `${cand.deployed_nodes?.length ?? 0}`, color: '#c4b5fd', bg: 'rgba(65,56,108,0.25)' },
             ].map(m => (
-              <div key={m.label} className="rounded-xl p-3 text-center" style={{ background: m.bg, border: '1px solid rgba(99,125,146,0.2)' }}>
+              <div key={m.label} className="rounded-lg p-2.5 text-center" style={{ background: 'rgba(15,23,42,0.34)', border: '1px solid rgba(99,125,146,0.2)' }}>
                 <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-1">{m.label}</div>
                 <div className="text-lg font-bold" style={{ color: m.color }}>
                   {m.value}
@@ -501,8 +501,8 @@ export default function CandidateModal() {
             </div>
             <div className="space-y-2">
               {(cand.per_core_nf ?? cand.per_vnf ?? []).map((v: any, i: number) => (
-                <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition hover:bg-white/5" style={{ background: 'linear-gradient(135deg, rgba(30,87,122,0.2), rgba(16,42,63,0.2))', border: '1px solid rgba(91,141,177,0.28)' }}>
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-bold flex-shrink-0" style={{ background: 'linear-gradient(135deg, #1c486e, #123252)', color: '#bae6fd', border: '1px solid rgba(102,169,210,0.3)' }}>
+                <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-lg transition hover:bg-white/5" style={{ background: 'rgba(15,23,42,0.34)', border: '1px solid rgba(91,141,177,0.2)' }}>
+                  <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold flex-shrink-0" style={{ background: 'rgba(14,116,144,0.18)', color: '#bae6fd', border: '1px solid rgba(102,169,210,0.26)' }}>
                     {i + 1}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -541,7 +541,7 @@ export default function CandidateModal() {
                     ? `${String(l.dependency_source_nf).toUpperCase()}→${String(l.dependency_target_nf).toUpperCase()}`
                     : ''
                   return (
-                  <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg text-[11px]" style={{ background: 'rgba(13,24,40,0.85)', border: '1px solid rgba(87,116,139,0.22)' }}>
+                  <div key={i} className="flex items-center justify-between px-3 py-1.5 rounded-md text-[11px]" style={{ background: 'rgba(15,23,42,0.34)', border: '1px solid rgba(87,116,139,0.18)' }}>
                     <div className="flex items-center gap-2 font-mono">
                       <span className="text-cyan-200">{l.src}</span>
                       <ChevronRight className="w-3 h-3 text-slate-600" />
@@ -565,7 +565,7 @@ export default function CandidateModal() {
           )}
         </div>
 
-        <div className="px-5 py-3.5 flex items-center justify-between" style={{ borderTop: '1px solid rgba(95,126,151,0.22)' }}>
+        <div className="px-4 py-3 flex items-center justify-between" style={{ borderTop: '1px solid rgba(95,126,151,0.22)', background: 'rgba(15,23,42,0.24)' }}>
           <button onClick={() => setCandidateResult(null)} className="px-5 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-white/5 transition">
             取消
           </button>

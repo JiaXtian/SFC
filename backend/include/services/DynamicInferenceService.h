@@ -7,6 +7,7 @@
 #include "services/TopologyManager.h"
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -74,6 +75,23 @@ private:
         SessionState& session,
         const TopologySnapshot& snapshot,
         const std::string& trigger
+    );
+    Topology build_planning_topology_for_session(
+        const SessionState& session,
+        const Topology& topology,
+        const std::unordered_set<std::string>& down_nodes
+    ) const;
+    std::optional<DeploymentCandidate> try_partial_node_redeploy(
+        const SessionState& session,
+        const Topology& planning_topology,
+        const std::unordered_set<std::string>& down_nodes,
+        std::string* detail
+    );
+    bool rebuild_candidate_paths_and_sla(
+        DeploymentCandidate* candidate,
+        const SFCRequest& request,
+        const Topology& topology,
+        std::string* reason
     );
     std::unordered_set<std::string> collect_down_nodes(const Topology& topology) const;
     std::unordered_map<std::string, std::vector<std::string>> build_active_adjacency(

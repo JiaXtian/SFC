@@ -263,10 +263,13 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               ) {
                 if (now - last > 8000) {
                   endpointFaultPopupCooldownRef.current[key] = now
+                  const isNodeRedeploy = trigger === 'deployment_node_down'
                   pushRuntimeEvent({
-                    type: 'path_recompute_trigger',
+                    type: isNodeRedeploy ? 'reschedule_trigger' : 'path_recompute_trigger',
                     sim_time: data.sim_time,
-                    message: `${sfcLabel} 触发核心网依赖路径重算：${trigger}`,
+                    message: isNodeRedeploy
+                      ? `${sfcLabel} 承载网元卫星故障，系统正在执行分级重调度`
+                      : `${sfcLabel} 触发核心网依赖路径重算：${trigger}`,
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,

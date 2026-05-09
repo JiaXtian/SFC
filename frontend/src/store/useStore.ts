@@ -277,6 +277,7 @@ export interface AutoDynamicsState {
   time_scale: number
   elapsed_sec: number
   last_resource_sync_at: string
+  snap_visual_token: number
 }
 
 export interface DisplaySettings {
@@ -1094,6 +1095,7 @@ export const useStore = create<Store>((set, get) => ({
     time_scale: 1,
     elapsed_sec: 0,
     last_resource_sync_at: '',
+    snap_visual_token: 0,
   },
 
   setSatellites: (s) => set((st) => ({
@@ -1318,7 +1320,7 @@ export const useStore = create<Store>((set, get) => ({
               metrics,
             }
           : null
-      const maxHistoryFrames = nodeCount >= 5000 ? 20 : (nodeCount >= 3000 ? 40 : 240)
+      const maxHistoryFrames = nodeCount >= 5000 ? 6 : (nodeCount >= 3000 ? 12 : 120)
       const history = frame
         ? [...s.simulation.history, frame].slice(-maxHistoryFrames)
         : s.simulation.history

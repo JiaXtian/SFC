@@ -294,6 +294,7 @@ export default function Links() {
     const pt = new THREE.Vector3()
     const endpoint = new THREE.Vector3()
     let best: RenderLink | null = null
+    let bestEndpointSat: any = null
     let bestD = Number.POSITIVE_INFINITY
     let bestEndpointD = Number.POSITIVE_INFINITY
     const cam = ray.origin
@@ -315,11 +316,17 @@ export default function Links() {
         endpoint.set(pb[0], pb[1], pb[2])
         const dB = ray.distanceSqToPoint(endpoint)
         bestEndpointD = Math.min(dA, dB)
+        bestEndpointSat = dA <= dB ? s : t
       }
     }
     // Prioritize node picking when user clicks near a satellite endpoint.
-    const endpointThreshold = satellites.length >= 5000 ? 0.028 : 0.036
-    if (Number.isFinite(bestEndpointD) && Math.sqrt(bestEndpointD) <= endpointThreshold) return
+    const endpointThreshold = satellites.length >= 5000 ? 0.04 : 0.052
+    if (bestEndpointSat && Number.isFinite(bestEndpointD) && Math.sqrt(bestEndpointD) <= endpointThreshold) {
+      e.stopPropagation()
+      setSelectedSatellite(bestEndpointSat)
+      setSelectedLink(null)
+      return
+    }
     // Keep threshold tight to prioritize satellite picking when near nodes.
     const clickThreshold = satellites.length >= 5000 ? 0.028 : 0.024
     if (!Number.isFinite(bestD) || Math.sqrt(bestD) > clickThreshold) return
@@ -393,7 +400,7 @@ export default function Links() {
           <Line
             points={item.points}
             color={item.color}
-            lineWidth={heavyHighlightMode ? 1.35 : item.lineWidth}
+            lineWidth={heavyHighlightMode ? 0.95 : 1.25}
             transparent
             opacity={heavyHighlightMode ? Math.max(0.62, item.opacity * 0.78) : item.opacity}
             depthWrite={false}
@@ -402,9 +409,9 @@ export default function Links() {
           <Line
             points={item.points}
             color={item.glowColor}
-            lineWidth={heavyHighlightMode ? 2.6 : 4.2}
+            lineWidth={heavyHighlightMode ? 1.7 : 2.6}
             transparent
-            opacity={heavyHighlightMode ? 0.12 : 0.16}
+            opacity={heavyHighlightMode ? 0.1 : 0.13}
             depthWrite={false}
             raycast={() => null}
           />
@@ -426,7 +433,7 @@ export default function Links() {
           <Line
             points={item.points}
             color={selectedCore}
-            lineWidth={4.5}
+            lineWidth={2.8}
             transparent
             opacity={1}
             raycast={() => null}
@@ -434,9 +441,9 @@ export default function Links() {
           <Line
             points={item.points}
             color={selectedGlow}
-            lineWidth={10.5}
+            lineWidth={5.8}
             transparent
-            opacity={0.3}
+            opacity={0.22}
             raycast={() => null}
           />
         </group>

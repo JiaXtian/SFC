@@ -45,6 +45,22 @@ function triggerLabel(trigger: string): string {
   }
 }
 
+function recoveryStrategyLabel(strategy: string): string {
+  switch (String(strategy ?? '').trim()) {
+    case 'local_reroute': return '依赖路径重算'
+    case 'partial_node_redeploy': return '受影响网元局部重调度'
+    case 'partial_node_redeploy_failed_escalate_full': return '局部重调度失败，升级整体重调度'
+    case 'full_redeploy_after_partial_unavailable': return '整体重调度'
+    case 'cross_node_redeploy': return '跨星整体重调度'
+    case 'hold_and_observe': return '保持当前部署'
+    case 'resume_replanning': return '恢复后继续编排'
+    case 'continue_replanning': return '继续等待可用方案'
+    case 'degraded_fallback': return '降级恢复'
+    case 'initial_recovery': return '初始恢复'
+    default: return strategy || '恢复策略'
+  }
+}
+
 function phaseLabel(raw: string): string {
   const v = String(raw ?? '').trim().toLowerCase()
   const map: Record<string, string> = {
@@ -111,6 +127,16 @@ export default function SystemMessagePanel() {
   const [collapsed, setCollapsed] = useState(false)
 
   const rows = useMemo(() => {
+    type MessageRow = {
+      id: string
+      time: string
+      tone: string
+      title: string
+      text: string
+      progress?: number
+      runtimeDetail?: string
+    }
+
     const baseMaps = buildSfcLabelMaps(deployments as any)
     const bySession = new Map<string, string>(baseMaps.bySession)
     const byRequest = new Map<string, string>(baseMaps.byRequest)
@@ -119,11 +145,11 @@ export default function SystemMessagePanel() {
     ;[...bySession.values(), ...byRequest.values(), ...byDeployment.values()].forEach((x) => usedLabels.add(String(x)))
 
     const parseSeq = (label: string) => {
-      const m = /^(?:CORE|SFC)-(\d{3,})$/.exec(label.trim())
+      const m = /^(?:CORE|SFC)-(\d{2,})$/.exec(label.trim())
       return m ? Number(m[1]) : 0
     }
     let nextSeq = Math.max(
-      1,
+      0,
       ...Array.from(usedLabels).map((x) => parseSeq(String(x))).filter((v) => Number.isFinite(v) && v > 0),
     ) + 1
 
@@ -164,6 +190,15 @@ export default function SystemMessagePanel() {
       if (rid && byRequest.has(rid)) return String(byRequest.get(rid))
       return resolveSfcSeqLabel(deployments as any, { sessionId: sid, requestId: rid, deploymentId: did })
     }
+
+    const latestRuntimeEventIdByDeployment = new Map<string, string>()
+    runtimeEvents.forEach((e) => {
+      if (e.type !== 'deployment_runtime_update') return
+      const did = String((e.raw as any)?.deployment_id ?? '')
+      if (did && !latestRuntimeEventIdByDeployment.has(did)) {
+        latestRuntimeEventIdByDeployment.set(did, e.id)
+      }
+    })
 
     const mapped = runtimeEvents
       .map((e) => {
@@ -213,14 +248,18 @@ export default function SystemMessagePanel() {
           const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: String(e.raw?.request_id ?? ''), sfcName: String(e.raw?.sfc_name ?? '') })
           const trig = triggerLabel(String(e.raw?.trigger ?? ''))
           const ok = Boolean(e.raw?.success)
+          const strategy = recoveryStrategyLabel(String(e.raw?.strategy ?? ''))
+          const isEscalating = String(e.raw?.strategy ?? '') === 'partial_node_redeploy_failed_escalate_full'
           return {
             id: e.id,
             time,
             tone: ok ? 'ok' : 'warn',
-            title: ok ? '核心网恢复完成' : '核心网恢复失败',
+            title: ok ? '核心网恢复完成' : (isEscalating ? '升级整体重调度' : '核心网恢复失败'),
             text: ok
-              ? short(`${sfcLabel} 已恢复，触发原因：${trig}`)
-              : short(`${sfcLabel} 恢复失败，请检查资源与链路状态`),
+              ? short(`${sfcLabel} ${strategy}完成，触发原因：${trig}`)
+              : short(isEscalating
+                ? `${sfcLabel} 局部重调度不可用，正在立即执行整体重调度`
+                : `${sfcLabel} ${strategy}失败，请检查资源与链路状态`),
           }
         }
 
@@ -305,12 +344,13 @@ export default function SystemMessagePanel() {
           const sfcLabel = resolveSfcLabel({ sessionId: sid, requestId: rid, sfcName: String((e.raw as any)?.sfc_name ?? '') })
           const trig = triggerLabel(String((e.raw as any)?.trigger ?? ''))
           if (st === 'redeployed') {
+            const strategy = recoveryStrategyLabel(String((e.raw as any)?.recovery_strategy ?? ''))
             return {
               id: e.id,
               time,
               tone: 'ok',
               title: '核心网重部署完成',
-              text: short(`${sfcLabel} 已切换到新部署/路径（${trig}）`),
+              text: short(`${sfcLabel} 已完成${strategy}（${trig}）`),
             }
           }
           if (st === 'deployed') {
@@ -415,6 +455,7 @@ export default function SystemMessagePanel() {
 
         if (e.type === 'deployment_runtime_update') {
           const did = String((e.raw as any)?.deployment_id ?? '')
+          if (did && latestRuntimeEventIdByDeployment.get(did) !== e.id) return null
           const sid = String((e.raw as any)?.session_id ?? '')
           const rid = String((e.raw as any)?.request_id ?? '')
           const sfcLabel = resolveSfcLabel({
@@ -424,13 +465,21 @@ export default function SystemMessagePanel() {
             sfcName: String((e.raw as any)?.sfc_name ?? ''),
           })
           const phase = String((e.raw as any)?.orchestration_phase ?? 'unknown')
-          const progress = Number((e.raw as any)?.orchestration_progress ?? 0)
+          const progress = Math.max(0, Math.min(100, Number((e.raw as any)?.orchestration_progress ?? 0)))
+          const containersRunning = Math.max(0, Number((e.raw as any)?.containers_running ?? 0))
+          const containersTotal = Math.max(0, Number((e.raw as any)?.containers_total ?? 0))
+          const coreRunning = Math.max(0, Number((e.raw as any)?.core_nfs_running ?? 0))
+          const coreTotal = Math.max(0, Number((e.raw as any)?.core_nfs_total ?? 0))
+          const failed = Math.max(0, Number((e.raw as any)?.containers_failed ?? 0) + Number((e.raw as any)?.core_nfs_failed ?? 0))
+          const ready = Boolean((e.raw as any)?.service_ready)
           return {
             id: e.id,
             time,
-            tone: 'info',
-            title: '部署运行态更新',
+            tone: failed > 0 ? 'warn' : (ready ? 'ok' : 'info'),
+            title: '核心网启动进度',
             text: short(`${sfcLabel} · ${phaseLabel(phase)} (${progress}%)`),
+            progress,
+            runtimeDetail: `网元 ${coreRunning}/${coreTotal || 12} · 容器 ${containersRunning}/${containersTotal || 12}`,
           }
         }
 
@@ -502,11 +551,11 @@ export default function SystemMessagePanel() {
         return null
       })
       .filter(Boolean)
-      .slice(0, 90) as Array<{ id: string; time: string; tone: string; title: string; text: string }>
+      .slice(0, 90) as MessageRow[]
 
     // Deduplicate noisy repeated messages for the same core-network service and same action.
     const seen = new Set<string>()
-    const deduped: Array<{ id: string; time: string; tone: string; title: string; text: string }> = []
+    const deduped: MessageRow[] = []
     mapped.forEach((r) => {
       const key = `${r.title}|${r.text}`
       if (seen.has(key)) return
@@ -576,6 +625,24 @@ export default function SystemMessagePanel() {
                     <span className="text-slate-500 text-[10px]">{r.time}</span>
                   </div>
                   <div className="text-slate-200 mt-0.5 leading-5">{r.text}</div>
+                  {typeof r.progress === 'number' && (
+                    <div className="mt-1.5">
+                      <div className="h-1.5 rounded-full bg-slate-800/70 overflow-hidden border border-slate-700/50">
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{
+                            width: `${Math.max(3, Math.min(100, r.progress))}%`,
+                            background: r.tone === 'warn'
+                              ? 'linear-gradient(90deg, #f59e0b, #fbbf24)'
+                              : 'linear-gradient(90deg, #06b6d4, #34d399)',
+                          }}
+                        />
+                      </div>
+                      {r.runtimeDetail && (
+                        <div className="mt-1 text-[10px] leading-4 text-slate-400">{r.runtimeDetail}</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )
             })}

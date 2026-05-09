@@ -195,6 +195,8 @@ export function useAutoDynamics() {
   const pathRefreshAccRef = useRef(0)
   const resourceSyncRunningRef = useRef(false)
   const clockEpochMsRef = useRef<number>(Date.now())
+  const inactiveSinceRef = useRef<number | null>(null)
+  const resumeJumpSecRef = useRef(0)
 
   useEffect(() => {
     const syncResources = async () => {
@@ -300,6 +302,21 @@ export function useAutoDynamics() {
     const frame = (ts: number) => {
       const s = useStore.getState()
       const ad = s.autoDynamics
+      const inactive = document.visibilityState === 'hidden' || window.location.pathname.startsWith('/monitor')
+      if (inactive) {
+        if (inactiveSinceRef.current == null) inactiveSinceRef.current = ts
+        lastTsRef.current = ts
+        posAccRef.current = 0
+        pathRefreshAccRef.current = 0
+        rafRef.current = window.requestAnimationFrame(frame)
+        return
+      }
+      if (inactiveSinceRef.current != null) {
+        resumeJumpSecRef.current = Math.max(0, (ts - inactiveSinceRef.current) / 1000)
+        inactiveSinceRef.current = null
+        lastTsRef.current = ts
+        posAccRef.current = Number.POSITIVE_INFINITY
+      }
       const dtReal = Math.max(0, (ts - lastTsRef.current) / 1000)
       lastTsRef.current = ts
 
@@ -316,8 +333,12 @@ export function useAutoDynamics() {
         if (posAccRef.current >= posInterval) {
           // Avoid large visual jumps when main thread is briefly blocked by network/state updates.
           const stepRealCap = satCount >= 5000 ? 0.28 : (satCount >= 3000 ? 0.24 : 0.18)
-          const stepReal = Math.min(posAccRef.current, stepRealCap)
-          posAccRef.current = Math.max(0, posAccRef.current - stepReal)
+          const resumeJump = resumeJumpSecRef.current
+          resumeJumpSecRef.current = 0
+          const stepReal = resumeJump > 0
+            ? Math.min(resumeJump, 3600)
+            : Math.min(posAccRef.current, stepRealCap)
+          posAccRef.current = resumeJump > 0 ? 0 : Math.max(0, posAccRef.current - stepReal)
           const elapsedSec = ad.elapsed_sec + stepReal * Math.max(0.1, ad.time_scale)
 
           if (ad.elapsed_sec === 0) {
@@ -463,6 +484,9 @@ export function useAutoDynamics() {
             autoDynamics: {
               ...prev.autoDynamics,
               elapsed_sec: elapsedSec,
+              snap_visual_token: resumeJump > 0
+                ? Number(prev.autoDynamics.snap_visual_token ?? 0) + 1
+                : prev.autoDynamics.snap_visual_token,
             },
           }))
           if (s.deployments.length > 0) {

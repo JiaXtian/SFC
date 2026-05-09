@@ -268,24 +268,19 @@ export default function DeploymentPanel() {
                             : '核心网依赖'
                           const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps\n依赖边 ${depLabel}`
                           return (
-                            <div key={i} className="px-2 py-1 rounded text-[10px]"
+                            <div key={i} className="px-2 py-1.5 rounded-md text-[10px]"
                               style={{ background: 'rgba(15,23,42,0.3)', border: '1px solid rgba(100,130,155,0.18)' }}>
-                              <div className="flex items-center justify-between">
-                                <span className="font-mono text-green-400">
-                                  <span className="text-gray-500 mr-1">{String(i + 1).padStart(2, '0')}.</span>
+                              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                                <span className="font-mono text-green-400 truncate">
                                   <span className="text-green-400">{l.src}</span>
                                   <span className="text-gray-700 mx-1">→</span>
                                   <span className="text-green-400">{l.dst}</span>
                                   <span className="ml-2 text-[9px] text-cyan-300">{depLabel}</span>
                                 </span>
-                                <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
+                                <span className="text-green-300 font-mono">{l.latency_ms?.toFixed(2)}ms</span>
                               </div>
-                              <div className="mt-1.5" title={hoverText}>
-                                <div className="flex items-center justify-between text-[9px] mb-1">
-                                  <span className="text-cyan-300">链路占用分布</span>
-                                  <span className="text-cyan-300 font-mono">{usedPct.toFixed(1)}%</span>
-                                </div>
-                                <div className="h-2 rounded-full bg-slate-900/80 border border-cyan-500/20 overflow-hidden flex">
+                              <div className="mt-1" title={hoverText}>
+                                <div className="h-1 rounded-full bg-slate-900/80 border border-cyan-500/15 overflow-hidden flex">
                                   <div
                                     className="h-full"
                                     style={{
@@ -303,9 +298,6 @@ export default function DeploymentPanel() {
                                     title={`当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps`}
                                   />
                                 </div>
-                              </div>
-                              <div className="mt-1 text-[9px] text-cyan-300 font-mono" title={hoverText}>
-                                核心网需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
                               </div>
                             </div>
                           )

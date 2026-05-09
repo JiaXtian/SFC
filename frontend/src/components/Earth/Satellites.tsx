@@ -19,11 +19,12 @@ function isNodeFault(sat: any): boolean {
 }
 
 export default function Satellites() {
-  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
+  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, snapVisualToken, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
     satellites: s.satellites,
     selectedSatellite: s.selectedSatellite,
     deployments: s.deployments,
     highlightedDeploymentIds: s.highlightedDeploymentIds,
+    snapVisualToken: s.autoDynamics.snap_visual_token,
     setSelectedSatellite: s.setSelectedSatellite,
     setSelectedLink: s.setSelectedLink,
   }), shallow)
@@ -35,6 +36,7 @@ export default function Satellites() {
   const currentPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
   const targetPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
   const meshDirtyRef = useRef(true)
+  const lastSnapTokenRef = useRef(snapVisualToken)
 
   const vnfHighlightSet = useMemo(() => {
     if (highlightedDeploymentIds.length === 0) return new Set<string>()
@@ -103,6 +105,15 @@ export default function Satellites() {
     meshDirtyRef.current = true
   }, [satellites, targetPositions])
 
+  useEffect(() => {
+    if (lastSnapTokenRef.current === snapVisualToken) return
+    lastSnapTokenRef.current = snapVisualToken
+    targetPosMapRef.current.forEach((pos, id) => {
+      currentPosMapRef.current.set(id, pos.clone())
+    })
+    meshDirtyRef.current = true
+  }, [snapVisualToken])
+
   const getDisplayPosition = (idx: number) => {
     const sat = satellites[idx]
     if (!sat) return null
@@ -114,7 +125,7 @@ export default function Satellites() {
   useFrame((_, delta) => {
     const mesh = instanceRef.current
     if (!mesh || satellites.length === 0 || !meshDirtyRef.current) return
-    const lerpAlpha = Math.min(1, Math.max(0.14, delta * 5.5))
+    const lerpAlpha = delta > 0.45 ? 1 : Math.min(1, Math.max(0.14, delta * 5.5))
     let keepAnimating = false
     const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {

@@ -1,13 +1,16 @@
 #include "services/DynamicInferenceService.h"
 #include "services/AuthGlobals.h"
 #include "services/DeploymentOrchestratorService.h"
+#include "services/DeploymentStateStore.h"
 #include "websocket/WSHandler.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <functional>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <random>
 #include <unordered_set>
@@ -98,6 +101,152 @@ void normalize_candidate_bandwidth_requirements(DeploymentCandidate* candidate, 
             ld.bandwidth_required_gbps = fallback;
         }
     }
+}
+
+struct RepairPathMetrics {
+    double latency_ms = 0.0;
+    double reliability = 1.0;
+    double bottleneck_bandwidth_gbps = std::numeric_limits<double>::infinity();
+    int hops = 0;
+    bool feasible = true;
+};
+
+double soften_repair_reliability(double raw_reliability, int hops) {
+    if (hops <= 0) return 1.0;
+    const double raw = std::max(1e-9, std::min(1.0, raw_reliability));
+    const double geometric_mean = std::pow(raw, 1.0 / static_cast<double>(std::max(1, hops)));
+    const double softened_product = std::pow(raw, 0.28);
+    const int excess_hops = std::max(0, hops - 6);
+    return std::max(0.0, std::min(1.0, (0.78 * softened_product + 0.22 * geometric_mean) * std::pow(0.9993, excess_hops)));
+}
+
+RepairPathMetrics evaluate_repair_links(
+    const std::vector<DeploymentCandidate::LinkDetail>& links,
+    double required_bw
+) {
+    RepairPathMetrics metrics;
+    for (const auto& ld : links) {
+        metrics.latency_ms += ld.latency_ms;
+        metrics.reliability *= std::max(1e-9, ld.reliability);
+        metrics.bottleneck_bandwidth_gbps = std::min(metrics.bottleneck_bandwidth_gbps, ld.bandwidth_available_gbps);
+        metrics.hops += 1;
+        if (to_lower(ld.status) == "down" || ld.bandwidth_available_gbps + 1e-9 < required_bw) {
+            metrics.feasible = false;
+            return metrics;
+        }
+    }
+    if (links.empty()) {
+        metrics.bottleneck_bandwidth_gbps = std::numeric_limits<double>::infinity();
+        metrics.reliability = 1.0;
+    } else {
+        metrics.reliability = soften_repair_reliability(metrics.reliability, metrics.hops);
+    }
+    return metrics;
+}
+
+std::string nf_key_from_pv(const DeploymentCandidate::PerVNF& pv) {
+    return to_lower(pv.nf_type.empty() ? (pv.core_nf.empty() ? pv.vnf : pv.core_nf) : pv.nf_type);
+}
+
+std::vector<std::string> repair_shortest_path(
+    const std::string& src,
+    const std::string& dst,
+    const Topology& topology,
+    double required_bw
+) {
+    if (src.empty() || dst.empty()) return {};
+    if (src == dst) return {src};
+
+    std::unordered_set<std::string> down_nodes;
+    for (const auto& sat : topology.nodes) {
+        if (node_is_down(sat)) down_nodes.insert(sat.id);
+    }
+    if (down_nodes.find(src) != down_nodes.end() || down_nodes.find(dst) != down_nodes.end()) return {};
+
+    struct Edge { std::string to; double weight = 0.0; };
+    std::unordered_map<std::string, std::vector<Edge>> adj;
+    for (const auto& sat : topology.nodes) {
+        if (down_nodes.find(sat.id) == down_nodes.end()) adj[sat.id] = {};
+    }
+    for (const auto& link : topology.links) {
+        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+        if (down_nodes.find(link.source) != down_nodes.end() || down_nodes.find(link.target) != down_nodes.end()) continue;
+        if (to_lower(link.status) == "down") continue;
+        if (link.bandwidth_available_gbps + 1e-9 < required_bw) continue;
+        const double congestion_penalty = to_lower(link.status) == "congested" ? 1.35 : 1.0;
+        const double weight = std::max(0.001, link.latency_ms) * congestion_penalty;
+        adj[link.source].push_back({link.target, weight});
+        adj[link.target].push_back({link.source, weight});
+    }
+    if (adj.find(src) == adj.end() || adj.find(dst) == adj.end()) return {};
+
+    using Item = std::pair<double, std::string>;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+    std::unordered_map<std::string, double> dist;
+    std::unordered_map<std::string, std::string> prev;
+    dist[src] = 0.0;
+    pq.push({0.0, src});
+    while (!pq.empty()) {
+        const auto [d, u] = pq.top();
+        pq.pop();
+        if (d > dist[u] + 1e-9) continue;
+        if (u == dst) break;
+        for (const auto& e : adj[u]) {
+            const double nd = d + e.weight;
+            auto it = dist.find(e.to);
+            if (it == dist.end() || nd < it->second) {
+                dist[e.to] = nd;
+                prev[e.to] = u;
+                pq.push({nd, e.to});
+            }
+        }
+    }
+    if (dist.find(dst) == dist.end()) return {};
+
+    std::vector<std::string> path;
+    for (std::string cur = dst; !cur.empty();) {
+        path.push_back(cur);
+        if (cur == src) break;
+        auto it = prev.find(cur);
+        if (it == prev.end()) return {};
+        cur = it->second;
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+std::vector<DeploymentCandidate::LinkDetail> repair_path_links(
+    const std::vector<std::string>& path,
+    const Topology& topology,
+    double required_bw
+) {
+    std::vector<DeploymentCandidate::LinkDetail> out;
+    if (path.size() < 2) return out;
+    out.reserve(path.size() - 1);
+    for (size_t i = 0; i + 1 < path.size(); ++i) {
+        const std::string& a = path[i];
+        const std::string& b = path[i + 1];
+        const Link* found = nullptr;
+        for (const auto& link : topology.links) {
+            const bool same = (link.source == a && link.target == b) || (link.source == b && link.target == a);
+            if (same) {
+                found = &link;
+                break;
+            }
+        }
+        if (!found) return {};
+        DeploymentCandidate::LinkDetail ld;
+        ld.src = a;
+        ld.dst = b;
+        ld.latency_ms = found->latency_ms;
+        ld.bandwidth_gbps = found->bandwidth_gbps;
+        ld.bandwidth_available_gbps = found->bandwidth_available_gbps;
+        ld.bandwidth_required_gbps = required_bw;
+        ld.status = found->status;
+        ld.reliability = found->reliability;
+        out.push_back(std::move(ld));
+    }
+    return out;
 }
 
 std::string make_session_resource_deployment_id(const std::string& session_id) {
@@ -229,6 +378,48 @@ TopologySnapshot DynamicInferenceService::build_snapshot_fallback(const Topology
     return snapshot;
 }
 
+Topology DynamicInferenceService::build_planning_topology_for_session(
+    const SessionState& session,
+    const Topology& topology,
+    const std::unordered_set<std::string>& down_nodes
+) const {
+    Topology planning = topology;
+    if (!session.has_last_candidate) return planning;
+
+    const auto per_vnf = ensure_per_vnf_filled(session.last_candidate, session.request);
+    for (size_t i = 0; i < per_vnf.size() && i < session.request.vnfs.size(); ++i) {
+        const auto& pv = per_vnf[i];
+        if (pv.node.empty()) continue;
+        for (auto& sat : planning.nodes) {
+            if (sat.id != pv.node) continue;
+            if (down_nodes.find(sat.id) != down_nodes.end() || node_is_down(sat)) break;
+            sat.cpu_available = std::min(sat.cpu_total, sat.cpu_available + session.request.vnfs[i].cpu);
+            sat.mem_available = std::min(sat.mem_total, sat.mem_available + session.request.vnfs[i].mem);
+            sat.disk_available = std::min(sat.disk_total, sat.disk_available + session.request.vnfs[i].disk);
+            break;
+        }
+    }
+
+    for (const auto& ld : session.last_candidate.link_details) {
+        const double bw = ld.bandwidth_required_gbps > 1e-9
+            ? ld.bandwidth_required_gbps
+            : default_required_bandwidth(session.request);
+        for (auto& link : planning.links) {
+            const bool same =
+                (link.source == ld.src && link.target == ld.dst) ||
+                (link.source == ld.dst && link.target == ld.src);
+            if (!same) continue;
+            if (to_lower(link.status) == "down") break;
+            link.bandwidth_available_gbps = std::min(link.bandwidth_gbps, link.bandwidth_available_gbps + bw);
+            if (link.bandwidth_available_gbps > link.bandwidth_gbps * 0.15 && to_lower(link.status) == "congested") {
+                link.status = "active";
+            }
+            break;
+        }
+    }
+    return planning;
+}
+
 std::unordered_set<std::string> DynamicInferenceService::collect_down_nodes(const Topology& topology) const {
     std::unordered_set<std::string> down_nodes;
     for (const auto& sat : topology.nodes) {
@@ -291,6 +482,257 @@ bool DynamicInferenceService::has_path_between_nodes(
         }
     }
     return false;
+}
+
+bool DynamicInferenceService::rebuild_candidate_paths_and_sla(
+    DeploymentCandidate* candidate,
+    const SFCRequest& request,
+    const Topology& topology,
+    std::string* reason
+) {
+    if (!candidate) return false;
+    candidate->per_vnf = ensure_per_vnf_filled(*candidate, request);
+    std::unordered_map<std::string, std::string> node_by_nf;
+    for (const auto& pv : candidate->per_vnf) {
+        const std::string nf = nf_key_from_pv(pv);
+        if (!nf.empty() && !pv.node.empty()) node_by_nf[nf] = pv.node;
+    }
+
+    std::vector<DeploymentCandidate::LinkDetail> dependency_links;
+    double dependency_latency = 0.0;
+    double dependency_reliability = 1.0;
+    double dependency_bottleneck = std::numeric_limits<double>::infinity();
+
+    auto pair_metrics = [&](const std::string& src_nf_raw, const std::string& dst_nf_raw, double required_bw,
+                            std::vector<DeploymentCandidate::LinkDetail>* out_links) -> std::optional<RepairPathMetrics> {
+        const std::string src_nf = to_lower(src_nf_raw);
+        const std::string dst_nf = to_lower(dst_nf_raw);
+        const auto src_it = node_by_nf.find(src_nf);
+        const auto dst_it = node_by_nf.find(dst_nf);
+        if (src_it == node_by_nf.end() || dst_it == node_by_nf.end()) return std::nullopt;
+        std::vector<std::string> path = {src_it->second};
+        if (src_it->second != dst_it->second) {
+            path = repair_shortest_path(src_it->second, dst_it->second, topology, required_bw);
+            if (path.empty() || path.size() < 2) {
+                path = repair_shortest_path(src_it->second, dst_it->second, topology, 0.0);
+            }
+            if (path.empty() || path.size() < 2) return std::nullopt;
+        }
+        auto links = repair_path_links(path, topology, required_bw);
+        const auto metrics = evaluate_repair_links(links, required_bw);
+        if (!metrics.feasible) return std::nullopt;
+        if (out_links) {
+            for (auto& ld : links) {
+                ld.dependency_source_nf = src_nf;
+                ld.dependency_target_nf = dst_nf;
+                out_links->push_back(std::move(ld));
+            }
+        }
+        return metrics;
+    };
+
+    for (const auto& dep : request.core_nf_dependencies) {
+        const double required_bw = std::max(0.01, dep.bandwidth_required_gbps);
+        std::vector<DeploymentCandidate::LinkDetail> dep_links;
+        auto metrics = pair_metrics(dep.source, dep.target, required_bw, &dep_links);
+        if (!metrics.has_value()) {
+            if (reason) *reason = "partial_redeploy_dependency_path_unavailable:" + dep.source + "->" + dep.target;
+            return false;
+        }
+        dependency_latency += metrics->latency_ms * std::max(0.1, dep.latency_weight);
+        dependency_reliability = std::min(
+            dependency_reliability,
+            std::pow(std::max(1e-9, metrics->reliability), std::max(0.1, dep.reliability_weight))
+        );
+        dependency_bottleneck = std::min(dependency_bottleneck, metrics->bottleneck_bandwidth_gbps);
+        dependency_links.insert(dependency_links.end(), dep_links.begin(), dep_links.end());
+    }
+
+    auto flow_latency = [&](const std::vector<std::pair<std::string, std::string>>& hops, double fixed_ms) -> std::optional<double> {
+        double total = fixed_ms;
+        for (const auto& hop : hops) {
+            auto metrics = pair_metrics(hop.first, hop.second, std::max(0.01, request.constraints.min_bandwidth_gbps), nullptr);
+            if (!metrics.has_value()) return std::nullopt;
+            total += metrics->latency_ms;
+        }
+        return total;
+    };
+
+    const auto reg_latency = flow_latency({{"amf", "ausf"}, {"ausf", "udm"}}, request.constraints.registration_access_latency_ms);
+    if (!reg_latency.has_value()) {
+        if (reason) *reason = "partial_redeploy_registration_sla_path_unavailable";
+        return false;
+    }
+    const auto pdu_latency = flow_latency({{"amf", "smf"}, {"smf", "upf"}}, request.constraints.pdu_access_latency_ms);
+    if (!pdu_latency.has_value()) {
+        if (reason) *reason = "partial_redeploy_pdu_sla_path_unavailable";
+        return false;
+    }
+
+    std::vector<std::string> dedup_nodes;
+    std::unordered_set<std::string> seen;
+    for (const auto& pv : candidate->per_vnf) {
+        if (!pv.node.empty() && seen.insert(pv.node).second) dedup_nodes.push_back(pv.node);
+    }
+
+    candidate->deployed_nodes = std::move(dedup_nodes);
+    candidate->link_details = std::move(dependency_links);
+    candidate->total_latency_ms = dependency_latency;
+    candidate->registration_latency_ms = *reg_latency;
+    candidate->pdu_session_latency_ms = *pdu_latency;
+    candidate->estimated_reliability = dependency_reliability;
+    candidate->bottleneck_bandwidth_gbps =
+        std::isfinite(dependency_bottleneck) ? dependency_bottleneck : request.constraints.min_bandwidth_gbps;
+    const double rel_target = std::max(0.45, request.constraints.min_reliability * 0.92);
+    candidate->satisfies_constraints =
+        candidate->total_latency_ms <= request.constraints.max_latency_ms &&
+        candidate->registration_latency_ms <= request.constraints.registration_latency_ms &&
+        candidate->pdu_session_latency_ms <= request.constraints.pdu_session_latency_ms &&
+        candidate->bottleneck_bandwidth_gbps + 1e-9 >= request.constraints.min_bandwidth_gbps &&
+        candidate->estimated_reliability + 1e-9 >= rel_target;
+    if (!candidate->satisfies_constraints) {
+        if (reason) *reason = "partial_redeploy_sla_violation";
+        candidate->reason = reason ? *reason : "partial_redeploy_sla_violation";
+        return false;
+    }
+    candidate->reason.clear();
+    candidate->score = std::max(0.0, std::min(1.0, 1.0 - candidate->total_latency_ms / std::max(1.0, request.constraints.max_latency_ms) * 0.35));
+    return true;
+}
+
+std::optional<DeploymentCandidate> DynamicInferenceService::try_partial_node_redeploy(
+    const SessionState& session,
+    const Topology& planning_topology,
+    const std::unordered_set<std::string>& down_nodes,
+    std::string* detail
+) {
+    if (!session.has_last_candidate) return std::nullopt;
+    auto per_vnf = ensure_per_vnf_filled(session.last_candidate, session.request);
+    std::vector<size_t> affected;
+    std::unordered_set<std::string> affected_nodes;
+    for (size_t i = 0; i < per_vnf.size(); ++i) {
+        if (!per_vnf[i].node.empty() && down_nodes.find(per_vnf[i].node) != down_nodes.end()) {
+            affected.push_back(i);
+            affected_nodes.insert(per_vnf[i].node);
+        }
+    }
+    if (affected.empty()) {
+        if (detail) *detail = "no_affected_core_nf";
+        return std::nullopt;
+    }
+    if (affected_nodes.size() >= 2 || affected.size() >= 4) {
+        if (detail) {
+            *detail = "escalate_full_redeploy:affected_nodes=" + std::to_string(affected_nodes.size()) +
+                ",affected_nfs=" + std::to_string(affected.size());
+        }
+        return std::nullopt;
+    }
+
+    std::unordered_map<std::string, const Satellite*> sat_by_id;
+    std::unordered_map<std::string, double> cpu;
+    std::unordered_map<std::string, double> mem;
+    std::unordered_map<std::string, double> disk;
+    for (const auto& sat : planning_topology.nodes) {
+        sat_by_id[sat.id] = &sat;
+        cpu[sat.id] = sat.cpu_available;
+        mem[sat.id] = sat.mem_available;
+        disk[sat.id] = sat.disk_available;
+    }
+
+    DeploymentCandidate repaired = session.last_candidate;
+    repaired.per_vnf = per_vnf;
+    repaired.reason.clear();
+
+    std::unordered_map<std::string, std::string> placed_nf;
+    for (size_t i = 0; i < repaired.per_vnf.size(); ++i) {
+        if (std::find(affected.begin(), affected.end(), i) != affected.end()) continue;
+        const auto& pv = repaired.per_vnf[i];
+        const std::string nf = nf_key_from_pv(pv);
+        if (!nf.empty()) placed_nf[nf] = pv.node;
+        if (i < session.request.vnfs.size() && !pv.node.empty() && down_nodes.find(pv.node) == down_nodes.end()) {
+            const auto& vnf = session.request.vnfs[i];
+            cpu[pv.node] -= vnf.cpu;
+            mem[pv.node] -= vnf.mem;
+            disk[pv.node] -= vnf.disk;
+        }
+    }
+
+    std::vector<std::string> preferred_nodes;
+    for (const auto& node : session.last_candidate.deployed_nodes) {
+        if (!node.empty() && down_nodes.find(node) == down_nodes.end()) preferred_nodes.push_back(node);
+    }
+
+    for (const size_t idx : affected) {
+        if (idx >= session.request.vnfs.size()) continue;
+        const auto& vnf = session.request.vnfs[idx];
+        const std::string nf = nf_key_from_pv(repaired.per_vnf[idx]);
+        struct Choice { std::string node; double cost = std::numeric_limits<double>::infinity(); };
+        std::vector<Choice> choices;
+        choices.reserve(planning_topology.nodes.size());
+
+        auto consider_node = [&](const Satellite& sat, double preferred_bonus) {
+            if (down_nodes.find(sat.id) != down_nodes.end() || node_is_down(sat)) return;
+            if (cpu[sat.id] + 1e-9 < vnf.cpu || mem[sat.id] + 1e-9 < vnf.mem || disk[sat.id] + 1e-9 < vnf.disk) return;
+            double path_cost = 0.0;
+            int linked_neighbors = 0;
+            for (const auto& dep : session.request.core_nf_dependencies) {
+                std::string other_nf;
+                if (to_lower(dep.source) == nf) other_nf = to_lower(dep.target);
+                else if (to_lower(dep.target) == nf) other_nf = to_lower(dep.source);
+                else continue;
+                const auto other_it = placed_nf.find(other_nf);
+                if (other_it == placed_nf.end() || other_it->second.empty() || other_it->second == sat.id) continue;
+                auto path = repair_shortest_path(
+                    sat.id,
+                    other_it->second,
+                    planning_topology,
+                    std::max(0.01, dep.bandwidth_required_gbps)
+                );
+                if (path.empty() || path.size() < 2) return;
+                auto links = repair_path_links(path, planning_topology, std::max(0.01, dep.bandwidth_required_gbps));
+                const auto metrics = evaluate_repair_links(links, std::max(0.01, dep.bandwidth_required_gbps));
+                if (!metrics.feasible) return;
+                path_cost += metrics.latency_ms * std::max(0.1, dep.latency_weight);
+                linked_neighbors += 1;
+            }
+            const double cpu_after = sat.cpu_total > 0 ? (cpu[sat.id] - vnf.cpu) / sat.cpu_total : 0.0;
+            const double mem_after = sat.mem_total > 0 ? (mem[sat.id] - vnf.mem) / sat.mem_total : 0.0;
+            const double resource_cost = 1.0 - std::max(0.0, std::min(1.0, (cpu_after + mem_after) * 0.5));
+            choices.push_back({sat.id, path_cost + resource_cost * 3.0 - preferred_bonus - linked_neighbors * 0.2});
+        };
+
+        std::unordered_set<std::string> considered;
+        for (const auto& node_id : preferred_nodes) {
+            const auto it = sat_by_id.find(node_id);
+            if (it != sat_by_id.end() && considered.insert(node_id).second) consider_node(*it->second, 1.8);
+        }
+        for (const auto& sat : planning_topology.nodes) {
+            if (considered.insert(sat.id).second) consider_node(sat, 0.0);
+        }
+        if (choices.empty()) {
+            if (detail) *detail = "partial_redeploy_no_target_for_" + nf;
+            return std::nullopt;
+        }
+        std::sort(choices.begin(), choices.end(), [](const Choice& a, const Choice& b) {
+            return a.cost < b.cost;
+        });
+        const std::string selected = choices.front().node;
+        repaired.per_vnf[idx].node = selected;
+        placed_nf[nf] = selected;
+        cpu[selected] -= vnf.cpu;
+        mem[selected] -= vnf.mem;
+        disk[selected] -= vnf.disk;
+    }
+
+    std::string reason;
+    if (!rebuild_candidate_paths_and_sla(&repaired, session.request, planning_topology, &reason)) {
+        if (detail) *detail = reason.empty() ? "partial_redeploy_validation_failed" : reason;
+        return std::nullopt;
+    }
+    if (detail) {
+        *detail = "partial_redeploy_success:affected_nfs=" + std::to_string(affected.size());
+    }
+    return repaired;
 }
 
 std::string DynamicInferenceService::infer_required_recompute_trigger(
@@ -443,9 +885,47 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         ? snapshot.sim_time
         : topology.metadata.sim_time;
 
+    const auto down_nodes = collect_down_nodes(topology);
+    Topology planning_topology = build_planning_topology_for_session(session, topology, down_nodes);
+    std::string recovery_strategy = "";
+    std::string partial_detail = "";
+    if (trigger == "anchor_path_disconnected") {
+        recovery_strategy = "local_reroute";
+    }
     nlohmann::json decision_process;
     const auto t0 = std::chrono::high_resolution_clock::now();
-    auto candidates = inference_engine_->inference(session.request, topology, &decision_process);
+    std::vector<DeploymentCandidate> candidates;
+    if (trigger == "deployment_node_down") {
+        auto partial = try_partial_node_redeploy(session, planning_topology, down_nodes, &partial_detail);
+        if (partial.has_value()) {
+            recovery_strategy = "partial_node_redeploy";
+            decision_process = {
+                {"algorithm", "partial_node_redeploy"},
+                {"status", "success"},
+                {"detail", partial_detail}
+            };
+            candidates.push_back(std::move(*partial));
+        } else {
+            recovery_strategy = "full_redeploy_after_partial_unavailable";
+            WSHandler::broadcast_json({
+                {"type", "recovery_event"},
+                {"entity_type", "session"},
+                {"entity_id", session.session_id},
+                {"request_id", session.request.request_id},
+                {"sim_time", session.request.sim_time},
+                {"topology_version", session.request.topology_version},
+                {"strategy", "partial_node_redeploy_failed_escalate_full"},
+                {"trigger", trigger},
+                {"result", "escalating"},
+                {"success", false},
+                {"reason", partial_detail.empty() ? "partial_redeploy_unavailable" : partial_detail},
+                {"affected_services", 1}
+            });
+            candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
+        }
+    } else {
+        candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
+    }
     const auto t1 = std::chrono::high_resolution_clock::now();
     const double inference_ms =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000.0;
@@ -499,6 +979,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             {"score", c.score},
             {"satisfies_constraints", c.satisfies_constraints},
             {"total_latency_ms", c.total_latency_ms},
+            {"registration_latency_ms", c.registration_latency_ms},
+            {"pdu_session_latency_ms", c.pdu_session_latency_ms},
             {"estimated_reliability", c.estimated_reliability},
             {"bottleneck_bandwidth_gbps", c.bottleneck_bandwidth_gbps},
             {"deployed_nodes", c.deployed_nodes},
@@ -528,6 +1010,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"request_vnfs", request_vnfs_json(session.request)},
         {"request_core_nfs", request_vnfs_json(session.request)},
         {"core_nf_dependencies", request_dependencies_json(session.request)},
+        {"recovery_strategy", recovery_strategy},
+        {"partial_redeploy_detail", partial_detail},
         {"candidates", trace_candidates},
         {"decision_process", decision_process}
     };
@@ -542,7 +1026,6 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     trim_latency_window_locked();
     total_decisions_ += 1;
 
-    const auto down_nodes = collect_down_nodes(topology);
     const auto is_deployable_candidate = [&](const DeploymentCandidate& c) {
         if (!c.satisfies_constraints) return false;
         for (const auto& node : c.deployed_nodes) {
@@ -568,15 +1051,6 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                     c.deployed_nodes == session.last_candidate.deployed_nodes;
             }
         );
-        if (chosen_it == response_candidates.end()) {
-            // Link-local reroute failed; immediately fallback to cross-node redeploy
-            // in the same decision cycle to minimize outage recovery time.
-            chosen_it = std::find_if(
-                response_candidates.begin(),
-                response_candidates.end(),
-                [&](const DeploymentCandidate& c) { return is_deployable_candidate(c); }
-            );
-        }
     }
     if (chosen_it != response_candidates.end()) {
         auto chosen = *chosen_it;
@@ -646,6 +1120,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                     {"topology_version", session.last_topology_version},
                     {"sim_time", session.last_sim_time},
                     {"path_changed", false},
+                    {"recovery_strategy", recovery_strategy},
                     {"reason", fail_reason}
                 });
                 return {
@@ -654,6 +1129,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                     {"topology_version", session.last_topology_version},
                     {"sim_time", session.last_sim_time},
                     {"inference_time_ms", inference_ms},
+                    {"recovery_strategy", recovery_strategy},
                     {"reason", fail_reason}
                 };
             }
@@ -663,13 +1139,14 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             topo_mgr_->save_current_topology(updated_topology);
 
             if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator && nodes_changed) {
+                const std::string orchestration_trigger = recovery_strategy.empty() ? trigger : recovery_strategy;
                 g_deployment_orchestrator->enqueue_deployment(
                     session.orchestration_deployment_id,
                     session.request.request_id,
                     chosen,
                     session.request.vnfs,
                     "session_continuous",
-                    trigger
+                    orchestration_trigger
                 );
             }
 
@@ -700,6 +1177,19 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         session.pending_replanning = false;
         session.last_replanning_attempt_topology_version = -1;
 
+        if (!session.orchestration_deployment_id.empty()) {
+            nlohmann::json candidate_json = chosen.to_json();
+            candidate_json["score_total"] = chosen.score;
+            candidate_json["session_id"] = session.session_id;
+            candidate_json["strategy_mode"] = "session_continuous";
+            candidate_json["request_id"] = session.request.request_id;
+            candidate_json["status"] = "completed";
+            candidate_json["decision_trigger"] = trigger;
+            candidate_json["topology_version_bound"] = session.last_topology_version;
+            candidate_json["last_update_at"] = session.last_sim_time;
+            (void)patch_deployment_record(session.orchestration_deployment_id, candidate_json, nullptr);
+        }
+
         WSHandler::broadcast_json(trace_payload);
         WSHandler::broadcast_json({
             {"type", "session_update"},
@@ -710,6 +1200,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             {"topology_version", session.last_topology_version},
             {"sim_time", session.last_sim_time},
             {"path_changed", changed},
+            {"recovery_strategy", recovery_strategy},
             {"reason", chosen.reason}
         });
         return {
@@ -717,7 +1208,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             {"status", status},
             {"topology_version", session.last_topology_version},
             {"sim_time", session.last_sim_time},
-            {"inference_time_ms", inference_ms}
+            {"inference_time_ms", inference_ms},
+            {"recovery_strategy", recovery_strategy}
         };
     }
 
@@ -738,6 +1230,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"topology_version", session.last_topology_version},
         {"sim_time", session.last_sim_time},
         {"path_changed", false},
+        {"recovery_strategy", recovery_strategy},
         {"reason", pending_reason}
     });
     return {
@@ -746,6 +1239,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         {"topology_version", session.last_topology_version},
         {"sim_time", session.last_sim_time},
         {"inference_time_ms", inference_ms},
+        {"recovery_strategy", recovery_strategy},
         {"reason", pending_reason}
     };
 }
@@ -799,6 +1293,17 @@ nlohmann::json DynamicInferenceService::start_session(
             ? snapshot.sim_time
             : snapshot.topology.metadata.sim_time;
         sessions_[session.session_id].last_inference_time_ms = seeded_inference_ms;
+
+        if (!initial_deployment_id.empty()) {
+            nlohmann::json patch = {
+                {"session_id", session.session_id},
+                {"strategy_mode", "session_continuous"},
+                {"request_id", sessions_[session.session_id].request.request_id},
+                {"status", "completed"},
+                {"auto_redeploy", auto_redeploy}
+            };
+            (void)patch_deployment_record(initial_deployment_id, patch, nullptr);
+        }
 
         if (sessions_[session.session_id].active_resource_deployment_id.empty()) {
             const std::string alloc_id = make_session_resource_deployment_id(session.session_id);
@@ -1143,8 +1648,11 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
             }
 
             std::string strategy = "degraded_fallback";
+            const std::string explicit_strategy = result.value("recovery_strategy", "");
             if (success) {
-                if (!had_prev) {
+                if (!explicit_strategy.empty()) {
+                    strategy = explicit_strategy;
+                } else if (!had_prev) {
                     strategy = "initial_recovery";
                 } else {
                     const bool nodes_changed = prev_candidate.deployed_nodes != session.last_candidate.deployed_nodes;

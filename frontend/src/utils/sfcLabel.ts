@@ -7,7 +7,7 @@ function toMs(raw: string | undefined): number {
 
 export function formatSfcSeq(seq: number): string {
   const safe = Math.max(1, Math.floor(Number(seq) || 1))
-  return `CORE-${String(safe).padStart(3, '0')}`
+  return `CORE-${String(safe).padStart(2, '0')}`
 }
 
 function parseSeq(label: string) {
@@ -52,7 +52,7 @@ export function buildSfcLabelMaps(deployments: Deployment[]) {
     if (backendDid && !byDeployment.has(backendDid)) byDeployment.set(backendDid, label)
   })
 
-  let seq = Math.max(1, ...Array.from(usedLabels).map((x) => parseSeq(x)).filter((n) => Number.isFinite(n) && n > 0)) + 1
+  let seq = Math.max(0, ...Array.from(usedLabels).map((x) => parseSeq(x)).filter((n) => Number.isFinite(n) && n > 0)) + 1
   const allocLabel = () => {
     let label = formatSfcSeq(seq++)
     while (usedLabels.has(label)) label = formatSfcSeq(seq++)

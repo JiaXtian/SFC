@@ -436,6 +436,11 @@ void DeploymentOrchestratorService::worker_loop() {
 
 void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) {
     const std::string now = iso_now();
+    const auto unique_nodes = unique_nf_types(task.candidate.deployed_nodes);
+    const std::unordered_set<std::string> new_node_set(unique_nodes.begin(), unique_nodes.end());
+    const bool partial_redeploy =
+        task.trigger == "partial_node_redeploy" ||
+        task.trigger == "partial_node_redeploy_success";
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "stopping_old"},
         {"orchestration_progress", 12},
@@ -453,19 +458,35 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             old_containers = it->second.active_containers;
         }
     }
-    for (const auto& c : old_containers) {
-        (void)stop_container(c);
+    if (partial_redeploy) {
+        for (size_t i = 0; i < old_nodes.size() && i < old_containers.size(); ++i) {
+            if (new_node_set.find(old_nodes[i]) == new_node_set.end()) {
+                (void)stop_container(old_containers[i]);
+            }
+        }
+    } else {
+        for (const auto& c : old_containers) {
+            (void)stop_container(c);
+        }
     }
     if (old_containers.empty()) {
         for (const auto& node : old_nodes) {
+            if (partial_redeploy && new_node_set.find(node) != new_node_set.end()) continue;
             const std::string c = node_to_container_name(task.deployment_id, node);
             (void)stop_container(c);
             (void)stop_container(legacy_node_container_name(node));
         }
     }
-    clear_nodes_for_deployment(old_nodes);
+    if (partial_redeploy) {
+        std::vector<std::string> removed_nodes;
+        for (const auto& node : old_nodes) {
+            if (new_node_set.find(node) == new_node_set.end()) removed_nodes.push_back(node);
+        }
+        clear_nodes_for_deployment(removed_nodes);
+    } else {
+        clear_nodes_for_deployment(old_nodes);
+    }
 
-    const auto unique_nodes = unique_nf_types(task.candidate.deployed_nodes);
     std::unordered_map<std::string, std::vector<std::string>> nfs_by_node;
     for (const auto& pv : task.candidate.per_vnf) {
         if (pv.node.empty()) continue;
