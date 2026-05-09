@@ -146,8 +146,19 @@ export default function Links() {
       else normalInter.push(link)
     }
 
-    return { normalIntra, normalInter, fault, selected }
-  }, [links, satMap, display.showLinks, selectedKey])
+    const sample = (items: RenderLink[]) => {
+      if (satellites.length < 5000 || items.length <= 9000) return items
+      const stride = Math.max(1, Math.ceil(items.length / 9000))
+      return items.filter((_, idx) => idx % stride === 0)
+    }
+
+    return {
+      normalIntra: sample(normalIntra),
+      normalInter: sample(normalInter),
+      fault,
+      selected,
+    }
+  }, [links, satMap, display.showLinks, selectedKey, satellites.length])
 
   const meshes = useMemo(() => {
     const make = (items: RenderLink[]) => {

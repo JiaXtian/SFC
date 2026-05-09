@@ -1,13 +1,14 @@
 import { useState } from 'react'
-import { SlidersHorizontal, Users, LogOut, Satellite, ShieldAlert } from 'lucide-react'
+import { SlidersHorizontal, Users, LogOut, Satellite, ShieldAlert, RadioTower } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import SatelliteNodeControlPage from './SatelliteNodeControlPage'
 import SFCForm from './SFCForm'
 import FaultInjectionControl from './FaultInjectionControl'
 import UserManagementPage from './UserManagementPage'
 import ControlDeploymentList from './ControlDeploymentList'
+import UERANSIMValidationPage from './UERANSIMValidationPage'
 
-type Tab = 'satellite' | 'strategy' | 'fault' | 'users'
+type Tab = 'satellite' | 'strategy' | 'validation' | 'fault' | 'users'
 
 function StrategyDeployBody({ canManage }: { canManage: boolean }) {
   return (
@@ -51,7 +52,7 @@ export default function ControlPage() {
   const canManage = role === 'admin'
   const [tab, setTab] = useState<Tab>('satellite')
 
-  const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy', 'fault', 'users'] : ['satellite']
+  const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy', 'validation', 'fault', 'users'] : ['satellite']
   const activeTab = visibleTabs.includes(tab) ? tab : 'satellite'
 
   return (
@@ -119,6 +120,20 @@ export default function ControlPage() {
               核心网部署
             </button>
           )}
+          {visibleTabs.includes('validation') && (
+            <button
+              className={`h-9 px-4 rounded-lg text-[12px] font-semibold inline-flex items-center gap-1.5 ${
+                activeTab === 'validation' ? 'text-cyan-100' : 'text-slate-300'
+              }`}
+              style={activeTab === 'validation'
+                ? { background: 'linear-gradient(135deg, rgba(8,79,118,0.82), rgba(8,45,74,0.92))', border: '1px solid rgba(125,211,252,0.3)' }
+                : { background: 'rgba(30,41,59,0.65)', border: '1px solid rgba(100,116,139,0.3)' }}
+              onClick={() => setTab('validation')}
+            >
+              <RadioTower className="w-3.5 h-3.5" />
+              功能验证
+            </button>
+          )}
           {visibleTabs.includes('fault') && (
             <button
               className={`h-9 px-4 rounded-lg text-[12px] font-semibold inline-flex items-center gap-1.5 ${
@@ -152,6 +167,7 @@ export default function ControlPage() {
         <div className="h-[calc(100%-104px)] overflow-hidden">
           {activeTab === 'satellite' && <SatelliteNodeControlPage role={role} />}
           {activeTab === 'strategy' && <StrategyDeployBody canManage={canManage} />}
+          {activeTab === 'validation' && <UERANSIMValidationPage />}
           {activeTab === 'fault' && <FaultControlBody />}
           {activeTab === 'users' && <UserManagementPage />}
         </div>

@@ -51,6 +51,7 @@ function recoveryStrategyLabel(strategy: string): string {
     case 'partial_node_redeploy': return '受影响网元局部重调度'
     case 'partial_node_redeploy_failed_escalate_full': return '局部重调度失败，升级整体重调度'
     case 'full_redeploy_after_partial_unavailable': return '整体重调度'
+    case 'full_redeploy_multi_node_fault': return '多星故障整体重调度'
     case 'cross_node_redeploy': return '跨星整体重调度'
     case 'hold_and_observe': return '保持当前部署'
     case 'resume_replanning': return '恢复后继续编排'
@@ -67,6 +68,7 @@ function phaseLabel(raw: string): string {
     queued: '排队中',
     pending: '等待中',
     preparing: '准备中',
+    stopping_old: '旧实例切换中',
     starting: '启动中',
     starting_containers: '容器启动中',
     starting_core_nfs: '网元启动中',
@@ -250,15 +252,16 @@ export default function SystemMessagePanel() {
           const ok = Boolean(e.raw?.success)
           const strategy = recoveryStrategyLabel(String(e.raw?.strategy ?? ''))
           const isEscalating = String(e.raw?.strategy ?? '') === 'partial_node_redeploy_failed_escalate_full'
+          const isFullEscalating = String(e.raw?.strategy ?? '') === 'full_redeploy_multi_node_fault'
           return {
             id: e.id,
             time,
             tone: ok ? 'ok' : 'warn',
-            title: ok ? '核心网恢复完成' : (isEscalating ? '升级整体重调度' : '核心网恢复失败'),
+            title: ok ? '核心网恢复完成' : (isEscalating || isFullEscalating ? '升级整体重调度' : '核心网恢复失败'),
             text: ok
               ? short(`${sfcLabel} ${strategy}完成，触发原因：${trig}`)
-              : short(isEscalating
-                ? `${sfcLabel} 局部重调度不可用，正在立即执行整体重调度`
+              : short(isEscalating || isFullEscalating
+                ? `${sfcLabel} ${strategy}已触发，正在重新拉起完整核心网`
                 : `${sfcLabel} ${strategy}失败，请检查资源与链路状态`),
           }
         }

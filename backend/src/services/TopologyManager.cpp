@@ -1,4 +1,5 @@
 #include "services/TopologyManager.h"
+#include "utils/Sgp4Propagator.h"
 #include <cmath>
 #include <random>
 #include <chrono>
@@ -6,8 +7,6 @@
 
 namespace sfc {
 
-const double EARTH_RADIUS = 6371.0;  // km
-const double PI = 3.14159265358979323846;
 const double LIGHT_SPEED = 299792.458;  // km/s
 
 TopologyManager::TopologyManager() {
@@ -44,11 +43,8 @@ Topology TopologyManager::generate_walker_delta(
     topo.metadata.topology_version = 0;
     topo.metadata.sampling_interval_sec = 15.0;
     
-    auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
-    char buf[100];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t));
-    topo.metadata.timestamp = buf;
+    const double epoch_jd = sgp4::julian_date_now();
+    topo.metadata.timestamp = sgp4::iso_utc_now();
     
     int sats_per_plane = total_sats / num_planes;
     
@@ -66,14 +62,17 @@ Topology TopologyManager::generate_walker_delta(
             snprintf(id_buf, sizeof(id_buf), "SAT_%03d_%03d", plane, pos);
             sat.id = id_buf;
 
-            sat.orbital_params.plane = plane;
-            sat.orbital_params.position_in_plane = pos;
-            sat.orbital_params.raan = (360.0 / num_planes) * plane;
-            sat.orbital_params.true_anomaly = (360.0 / sats_per_plane) * pos;
-            sat.orbital_params.altitude_km = altitude_km;
-            sat.orbital_params.inclination_deg = inclination_deg;
-            
-            sat.coordinates = calculate_position(plane, pos, num_planes, sats_per_plane, altitude_km);
+            sat.orbital_params = sgp4::make_walker_sgp4_params(
+                plane,
+                pos,
+                num_planes,
+                sats_per_plane,
+                altitude_km,
+                inclination_deg,
+                1,
+                epoch_jd
+            );
+            sat.coordinates = calculate_position(sat.orbital_params);
             
             sat.cpu_total = cpu_dist(rng);
             sat.cpu_available = sat.cpu_total;
@@ -106,22 +105,8 @@ Topology TopologyManager::generate_walker_delta(
     return topo;
 }
 
-Coordinates TopologyManager::calculate_position(
-    int plane_id, int sat_in_plane, int total_planes,
-    int sats_per_plane, double altitude_km, double time_offset
-) {
-    Coordinates coord;
-    double orbit_radius = EARTH_RADIUS + altitude_km;
-    double raan = (2.0 * PI / total_planes) * plane_id;
-    double true_anomaly = (2.0 * PI / sats_per_plane) * sat_in_plane + time_offset;
-    
-    coord.x = orbit_radius * cos(true_anomaly) * cos(raan);
-    coord.y = orbit_radius * cos(true_anomaly) * sin(raan);
-    coord.z = orbit_radius * sin(true_anomaly);
-    coord.lat = asin(coord.z / orbit_radius) * 180.0 / PI;
-    coord.lon = atan2(coord.y, coord.x) * 180.0 / PI;
-    
-    return coord;
+Coordinates TopologyManager::calculate_position(const OrbitalParams& params, double minutes_since_epoch) {
+    return sgp4::propagate(params, minutes_since_epoch).coordinates;
 }
 
 void TopologyManager::establish_links(Topology& topology) {

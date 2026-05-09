@@ -63,11 +63,7 @@ private:
     std::string current_sim_time_iso_locked() const;
 
     static std::string iso_time_from_system_clock(const std::chrono::system_clock::time_point& tp);
-    static void update_satellite_position(
-        Satellite& sat,
-        double inclination_deg,
-        double dt_sec
-    );
+    static void update_satellite_position(Satellite& sat, double elapsed_sec);
     static double link_distance_km(const Coordinates& a, const Coordinates& b);
     static double max_isl_range_km(double altitude_km);
     static double clamp(double v, double lo, double hi);

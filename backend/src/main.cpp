@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include "controllers/TopologyController.h"
 #include "controllers/SFCController.h"
+#include "controllers/UERANSIMController.h"
 #include "controllers/AuthController.h"
 #include "controllers/UserController.h"
 #include "services/TopologyManager.h"
@@ -184,6 +185,7 @@ bool is_admin_only_path(const HttpRequestPtr& req) {
     const auto method = req->method();
     if (starts_with(path, "/api/v1/users")) return true;
     if (starts_with(path, "/api/v1/sfc")) return true;
+    if (starts_with(path, "/api/v1/ueransim")) return true;
     if (path == "/api/v1/topology/generate") return true;
     if (starts_with(path, "/api/v1/topology/dynamic/") && path != "/api/v1/topology/dynamic/status") {
         return true;

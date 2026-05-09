@@ -57,22 +57,48 @@ struct CoreBusinessLoad {
 
 // 轨道参数
 struct OrbitalParams {
-    int plane;
-    int position_in_plane;
-    double raan;
-    double true_anomaly;
-    double altitude_km;
+    std::string propagation_model = "SGP4";
+    int plane = 0;
+    int position_in_plane = 0;
+    double raan = 0.0;
+    double true_anomaly = 0.0;
+    double altitude_km = 550.0;
     double inclination_deg = 53.0;
+    double eccentricity = 0.0001;
+    double argument_of_perigee_deg = 0.0;
+    double mean_anomaly_deg = 0.0;
+    double mean_motion_rev_per_day = 0.0;
+    double bstar = 0.0;
+    double epoch_jd = 0.0;
+    double propagation_minutes = 0.0;
+    double semi_major_axis_km = 0.0;
+    double period_minutes = 0.0;
+    std::string epoch_iso = "";
+    std::string tle_line1 = "";
+    std::string tle_line2 = "";
     
     json to_json() const {
         return {
+            {"propagation_model", propagation_model},
             {"plane", plane},
             {"position_in_plane", position_in_plane},
             {"raan", raan},
             {"true_anomaly", true_anomaly},
             {"altitude_km", altitude_km},
             {"inclination_deg", inclination_deg},
-            {"inclination", inclination_deg}
+            {"inclination", inclination_deg},
+            {"eccentricity", eccentricity},
+            {"argument_of_perigee_deg", argument_of_perigee_deg},
+            {"mean_anomaly_deg", mean_anomaly_deg},
+            {"mean_motion_rev_per_day", mean_motion_rev_per_day},
+            {"bstar", bstar},
+            {"epoch_jd", epoch_jd},
+            {"epoch_iso", epoch_iso},
+            {"propagation_minutes", propagation_minutes},
+            {"semi_major_axis_km", semi_major_axis_km},
+            {"period_minutes", period_minutes},
+            {"tle_line1", tle_line1},
+            {"tle_line2", tle_line2}
         };
     }
 };

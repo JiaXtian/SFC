@@ -5,6 +5,7 @@
 #include "services/ResourceManager.h"
 #include "services/DynamicSimulationService.h"
 #include "services/DynamicInferenceService.h"
+#include <nlohmann/json.hpp>
 
 using namespace drogon;
 
@@ -16,6 +17,8 @@ extern std::shared_ptr<TopologyManager> g_topo_mgr;
 extern std::shared_ptr<ResourceManager> g_res_mgr;
 extern std::shared_ptr<DynamicSimulationService> g_dynamic_sim;
 extern std::shared_ptr<DynamicInferenceService> g_dynamic_inference;
+
+nlohmann::json list_deployment_records();
 
 class SFCController : public HttpController<SFCController> {
 public:

@@ -1029,12 +1029,14 @@ function orbitalLayoutChanged(current: SatelliteData[], incoming: any[]): boolea
     const nOp: any = src?.orbital_params ?? {}
     const samePlane = toFinite(cOp.plane, -1) === toFinite(nOp.plane, -1)
     const samePos = toFinite(cOp.position_in_plane, -1) === toFinite(nOp.position_in_plane, -1)
-    const sameRaan = Math.abs(toFinite(cOp.raan, 0) - toFinite(nOp.raan, 0)) <= 1e-6
-    const sameAlt = Math.abs(toFinite(cOp.altitude_km, 0) - toFinite(nOp.altitude_km, 0)) <= 1e-6
     const cIncl = toFinite(cOp.inclination ?? cOp.inclination_deg, 0)
     const nIncl = toFinite(nOp.inclination ?? nOp.inclination_deg, 0)
     const sameIncl = Math.abs(cIncl - nIncl) <= 1e-6
-    if (!(samePlane && samePos && sameRaan && sameAlt && sameIncl)) return true
+    const sameMeanMotion = Math.abs(toFinite(cOp.mean_motion_rev_per_day, 0) - toFinite(nOp.mean_motion_rev_per_day, 0)) <= 1e-7
+    const sameEcc = Math.abs(toFinite(cOp.eccentricity, 0) - toFinite(nOp.eccentricity, 0)) <= 1e-8
+    const sameEpoch = Math.abs(toFinite(cOp.epoch_jd, 0) - toFinite(nOp.epoch_jd, 0)) <= 1e-8
+    const sameModel = String(cOp.propagation_model ?? 'SGP4') === String(nOp.propagation_model ?? 'SGP4')
+    if (!(samePlane && samePos && sameIncl && sameMeanMotion && sameEcc && sameEpoch && sameModel)) return true
     checked += 1
     if (checked >= 32) break
   }

@@ -4,6 +4,7 @@
 #include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
+#include "utils/Sgp4Propagator.h"
 #include "websocket/WSHandler.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -272,6 +273,23 @@ void TopologyController::generateTopology(
                         "inclination_deg",
                         op.get("inclination", inclination).asDouble()
                     ).asDouble();
+                    sat.orbital_params.propagation_model = op.get("propagation_model", "SGP4").asString();
+                    sat.orbital_params.eccentricity = op.get("eccentricity", 0.0001).asDouble();
+                    sat.orbital_params.argument_of_perigee_deg = op.get("argument_of_perigee_deg", 0.0).asDouble();
+                    sat.orbital_params.mean_anomaly_deg = op.get(
+                        "mean_anomaly_deg",
+                        sat.orbital_params.true_anomaly
+                    ).asDouble();
+                    sat.orbital_params.mean_motion_rev_per_day = op.get("mean_motion_rev_per_day", 0.0).asDouble();
+                    sat.orbital_params.bstar = op.get("bstar", 0.0).asDouble();
+                    sat.orbital_params.epoch_jd = op.get("epoch_jd", 0.0).asDouble();
+                    sat.orbital_params.epoch_iso = op.get("epoch_iso", "").asString();
+                    sat.orbital_params.propagation_minutes = op.get("propagation_minutes", 0.0).asDouble();
+                    sat.orbital_params.semi_major_axis_km = op.get("semi_major_axis_km", 0.0).asDouble();
+                    sat.orbital_params.period_minutes = op.get("period_minutes", 0.0).asDouble();
+                    sat.orbital_params.tle_line1 = op.get("tle_line1", "").asString();
+                    sat.orbital_params.tle_line2 = op.get("tle_line2", "").asString();
+                    sgp4::ensure_sgp4_defaults(sat.orbital_params, altitude, inclination);
                     max_plane_idx = std::max(max_plane_idx, sat.orbital_params.plane);
                 }
 
@@ -282,6 +300,8 @@ void TopologyController::generateTopology(
                     sat.coordinates.z = c.get("z", 0.0).asDouble();
                     sat.coordinates.lat = c.get("lat", 0.0).asDouble();
                     sat.coordinates.lon = c.get("lon", 0.0).asDouble();
+                } else {
+                    sat.coordinates = sgp4::propagate(sat.orbital_params, sat.orbital_params.propagation_minutes).coordinates;
                 }
 
                 sat.cpu_total = n.get("cpu_total", 16.0).asDouble();

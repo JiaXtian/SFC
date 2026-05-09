@@ -1,4 +1,5 @@
 #include "services/DynamicSimulationService.h"
+#include "utils/Sgp4Propagator.h"
 #include "services/AuthGlobals.h"
 #include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
@@ -18,9 +19,7 @@ constexpr double kMinSamplingIntervalSec = 10.0;
 constexpr double kMaxSamplingIntervalSec = 30.0;
 
 constexpr double kEarthRadiusKm = 6371.0;
-constexpr double kEarthMuKm3PerSec2 = 398600.4418;
 constexpr double kLightSpeedKmPerSec = 299792.458;
-constexpr double kPi = 3.14159265358979323846;
 
 const std::vector<std::string> kNodeFaultTypes = {
     "power_failure",
@@ -794,9 +793,8 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         runtime_snapshot = g_deployment_orchestrator->snapshot_node_runtime();
     }
 
-    const double inclination_deg = topology.metadata.inclination_deg;
     for (auto& sat : topology.nodes) {
-        update_satellite_position(sat, inclination_deg, sim_dt_sec);
+        update_satellite_position(sat, sim_dt_sec);
         // Rebuild node fault view from source-of-truth `node_fault_states_` each tick.
         // This prevents stale "down/fault_tag" residue after manual fault removal.
         sat.status = "active";
@@ -1164,36 +1162,8 @@ std::string DynamicSimulationService::iso_time_from_system_clock(const std::chro
     return oss.str();
 }
 
-void DynamicSimulationService::update_satellite_position(
-    Satellite& sat,
-    double inclination_deg,
-    double dt_sec
-) {
-    const double altitude = std::max(100.0, sat.orbital_params.altitude_km);
-    const double orbit_radius = kEarthRadiusKm + altitude;
-    const double period_sec = 2.0 * kPi * std::sqrt(
-        (orbit_radius * orbit_radius * orbit_radius) / kEarthMuKm3PerSec2
-    );
-    const double delta_deg = 360.0 * dt_sec / std::max(1.0, period_sec);
-    sat.orbital_params.true_anomaly = std::fmod(sat.orbital_params.true_anomaly + delta_deg, 360.0);
-    if (sat.orbital_params.true_anomaly < 0.0) {
-        sat.orbital_params.true_anomaly += 360.0;
-    }
-    sat.orbital_params.inclination_deg = inclination_deg;
-
-    const double raan_rad = sat.orbital_params.raan * kPi / 180.0;
-    const double inc_rad = inclination_deg * kPi / 180.0;
-    const double ta_rad = sat.orbital_params.true_anomaly * kPi / 180.0;
-
-    const double x_orb = orbit_radius * std::cos(ta_rad);
-    const double y_orb = orbit_radius * std::sin(ta_rad);
-
-    sat.coordinates.x = std::cos(raan_rad) * x_orb - std::sin(raan_rad) * std::cos(inc_rad) * y_orb;
-    sat.coordinates.y = std::sin(raan_rad) * x_orb + std::cos(raan_rad) * std::cos(inc_rad) * y_orb;
-    sat.coordinates.z = std::sin(inc_rad) * y_orb;
-
-    sat.coordinates.lat = std::asin(clamp(sat.coordinates.z / orbit_radius, -1.0, 1.0)) * 180.0 / kPi;
-    sat.coordinates.lon = std::atan2(sat.coordinates.y, sat.coordinates.x) * 180.0 / kPi;
+void DynamicSimulationService::update_satellite_position(Satellite& sat, double dt_sec) {
+    sgp4::propagate_inplace(sat, std::max(0.0, dt_sec) / 60.0);
 }
 
 double DynamicSimulationService::link_distance_km(const Coordinates& a, const Coordinates& b) {

@@ -87,6 +87,12 @@ private:
         const std::unordered_set<std::string>& down_nodes,
         std::string* detail
     );
+    std::optional<DeploymentCandidate> try_fast_full_redeploy(
+        const SessionState& session,
+        const Topology& planning_topology,
+        const std::unordered_set<std::string>& down_nodes,
+        std::string* detail
+    );
     bool rebuild_candidate_paths_and_sla(
         DeploymentCandidate* candidate,
         const SFCRequest& request,

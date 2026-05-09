@@ -209,11 +209,12 @@ export default function SatelliteDetail() {
         {/* 轨道参数 */}
         <div>
           <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
-            <Navigation className="w-3 h-3" />轨道参数
+            <Navigation className="w-3 h-3" />SGP4 轨道参数
           </div>
 
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
             {[
+              ['模型', orbital?.propagation_model ?? 'SGP4'],
               ['轨道面', orbital?.plane ?? '-'],
               ['位置', orbital?.position_in_plane ?? '-'],
               [
@@ -227,6 +228,30 @@ export default function SatelliteDetail() {
                 (orbital?.inclination ?? orbital?.inclination_deg) != null
                   ? `${Number(orbital?.inclination ?? orbital?.inclination_deg).toFixed(1)}°`
                   : '-'
+              ],
+              [
+                'RAAN',
+                orbital?.raan != null ? `${Number(orbital.raan).toFixed(2)}°` : '-'
+              ],
+              [
+                '近地点幅角',
+                orbital?.argument_of_perigee_deg != null ? `${Number(orbital.argument_of_perigee_deg).toFixed(2)}°` : '-'
+              ],
+              [
+                '平近点角',
+                orbital?.mean_anomaly_deg != null ? `${Number(orbital.mean_anomaly_deg).toFixed(2)}°` : '-'
+              ],
+              [
+                '偏心率',
+                orbital?.eccentricity != null ? Number(orbital.eccentricity).toFixed(6) : '-'
+              ],
+              [
+                '平均运动',
+                orbital?.mean_motion_rev_per_day != null ? `${Number(orbital.mean_motion_rev_per_day).toFixed(6)} rev/d` : '-'
+              ],
+              [
+                '周期',
+                orbital?.period_minutes != null ? `${Number(orbital.period_minutes).toFixed(2)}min` : '-'
               ],
               [
                 '纬度',
@@ -246,6 +271,11 @@ export default function SatelliteDetail() {
                 <span className="text-gray-300 font-mono">{v}</span>
               </div>
             ))}
+          </div>
+          <div className="mt-2 space-y-1 text-[9px] text-slate-500 font-mono">
+            {orbital?.epoch_iso && <div>Epoch {String(orbital.epoch_iso)}</div>}
+            {orbital?.tle_line1 && <div className="break-all">{String(orbital.tle_line1)}</div>}
+            {orbital?.tle_line2 && <div className="break-all">{String(orbital.tle_line2)}</div>}
           </div>
         </div>
 
