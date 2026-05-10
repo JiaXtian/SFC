@@ -34,6 +34,7 @@ class SFCTrainer:
         backend_align_context=True,
         max_probe_candidates=5,
         max_decision_ms=460.0,
+        teacher_probe_candidates=12,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -43,6 +44,7 @@ class SFCTrainer:
         self.backend_align_context = bool(backend_align_context)
         self.max_probe_candidates = int(max(4, max_probe_candidates))
         self.max_decision_ms = float(max(120.0, max_decision_ms))
+        self.teacher_probe_candidates = int(max(6, teacher_probe_candidates))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -375,6 +377,7 @@ class SFCTrainer:
         reset_resources=True,
         update_model=True,
         deterministic_policy=False,
+        execution_mode="teacher",
     ):
         del graph
         state = env.reset(request, reset_resources=reset_resources)
@@ -383,6 +386,8 @@ class SFCTrainer:
         episode_reward = 0.0
         failure_reason = None
         decision_latencies_ms = []
+        actor_hit_count = 0
+        fallback_count = 0
         info = {}
 
         def finish_episode(success, failure_reason_local, info_obj=None):
@@ -418,6 +423,8 @@ class SFCTrainer:
                 "link_congestion": float(info_obj.get("link_congestion", 0.0)),
                 "business_balance": float(info_obj.get("business_balance", 0.0)),
                 "max_dependency_delay": float(info_obj.get("max_dependency_delay", 0.0)),
+                "actor_hit_rate": 100.0 * actor_hit_count / max(1, len(trajectories)),
+                "fallback_count": int(fallback_count),
             }
 
         node_features, edge_index, nodes_list, node_index = self._get_graph_data(env.topology)
@@ -476,7 +483,7 @@ class SFCTrainer:
             ctx_feat = self._build_context_features(state).to(self.device)
 
             if deterministic_policy:
-                action_idx, _ = self.agent.select_action(
+                actor_action_idx, _ = self.agent.select_action(
                     node_embeddings,
                     candidate_indices,
                     vnf_feat,
@@ -484,9 +491,9 @@ class SFCTrainer:
                     deterministic=True,
                 )
             elif random.random() < epsilon:
-                action_idx = random.randint(0, len(candidate_indices) - 1)
+                actor_action_idx = random.randint(0, len(candidate_indices) - 1)
             else:
-                action_idx, _ = self.agent.select_action(
+                actor_action_idx, _ = self.agent.select_action(
                     node_embeddings,
                     candidate_indices,
                     vnf_feat,
@@ -494,9 +501,11 @@ class SFCTrainer:
                     deterministic=False,
                 )
 
-            action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
-            probe_order = [action_idx] + [idx for idx in range(len(candidate_indices)) if idx != action_idx]
+            actor_action_idx = int(max(0, min(actor_action_idx, len(candidate_indices) - 1)))
+            probe_order = [actor_action_idx] + [idx for idx in range(len(candidate_indices)) if idx != actor_action_idx]
             max_probe = min(self.max_probe_candidates, len(probe_order))
+            if execution_mode == "teacher":
+                max_probe = min(max(self.teacher_probe_candidates, max_probe), len(probe_order))
             probe_candidates = []
             selected = None
             selected_plan = None
@@ -507,6 +516,8 @@ class SFCTrainer:
                 plan = env.plan_candidate(selected_node)
                 if plan:
                     probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
+                    if execution_mode == "actor":
+                        break
             if not probe_candidates:
                 fallback_limit = min(max_probe + 8, len(probe_order))
                 for probe_idx in probe_order[max_probe:fallback_limit]:
@@ -518,8 +529,13 @@ class SFCTrainer:
                         probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
                         break
             if probe_candidates:
-                probe_candidates.sort(key=lambda x: x[0])
+                if execution_mode == "teacher":
+                    probe_candidates.sort(key=lambda x: x[0])
                 _score, action_idx, selected, selected_plan = probe_candidates[0]
+                if action_idx == actor_action_idx:
+                    actor_hit_count += 1
+                else:
+                    fallback_count += 1
             if selected is None or selected_plan is None:
                 failure_reason = "candidate_infeasible"
                 return finish_episode(False, failure_reason)
@@ -538,6 +554,7 @@ class SFCTrainer:
                 "action": action_idx,
                 "reward": float(reward),
                 "done": done,
+                "actor_action": actor_action_idx,
             }
 
             if update_model and not done and next_state is not None and next_state.get("core_nf") is not None:
@@ -605,6 +622,8 @@ class SFCTrainer:
         resource_balance_scores = []
         link_congestion_scores = []
         business_balance_scores = []
+        actor_hit_rates = []
+        fallback_counts = []
         reliability_scale, strict_reliability_prob = self._resolve_reliability_curriculum(
             epoch, total_epochs, reliability_curriculum
         )
@@ -637,6 +656,7 @@ class SFCTrainer:
                     epsilon,
                     heuristic_pruner,
                     reset_resources=(not use_shared),
+                    execution_mode="teacher",
                 )
 
                 rewards.append(episode_result["episode_reward"])
@@ -648,6 +668,8 @@ class SFCTrainer:
                 resource_balance_scores.append(float(episode_result.get("resource_balance", 0.0)))
                 link_congestion_scores.append(float(episode_result.get("link_congestion", 0.0)))
                 business_balance_scores.append(float(episode_result.get("business_balance", 0.0)))
+                actor_hit_rates.append(float(episode_result.get("actor_hit_rate", 0.0)))
+                fallback_counts.append(int(episode_result.get("fallback_count", 0)))
 
                 if episode_result["success"]:
                     success_count += 1
@@ -707,6 +729,8 @@ class SFCTrainer:
             "resource_fail_count": resource_fail_count,
             "total_requests": total_requests,
             "updated_episodes": updated_episodes,
+            "actor_hit_rate": float(np.mean(actor_hit_rates)) if actor_hit_rates else 0.0,
+            "fallback_count": int(sum(fallback_counts)),
             "epoch_time_s": epoch_time,
             "epsilon": float(epsilon),
             "reliability_scale": reliability_scale,
@@ -750,6 +774,8 @@ class SFCTrainer:
         resource_balance_scores = []
         link_congestion_scores = []
         business_balance_scores = []
+        actor_hit_rates = []
+        fallback_counts = []
         failure_reason_counts = {}
 
         was_training = self.gnn.training
@@ -775,6 +801,7 @@ class SFCTrainer:
                     reset_resources=(not shared_resources),
                     update_model=False,
                     deterministic_policy=True,
+                    execution_mode="actor",
                 )
                 rewards.append(result["episode_reward"])
                 quality_scores.append(float(result.get("quality_score", 0.0)))
@@ -785,6 +812,8 @@ class SFCTrainer:
                 resource_balance_scores.append(float(result.get("resource_balance", 0.0)))
                 link_congestion_scores.append(float(result.get("link_congestion", 0.0)))
                 business_balance_scores.append(float(result.get("business_balance", 0.0)))
+                actor_hit_rates.append(float(result.get("actor_hit_rate", 0.0)))
+                fallback_counts.append(int(result.get("fallback_count", 0)))
                 if result["success"]:
                     success_count += 1
                 failure_reason = str(result.get("failure_reason", ""))
@@ -809,6 +838,8 @@ class SFCTrainer:
             "eval_avg_algorithm_latency_ms": float(np.mean(decision_lat_means)) if decision_lat_means else 0.0,
             "eval_p95_algorithm_latency_ms": float(np.percentile(decision_lat_p95s, 95)) if decision_lat_p95s else 0.0,
             "eval_total_requests": total_requests,
+            "eval_actor_hit_rate": float(np.mean(actor_hit_rates)) if actor_hit_rates else 0.0,
+            "eval_fallback_count": int(sum(fallback_counts)),
             "eval_top_failure_reasons": sorted(
                 failure_reason_counts.items(), key=lambda kv: kv[1], reverse=True
             )[:5],

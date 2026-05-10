@@ -272,10 +272,20 @@ def save_metrics(history, output_dir="logs"):
         axes[0, 0].legend()
         axes[0, 0].grid(alpha=0.3)
 
-        axes[0, 1].plot(epochs, [h["avg_reward"] for h in history], color="#2ca02c")
+        axes[0, 1].plot(epochs, [h["avg_reward"] for h in history], label="Train Reward", color="#2ca02c")
+        if "eval_avg_reward" in history[0]:
+            axes[0, 1].plot(epochs, [h.get("eval_avg_reward", 0.0) for h in history], label="Eval Reward", color="#1f77b4")
+        if "eval_quality_best_so_far" in history[0]:
+            axes[0, 1].plot(
+                epochs,
+                [100.0 * h.get("eval_quality_best_so_far", 0.0) for h in history],
+                label="Eval Quality Best x100",
+                color="#9467bd",
+            )
         axes[0, 1].set_title("Average Reward")
         axes[0, 1].set_xlabel("Epoch")
         axes[0, 1].set_ylabel("Reward")
+        axes[0, 1].legend()
         axes[0, 1].grid(alpha=0.3)
 
         axes[1, 0].plot(epochs, [h["avg_episode_delay_ms"] for h in history], label="Deployment Delay", color="#9467bd")
@@ -286,6 +296,14 @@ def save_metrics(history, output_dir="logs"):
 
         axes[1, 1].plot(epochs, [h["avg_algorithm_latency_ms"] for h in history], label="Avg Algorithm Latency", color="#d62728")
         axes[1, 1].plot(epochs, [h["p95_algorithm_latency_ms"] for h in history], label="P95 Algorithm Latency", color="#8c564b")
+        if "eval_p95_algorithm_latency_ms" in history[0]:
+            axes[1, 1].plot(
+                epochs,
+                [h.get("eval_p95_algorithm_latency_ms", 0.0) for h in history],
+                label="Eval P95 Algorithm Latency",
+                color="#ff7f0e",
+            )
+        axes[1, 1].axhline(500.0, color="#111111", linestyle="--", linewidth=1.0, alpha=0.5)
         axes[1, 1].set_title("Algorithm Processing Latency")
         axes[1, 1].set_xlabel("Epoch")
         axes[1, 1].set_ylabel("ms")
@@ -657,11 +675,14 @@ def main():
         total_req = int(epoch_metrics.get("total_requests", 0))
         fail_count = int(max(0, round(total_req * (100.0 - float(epoch_metrics["success_rate"])) / 100.0)))
         print(
-            f"Epoch {epoch} | Score={composite_score:.2f} | Reward={epoch_metrics['avg_reward']:.2f} | "
+            f"Epoch {epoch} | TrainScore={composite_score:.2f} | EvalScore={eval_score:.2f} | "
+            f"Reward={epoch_metrics['avg_reward']:.2f} | "
             f"Quality={epoch_metrics.get('avg_quality_score', 0.0):.3f} | "
             f"EvalReward={epoch_metrics.get('eval_avg_reward', 0.0):.2f} | "
             f"EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f} "
             f"(Best={epoch_metrics.get('eval_quality_best_so_far', 0.0):.3f}) | "
+            f"EvalActorHit={epoch_metrics.get('eval_actor_hit_rate', 0.0):.1f}% | "
+            f"EvalFallback={epoch_metrics.get('eval_fallback_count', 0)} | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
             f"AlgP95={epoch_metrics.get('p95_algorithm_latency_ms', 0.0):.2f}ms | "
             f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"

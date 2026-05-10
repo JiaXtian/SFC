@@ -10,7 +10,12 @@ from torch.distributions import Categorical
 class ActorNetwork(nn.Module):
     def __init__(self, node_dim=192, vnf_dim=24, context_dim=32, hidden_dim=384):
         super().__init__()
-        combined_dim = node_dim + vnf_dim + context_dim
+        # Candidate order is produced by the heuristic pruner and carries
+        # dynamic resource/path information that is not present in the static
+        # GNN embedding.  Encoding rank keeps the ONNX input signature stable
+        # while making the hybrid "heuristic pruning + DRL" policy learnable.
+        self.rank_feature_dim = 4
+        combined_dim = node_dim + vnf_dim + context_dim + self.rank_feature_dim
         self.fc = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -29,7 +34,14 @@ class ActorNetwork(nn.Module):
 
         vnf_expanded = vnf_features.unsqueeze(0).expand(m, -1)
         context_expanded = context_features.unsqueeze(0).expand(m, -1)
-        combined = torch.cat([candidate_embs, vnf_expanded, context_expanded], dim=1)
+        rank = torch.arange(m, device=node_emb.device, dtype=candidate_embs.dtype)
+        denom = torch.clamp(torch.tensor(float(max(m - 1, 1)), device=node_emb.device, dtype=candidate_embs.dtype), min=1.0)
+        rank_norm = rank / denom
+        rank_inv = 1.0 - rank_norm
+        rank_decay = 1.0 / (rank + 1.0)
+        top_band = (rank < 8.0).to(candidate_embs.dtype)
+        rank_features = torch.stack([rank_norm, rank_inv, rank_decay, top_band], dim=1)
+        combined = torch.cat([candidate_embs, vnf_expanded, context_expanded, rank_features], dim=1)
 
         logits = self.fc(combined).squeeze(-1)
         probs = F.softmax(logits, dim=0)
@@ -66,7 +78,7 @@ class DRLAgent:
         critic_lr=3e-4,
         gamma=0.99,
         entropy_coef=0.01,
-        imitation_coef=0.04,
+        imitation_coef=0.20,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         device="cpu",
