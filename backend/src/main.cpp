@@ -283,7 +283,96 @@ sfc::DeploymentCandidate candidate_from_deployment_record(const nlohmann::json& 
         candidate.deployed_nodes.assign(node_set.begin(), node_set.end());
         std::sort(candidate.deployed_nodes.begin(), candidate.deployed_nodes.end());
     }
+
+    const auto links = dep.contains("link_details") && dep["link_details"].is_array()
+        ? dep["link_details"] : nlohmann::json::array();
+    for (const auto& item : links) {
+        if (!item.is_object()) continue;
+        sfc::DeploymentCandidate::LinkDetail ld{};
+        ld.src = item.value("src", std::string(""));
+        ld.dst = item.value("dst", std::string(""));
+        ld.dependency_source_nf = item.value("dependency_source_nf", std::string(""));
+        ld.dependency_target_nf = item.value("dependency_target_nf", std::string(""));
+        ld.latency_ms = item.value("latency_ms", 0.0);
+        ld.bandwidth_gbps = item.value("bandwidth_gbps", 0.0);
+        ld.bandwidth_available_gbps = item.value("bandwidth_available_gbps", ld.bandwidth_gbps);
+        ld.bandwidth_required_gbps = item.value("bandwidth_required_gbps", 0.0);
+        ld.status = item.value("status", std::string("active"));
+        ld.reliability = item.value("reliability", 0.999);
+        if (!ld.src.empty() && !ld.dst.empty()) {
+            candidate.link_details.push_back(ld);
+        }
+    }
     return candidate;
+}
+
+sfc::SFCRequest request_from_deployment_record(const nlohmann::json& dep, const sfc::DeploymentCandidate& candidate) {
+    sfc::SFCRequest request{};
+    request.request_id = dep.value("request_id", dep.value("deployment_id", std::string("")));
+    request.service_type = dep.value("service_type", std::string("open5gs_core"));
+    request.network_domain = dep.value("network_domain", std::string("open5gs"));
+    request.optimize = dep.value("optimize", std::string("latency"));
+    request.topk = 1;
+    request.realtime_mode = true;
+    request.max_planning_attempts = 20;
+    request.planning_time_budget_ms = 450.0;
+    request.source_node = dep.value("source_node", std::string(""));
+    request.destination_node = dep.value("destination_node", std::string(""));
+    request.constraints.max_latency_ms = 150.0;
+    request.constraints.registration_latency_ms = 120.0;
+    request.constraints.registration_access_latency_ms = 8.0;
+    request.constraints.pdu_session_latency_ms = 100.0;
+    request.constraints.pdu_access_latency_ms = 10.0;
+    request.constraints.min_bandwidth_gbps = 0.5;
+    request.constraints.min_reliability = 0.95;
+
+    if (dep.contains("score_constraints") && dep["score_constraints"].is_object()) {
+        const auto& c = dep["score_constraints"];
+        request.constraints.max_latency_ms = c.value("max_latency_ms", request.constraints.max_latency_ms);
+        request.constraints.registration_latency_ms = c.value("registration_latency_ms", request.constraints.registration_latency_ms);
+        request.constraints.registration_access_latency_ms = c.value("registration_access_latency_ms", request.constraints.registration_access_latency_ms);
+        request.constraints.pdu_session_latency_ms = c.value("pdu_session_latency_ms", request.constraints.pdu_session_latency_ms);
+        request.constraints.pdu_access_latency_ms = c.value("pdu_access_latency_ms", request.constraints.pdu_access_latency_ms);
+        request.constraints.min_bandwidth_gbps = c.value("min_bandwidth_gbps", request.constraints.min_bandwidth_gbps);
+        request.constraints.min_reliability = c.value("min_reliability", request.constraints.min_reliability);
+    }
+
+    request.vnfs.reserve(candidate.per_vnf.size());
+    for (const auto& pv : candidate.per_vnf) {
+        sfc::VNF vnf{};
+        vnf.name = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+        if (vnf.name.empty()) vnf.name = pv.nf_type;
+        vnf.nf_type = pv.nf_type.empty() ? vnf.name : pv.nf_type;
+        vnf.nf_role = pv.nf_role.empty() ? "control_plane" : pv.nf_role;
+        vnf.resource_profile = "standard";
+        vnf.processing_weight = 1.0;
+        vnf.stateful = true;
+        vnf.cpu = std::max(0.0, pv.cpu_used);
+        vnf.mem = std::max(0.0, pv.mem_used);
+        vnf.disk = std::max(0.0, pv.disk_used);
+        if (vnf.disk <= 1e-9 && vnf.mem > 1e-9) vnf.disk = vnf.mem * 2.0;
+        vnf.bw_in = request.constraints.min_bandwidth_gbps;
+        vnf.bw_out = request.constraints.min_bandwidth_gbps;
+        request.vnfs.push_back(vnf);
+    }
+
+    if (dep.contains("core_nf_dependencies") && dep["core_nf_dependencies"].is_array()) {
+        for (const auto& item : dep["core_nf_dependencies"]) {
+            if (!item.is_object()) continue;
+            sfc::CoreNFDependency edge{};
+            edge.source = item.value("source", item.value("src", std::string("")));
+            edge.target = item.value("target", item.value("dst", std::string("")));
+            edge.criticality = item.value("criticality", 1.0);
+            edge.bandwidth_scale = item.value("bandwidth_scale", 0.5);
+            edge.latency_weight = item.value("latency_weight", 1.0);
+            edge.reliability_weight = item.value("reliability_weight", 1.0);
+            edge.bandwidth_required_gbps = item.value("bandwidth_required_gbps", 0.0);
+            if (!edge.source.empty() && !edge.target.empty()) {
+                request.core_nf_dependencies.push_back(edge);
+            }
+        }
+    }
+    return request;
 }
 
 int restore_active_deployments_after_boot() {
@@ -304,6 +393,10 @@ int restore_active_deployments_after_boot() {
 
         const auto candidate = candidate_from_deployment_record(dep);
         if (candidate.deployed_nodes.empty() || candidate.per_vnf.empty()) continue;
+        const auto request = request_from_deployment_record(dep, candidate);
+        if (sfc::g_res_mgr) {
+            sfc::g_res_mgr->restore_allocation_snapshot(deployment_id, candidate, request.vnfs);
+        }
 
         const std::string request_id = dep.value(
             "request_id",
@@ -317,6 +410,15 @@ int restore_active_deployments_after_boot() {
             "bootstrap_restore",
             "system_restart_restore"
         );
+        if (sfc::g_dynamic_inference && !request.vnfs.empty()) {
+            (void)sfc::g_dynamic_inference->start_session(
+                request,
+                dep.value("auto_redeploy", true),
+                &candidate,
+                deployment_id,
+                dep.value("inference_latency_ms", 0.0)
+            );
+        }
         queued += 1;
     }
     return queued;
@@ -675,6 +777,18 @@ int main() {
             {Post}
         );
 
+        if (restored_topology) {
+            const int restored_deployments = restore_active_deployments_after_boot();
+            if (restored_deployments > 0) {
+                spdlog::info(
+                    "Queued {} persisted deployment(s) for runtime restore after restart",
+                    restored_deployments
+                );
+            } else {
+                spdlog::info("No active persisted deployments to restore at startup");
+            }
+        }
+
         if (restored_topology && boot_sim_should_run) {
             const bool started = sfc::g_dynamic_sim->start(
                 boot_sampling_interval_sec,
@@ -695,18 +809,6 @@ int main() {
                 boot_sampling_interval_sec,
                 boot_simulation_speed
             );
-        }
-
-        if (restored_topology) {
-            const int restored_deployments = restore_active_deployments_after_boot();
-            if (restored_deployments > 0) {
-                spdlog::info(
-                    "Queued {} persisted deployment(s) for runtime restore after restart",
-                    restored_deployments
-                );
-            } else {
-                spdlog::info("No active persisted deployments to restore at startup");
-            }
         }
         
         spdlog::info("Server configured:");

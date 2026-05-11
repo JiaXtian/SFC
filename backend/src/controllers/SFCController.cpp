@@ -26,6 +26,42 @@ static std::vector<nlohmann::json> g_deployments;
 static std::mutex g_deployments_mutex;
 void persist_deployments_locked();
 
+std::string format_core_label(int seq) {
+    std::ostringstream oss;
+    oss << "CORE-";
+    if (seq < 10) oss << "0";
+    oss << std::max(1, seq);
+    return oss.str();
+}
+
+std::string extract_core_label(const std::string& raw) {
+    const std::string upper = [&]() {
+        std::string out = raw;
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::toupper(c));
+        });
+        return out;
+    }();
+    const std::string prefix = "CORE-";
+    if (upper.rfind(prefix, 0) != 0) return "";
+    size_t i = prefix.size();
+    while (i < upper.size() && std::isdigit(static_cast<unsigned char>(upper[i]))) i += 1;
+    if (i != upper.size() || i == prefix.size()) return "";
+    int seq = 0;
+    try {
+        seq = std::stoi(upper.substr(prefix.size()));
+    } catch (...) {
+        return "";
+    }
+    return format_core_label(seq);
+}
+
+std::string stable_core_network_id(const std::string& deployment_id, const std::string& request_id) {
+    if (!deployment_id.empty()) return "core-" + deployment_id;
+    if (!request_id.empty()) return "core-" + request_id;
+    return "core-unknown";
+}
+
 void sync_deployments_from_db_locked() {
     if (!g_runtime_state_service) return;
     nlohmann::json stored = g_runtime_state_service->load_deployments_json();
@@ -38,6 +74,20 @@ void sync_deployments_from_db_locked() {
         if (!item.contains("strategy_mode")) {
             item["strategy_mode"] = "single_request";
             normalized = true;
+        }
+        if (!item.contains("core_network_id") || item.value("core_network_id", std::string("")).empty()) {
+            item["core_network_id"] = stable_core_network_id(
+                item.value("deployment_id", std::string("")),
+                item.value("request_id", std::string(""))
+            );
+            normalized = true;
+        }
+        if (!item.contains("core_network_label") || item.value("core_network_label", std::string("")).empty()) {
+            const std::string label = extract_core_label(item.value("sfc_name", std::string("")));
+            if (!label.empty()) {
+                item["core_network_label"] = label;
+                normalized = true;
+            }
         }
         if (!item.contains("custom_nf_bindings")) {
             item["custom_nf_bindings"] = nlohmann::json::array();
@@ -1320,6 +1370,18 @@ void SFCController::deploy(
         dep_json["deployment_id"] = deployment_id;
         dep_json["backend_deployment_id"] = deployment_id;
         dep_json["request_id"] = request_id;
+        const std::string incoming_core_id = (*json).get("core_network_id", "").asString();
+        const std::string incoming_core_label = (*json).get("core_network_label", "").asString();
+        const std::string incoming_sfc_name = (*json).get("sfc_name", request_id).asString();
+        const std::string core_label = !extract_core_label(incoming_core_label).empty()
+            ? extract_core_label(incoming_core_label)
+            : extract_core_label(incoming_sfc_name);
+        dep_json["core_network_id"] = incoming_core_id.empty()
+            ? stable_core_network_id(deployment_id, request_id)
+            : incoming_core_id;
+        if (!core_label.empty()) {
+            dep_json["core_network_label"] = core_label;
+        }
         dep_json["candidate_index"] = (*json).get("candidate_index", 0).asInt();
         dep_json["status"] = "completed";
         dep_json["progress"] = 100;
@@ -1331,7 +1393,7 @@ void SFCController::deploy(
         dep_json["estimated_reliability"] = candidate.estimated_reliability;
         dep_json["strategy_mode"] = "single_request";
         dep_json["custom_nf_bindings"] = nlohmann::json::array();
-        dep_json["sfc_name"] = (*json).get("sfc_name", request_id).asString();
+        dep_json["sfc_name"] = !core_label.empty() ? core_label : incoming_sfc_name;
         dep_json["source_node"] = (*json).get("source_node", "").asString();
         dep_json["destination_node"] = (*json).get("destination_node", "").asString();
         dep_json["inference_latency_ms"] = (*json).get("inference_latency_ms", 0.0).asDouble();
@@ -1487,9 +1549,67 @@ void SFCController::deploy(
                 "manual_deploy"
             );
         }
+
+        if (g_dynamic_inference && !vnfs.empty()) {
+            SFCRequest runtime_request;
+            runtime_request.request_id = request_id;
+            runtime_request.service_type = "open5gs_core";
+            runtime_request.network_domain = "open5gs";
+            runtime_request.priority = "medium";
+            runtime_request.optimize = "latency";
+            runtime_request.vnfs = vnfs;
+            runtime_request.topk = 1;
+            runtime_request.realtime_mode = true;
+            runtime_request.max_planning_attempts = 20;
+            runtime_request.planning_time_budget_ms = 450.0;
+            runtime_request.source_node = dep_json.value("source_node", std::string(""));
+            runtime_request.destination_node = dep_json.value("destination_node", std::string(""));
+            runtime_request.constraints.max_latency_ms = 150.0;
+            runtime_request.constraints.registration_latency_ms = 120.0;
+            runtime_request.constraints.registration_access_latency_ms = 8.0;
+            runtime_request.constraints.pdu_session_latency_ms = 100.0;
+            runtime_request.constraints.pdu_access_latency_ms = 10.0;
+            runtime_request.constraints.min_bandwidth_gbps = 0.5;
+            runtime_request.constraints.min_reliability = 0.95;
+            if (dep_json.contains("score_constraints") && dep_json["score_constraints"].is_object()) {
+                const auto& c = dep_json["score_constraints"];
+                runtime_request.constraints.max_latency_ms = c.value("max_latency_ms", runtime_request.constraints.max_latency_ms);
+                runtime_request.constraints.registration_latency_ms = c.value("registration_latency_ms", runtime_request.constraints.registration_latency_ms);
+                runtime_request.constraints.registration_access_latency_ms = c.value("registration_access_latency_ms", runtime_request.constraints.registration_access_latency_ms);
+                runtime_request.constraints.pdu_session_latency_ms = c.value("pdu_session_latency_ms", runtime_request.constraints.pdu_session_latency_ms);
+                runtime_request.constraints.pdu_access_latency_ms = c.value("pdu_access_latency_ms", runtime_request.constraints.pdu_access_latency_ms);
+                runtime_request.constraints.min_bandwidth_gbps = c.value("min_bandwidth_gbps", runtime_request.constraints.min_bandwidth_gbps);
+                runtime_request.constraints.min_reliability = c.value("min_reliability", runtime_request.constraints.min_reliability);
+            }
+            if (dep_json.contains("core_nf_dependencies") && dep_json["core_nf_dependencies"].is_array()) {
+                for (const auto& item : dep_json["core_nf_dependencies"]) {
+                    if (!item.is_object()) continue;
+                    CoreNFDependency edge;
+                    edge.source = item.value("source", item.value("src", std::string("")));
+                    edge.target = item.value("target", item.value("dst", std::string("")));
+                    edge.criticality = item.value("criticality", 1.0);
+                    edge.bandwidth_scale = item.value("bandwidth_scale", 0.5);
+                    edge.latency_weight = item.value("latency_weight", 1.0);
+                    edge.reliability_weight = item.value("reliability_weight", 1.0);
+                    edge.bandwidth_required_gbps = item.value("bandwidth_required_gbps", 0.0);
+                    if (!edge.source.empty() && !edge.target.empty()) {
+                        runtime_request.core_nf_dependencies.push_back(edge);
+                    }
+                }
+            }
+            (void)g_dynamic_inference->start_session(
+                runtime_request,
+                true,
+                &candidate,
+                deployment_id,
+                dep_json.value("inference_latency_ms", 0.0)
+            );
+        }
         
         Json::Value response;
         response["deployment_id"] = deployment_id;
+        response["core_network_id"] = dep_json.value("core_network_id", std::string(""));
+        response["core_network_label"] = dep_json.value("core_network_label", std::string(""));
         response["status"] = "completed";
         response["message"] = "Deployment successful";
 
@@ -1497,6 +1617,9 @@ void SFCController::deploy(
             {"type", "deployment_update"},
             {"deployment_id", deployment_id},
             {"request_id", request_id},
+            {"core_network_id", dep_json.value("core_network_id", std::string(""))},
+            {"core_network_label", dep_json.value("core_network_label", std::string(""))},
+            {"sfc_name", dep_json.value("sfc_name", std::string(""))},
             {"status", "completed"},
             {"progress", 100},
             {"topology_version", updated_topology.metadata.topology_version},
@@ -1511,6 +1634,9 @@ void SFCController::deploy(
             {"detail", "deployment_id=" + deployment_id + ", request_id=" + request_id},
             {"deployment_id", deployment_id},
             {"request_id", request_id},
+            {"core_network_id", dep_json.value("core_network_id", std::string(""))},
+            {"core_network_label", dep_json.value("core_network_label", std::string(""))},
+            {"sfc_name", dep_json.value("sfc_name", std::string(""))},
             {"topology_version", updated_topology.metadata.topology_version}
         });
         
@@ -1560,6 +1686,10 @@ void SFCController::rollback(
         ids_to_release_set.insert(deployment_id);
         std::vector<nlohmann::json> matched_records_for_fallback;
         std::unordered_map<std::string, std::unordered_set<std::string>> rollback_nodes_by_dep;
+        std::string rollback_core_network_id;
+        std::string rollback_core_network_label;
+        std::string rollback_request_id;
+        std::string rollback_sfc_name;
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
             sync_deployments_from_db_locked();
@@ -1570,6 +1700,18 @@ void SFCController::rollback(
                     if (!dep_id.empty()) ids_to_release_set.insert(dep_id);
                     if (!backend_dep_id.empty()) ids_to_release_set.insert(backend_dep_id);
                     matched_records_for_fallback.push_back(dep);
+                    if (rollback_core_network_id.empty()) {
+                        rollback_core_network_id = dep.value("core_network_id", "");
+                    }
+                    if (rollback_core_network_label.empty()) {
+                        rollback_core_network_label = dep.value("core_network_label", "");
+                    }
+                    if (rollback_request_id.empty()) {
+                        rollback_request_id = dep.value("request_id", "");
+                    }
+                    if (rollback_sfc_name.empty()) {
+                        rollback_sfc_name = dep.value("sfc_name", "");
+                    }
 
                     auto collect_nodes = [&](const std::string& key) {
                         if (key.empty()) return;
@@ -1610,6 +1752,17 @@ void SFCController::rollback(
 
         bool released_any = false;
         std::vector<std::string> released_resource_ids;
+        if (g_dynamic_inference) {
+            for (const auto& id : ids_to_release) {
+                if (id.empty()) continue;
+                const auto dyn_released = g_dynamic_inference->stop_sessions_for_deployment(id, rollback_request_id);
+                for (const auto& rid : dyn_released) {
+                    released_any = true;
+                    released_resource_ids.push_back(rid);
+                    ids_to_release_set.insert(rid);
+                }
+            }
+        }
         for (const auto& id : ids_to_release) {
             if (id.empty()) continue;
             if (g_res_mgr->release_resources(id)) {
@@ -1737,6 +1890,10 @@ void SFCController::rollback(
         response["removed_record"] = removed_record;
         response["runtime_cleaned"] = orchestrator_rollback_any;
         response["requested_deployment_id"] = deployment_id;
+        response["request_id"] = rollback_request_id;
+        response["core_network_id"] = rollback_core_network_id;
+        response["core_network_label"] = rollback_core_network_label;
+        response["sfc_name"] = rollback_sfc_name;
         Json::Value removed_ids_json(Json::arrayValue);
         for (const auto& rid : removed_deployment_ids) removed_ids_json.append(rid);
         response["removed_deployment_ids"] = removed_ids_json;
@@ -1751,6 +1908,10 @@ void SFCController::rollback(
         nlohmann::json evt = {
             {"type", "deployment_update"},
             {"deployment_id", deployment_id},
+            {"request_id", rollback_request_id},
+            {"core_network_id", rollback_core_network_id},
+            {"core_network_label", rollback_core_network_label},
+            {"sfc_name", rollback_sfc_name},
             {"status", success ? "rolled_back" : "rollback_failed"},
             {"progress", success ? 100 : 0},
             {"removed_deployment_ids", removed_deployment_ids},
@@ -1767,7 +1928,11 @@ void SFCController::rollback(
             {"title", success ? "核心网回滚完成" : "核心网回滚失败"},
             {"message", success ? "Deployment rollback completed" : "Deployment rollback failed"},
             {"detail", "deployment_id=" + deployment_id},
-            {"deployment_id", deployment_id}
+            {"deployment_id", deployment_id},
+            {"request_id", rollback_request_id},
+            {"core_network_id", rollback_core_network_id},
+            {"core_network_label", rollback_core_network_label},
+            {"sfc_name", rollback_sfc_name}
         });
         if (has_updated_topology) {
             WSHandler::broadcast_json({

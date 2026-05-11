@@ -1,5 +1,7 @@
 #include "controllers/UERANSIMController.h"
 #include "controllers/SFCController.h"
+#include "services/AuthGlobals.h"
+#include "services/DeploymentOrchestratorService.h"
 #include "utils/json_converter.h"
 
 #include <nlohmann/json.hpp>
@@ -56,6 +58,7 @@ struct ValidationStep {
 struct ValidationJob {
     std::string job_id;
     std::string deployment_id;
+    std::string mode = "smoke";
     std::string status = "queued";
     int progress = 0;
     std::string message;
@@ -72,9 +75,18 @@ struct ValidationJob {
     bool data_plane_verified = false;
     json deployment;
     json containers = json::array();
+    json reschedule_report = json::object();
     std::vector<ValidationStep> steps;
     std::vector<UEStatus> ues;
     std::vector<std::string> logs;
+};
+
+struct RuntimeHealth {
+    int containers_total = 0;
+    int containers_running = 0;
+    int core_nfs_total = 0;
+    int core_nfs_running = 0;
+    bool ready = false;
 };
 
 std::mutex g_jobs_mutex;
@@ -110,9 +122,31 @@ std::string shell_quote(const std::string& s) {
     return out;
 }
 
-std::string lower_copy(std::string s) {
-    for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return s;
+std::string normalize_nf_token(std::string raw) {
+    raw = trim_copy(raw);
+    std::string out;
+    out.reserve(raw.size());
+    bool sep = false;
+    for (char ch : raw) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c)) {
+            out.push_back(static_cast<char>(std::tolower(c)));
+            sep = false;
+        } else if (!sep && !out.empty()) {
+            out.push_back('_');
+            sep = true;
+        }
+    }
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    if (out.rfind("open5gs_", 0) == 0) out = out.substr(std::string("open5gs_").size());
+    if (out.size() > 1 && out.back() == 'd') {
+        const std::string maybe_nf = out.substr(0, out.size() - 1);
+        static const std::unordered_set<std::string> known = {
+            "nrf", "amf", "smf", "upf", "ausf", "udm", "udr", "pcf", "nssf", "scp", "bsf", "sepp"
+        };
+        if (known.count(maybe_nf)) out = maybe_nf;
+    }
+    return out;
 }
 
 std::string normalize_token(const std::string& raw) {
@@ -149,6 +183,12 @@ std::string hex_encode(const std::string& raw) {
         out.push_back(kHex[ch & 0xf]);
     }
     return out;
+}
+
+int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
 }
 
 CommandResult run_cmd(const std::string& cmd) {
@@ -226,7 +266,7 @@ void set_step(const std::shared_ptr<ValidationJob>& job, const std::string& key,
 }
 
 std::string nf_daemon(const std::string& raw) {
-    const std::string nf = lower_copy(raw);
+    const std::string nf = normalize_nf_token(raw);
     if (nf == "nrf") return "open5gs-nrfd";
     if (nf == "amf") return "open5gs-amfd";
     if (nf == "smf") return "open5gs-smfd";
@@ -238,6 +278,7 @@ std::string nf_daemon(const std::string& raw) {
     if (nf == "nssf") return "open5gs-nssfd";
     if (nf == "scp") return "open5gs-scpd";
     if (nf == "bsf") return "open5gs-bsfd";
+    if (nf == "sepp") return "open5gs-seppd";
     return "open5gs-" + nf + "d";
 }
 
@@ -328,31 +369,131 @@ std::string find_container_for_node(const std::string& deployment_id, const std:
 }
 
 json per_nf_array(const json& dep) {
-    if (dep.contains("per_vnf") && dep["per_vnf"].is_array()) return dep["per_vnf"];
-    if (dep.contains("per_core_nf") && dep["per_core_nf"].is_array()) return dep["per_core_nf"];
+    auto pick = [](const json& obj, const std::string& key) -> std::optional<json> {
+        if (obj.contains(key) && obj[key].is_array() && !obj[key].empty()) return obj[key];
+        return std::nullopt;
+    };
+    for (const auto& key : {"per_core_nf", "per_vnf", "core_nfs", "vnfs"}) {
+        if (auto arr = pick(dep, key)) return *arr;
+    }
+    if (dep.contains("candidate") && dep["candidate"].is_object()) {
+        const auto& c = dep["candidate"];
+        for (const auto& key : {"per_core_nf", "per_vnf", "core_nfs", "vnfs"}) {
+            if (auto arr = pick(c, key)) return *arr;
+        }
+    }
+    if (dep.contains("decision_process") && dep["decision_process"].is_object()) {
+        const auto& d = dep["decision_process"];
+        for (const auto& key : {"per_core_nf", "per_vnf", "core_nfs", "vnfs"}) {
+            if (auto arr = pick(d, key)) return *arr;
+        }
+    }
     return json::array();
 }
 
 std::string json_string_any(const json& j, const std::vector<std::string>& keys) {
     for (const auto& key : keys) {
         if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
+        if (j.contains(key) && j[key].is_number_integer()) return std::to_string(j[key].get<int64_t>());
+        if (j.contains(key) && j[key].is_number_unsigned()) return std::to_string(j[key].get<uint64_t>());
     }
     return "";
 }
 
+std::vector<std::string> sorted_strings(std::vector<std::string> values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return values;
+}
+
+std::vector<std::string> deployed_nodes_from_dep(const json& dep) {
+    std::vector<std::string> nodes;
+    if (dep.contains("deployed_nodes") && dep["deployed_nodes"].is_array()) {
+        for (const auto& n : dep["deployed_nodes"]) {
+            if (n.is_string()) nodes.push_back(n.get<std::string>());
+        }
+    }
+    for (const auto& nf : per_nf_array(dep)) {
+        const std::string node = json_string_any(nf, {"node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"});
+        if (!node.empty()) nodes.push_back(node);
+    }
+    nodes = sorted_strings(std::move(nodes));
+    return nodes;
+}
+
+std::unordered_map<std::string, DeploymentOrchestratorService::NodeRuntimeSnapshot> runtime_snapshot_by_node() {
+    if (!g_deployment_orchestrator) return {};
+    return g_deployment_orchestrator->snapshot_node_runtime();
+}
+
+bool runtime_has_nf(const DeploymentOrchestratorService::NodeRuntimeSnapshot& snap, const std::string& nf_type) {
+    const std::string wanted = normalize_nf_token(nf_type);
+    for (const auto& nf : snap.running_core_nf_types) {
+        if (normalize_nf_token(nf) == wanted) return true;
+    }
+    return false;
+}
+
+json infer_nf_array_from_runtime(
+    const json& dep,
+    const std::unordered_map<std::string, DeploymentOrchestratorService::NodeRuntimeSnapshot>& runtime
+) {
+    json inferred = json::array();
+    for (const auto& node : deployed_nodes_from_dep(dep)) {
+        auto it = runtime.find(node);
+        if (it == runtime.end() || !it->second.deployed) continue;
+        for (const auto& nf : it->second.running_core_nf_types) {
+            const std::string nf_type = normalize_nf_token(nf);
+            if (nf_type.empty()) continue;
+            inferred.push_back({{"nf_type", nf_type}, {"node", node}});
+        }
+    }
+    return inferred;
+}
+
 json collect_deployment_runtime(const json& dep) {
     const std::string dep_id = dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")));
+    const auto runtime = runtime_snapshot_by_node();
+    json per_nfs = per_nf_array(dep);
+    if (per_nfs.empty()) per_nfs = infer_nf_array_from_runtime(dep, runtime);
     json containers = json::array();
-    for (const auto& nf : per_nf_array(dep)) {
-        const std::string nf_type = lower_copy(json_string_any(nf, {"nf_type", "core_nf", "vnf"}));
-        const std::string node = json_string_any(nf, {"node", "node_id", "satellite"});
+    for (const auto& nf : per_nfs) {
+        const std::string nf_type = normalize_nf_token(json_string_any(nf, {
+            "nf_type", "core_nf_type", "vnf_type", "core_nf", "vnf", "name", "type", "core_nf_id", "vnf_id"
+        }));
+        if (nf_type.empty()) continue;
+        std::string node = json_string_any(nf, {
+            "node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"
+        });
+        if (node.empty() && nf_type.size() > 0) {
+            std::string unique_node;
+            int matches = 0;
+            for (const auto& candidate_node : deployed_nodes_from_dep(dep)) {
+                auto it = runtime.find(candidate_node);
+                if (it != runtime.end() && it->second.deployed && runtime_has_nf(it->second, nf_type)) {
+                    unique_node = candidate_node;
+                    matches += 1;
+                }
+            }
+            if (matches == 1) node = unique_node;
+        }
         const std::string daemon = nf_daemon(nf_type);
-        std::string container = find_container_for_node(dep_id, node);
-        bool daemon_ok = process_running_in_container(container, daemon);
+        auto rt_it = runtime.find(node);
+        const bool runtime_running = rt_it != runtime.end() && rt_it->second.deployed && rt_it->second.container_state == "running";
+        const bool runtime_nf_ok = rt_it != runtime.end() && runtime_has_nf(rt_it->second, nf_type);
+        std::string container = rt_it != runtime.end() ? rt_it->second.container_name : "";
+        bool container_running = is_container_running(container);
+        if (container.empty() || (!container_running && !runtime_running)) {
+            container = find_container_for_node(dep_id, node);
+            container_running = is_container_running(container);
+        }
+        bool daemon_ok = container_running && process_running_in_container(container, daemon);
+        if (!daemon_ok && runtime_nf_ok && container.empty()) daemon_ok = true;
         if (!daemon_ok) {
             const std::string fallback = find_container_by_daemon(daemon);
             if (!fallback.empty()) {
                 container = fallback;
+                container_running = is_container_running(container);
                 daemon_ok = true;
             }
         }
@@ -361,12 +502,194 @@ json collect_deployment_runtime(const json& dep) {
             {"node", node},
             {"daemon", daemon},
             {"container", container},
-            {"running", is_container_running(container)},
+            {"running", container_running || (container.empty() && runtime_running)},
             {"daemon_running", daemon_ok},
-            {"ip", container_ip_on_network(container)}
+            {"ip", container_ip_on_network(container)},
+            {"source", runtime_nf_ok ? "orchestrator_runtime" : "docker_probe"}
         });
     }
     return containers;
+}
+
+RuntimeHealth summarize_runtime_health(const json& runtime) {
+    RuntimeHealth health;
+    if (!runtime.is_array()) return health;
+
+    std::unordered_set<std::string> containers;
+    std::unordered_set<std::string> running_containers;
+    for (const auto& item : runtime) {
+        const std::string container = item.value("container", std::string(""));
+        if (!container.empty()) {
+            containers.insert(container);
+            if (item.value("running", false)) running_containers.insert(container);
+        }
+        health.core_nfs_total += 1;
+        if (item.value("daemon_running", false)) health.core_nfs_running += 1;
+    }
+
+    health.containers_total = static_cast<int>(containers.size());
+    health.containers_running = static_cast<int>(running_containers.size());
+    health.ready =
+        health.containers_total > 0 &&
+        health.core_nfs_total > 0 &&
+        health.containers_running == health.containers_total &&
+        health.core_nfs_running == health.core_nfs_total;
+    return health;
+}
+
+bool deployment_effectively_ready(const json& dep, const json& runtime) {
+    const RuntimeHealth health = summarize_runtime_health(runtime);
+    const int containers_running = dep.value("containers_running", 0);
+    const int containers_total = dep.value("containers_total", 0);
+    const int core_nfs_running = dep.value("core_nfs_running", 0);
+    const int core_nfs_total = dep.value("core_nfs_total", 0);
+    const bool persisted_ready =
+        dep.value("service_ready", false) &&
+        dep.value("ready_for_ueransim", false) &&
+        containers_total > 0 &&
+        core_nfs_total > 0 &&
+        containers_running == containers_total &&
+        core_nfs_running == core_nfs_total;
+    return persisted_ready || health.ready;
+}
+
+json deployment_runtime_summary(const json& dep) {
+    return {
+        {"deployment_id", dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")))},
+        {"sfc_name", dep.value("sfc_name", dep.value("name", std::string("")))},
+        {"orchestration_phase", dep.value("orchestration_phase", std::string(""))},
+        {"service_ready", dep.value("service_ready", false)},
+        {"ready_for_ueransim", dep.value("ready_for_ueransim", false)},
+        {"containers_running", dep.value("containers_running", 0)},
+        {"containers_total", dep.value("containers_total", 0)},
+        {"core_nfs_running", dep.value("core_nfs_running", 0)},
+        {"core_nfs_total", dep.value("core_nfs_total", 0)},
+        {"last_error", dep.value("last_error", std::string(""))},
+        {"last_update_at", dep.value("last_update_at", dep.value("deployed_at", std::string("")))}
+    };
+}
+
+std::string deployment_nf_signature(const json& dep) {
+    std::vector<std::string> parts;
+    for (const auto& nf : per_nf_array(dep)) {
+        const std::string nf_type = normalize_nf_token(json_string_any(nf, {
+            "nf_type", "core_nf_type", "vnf_type", "core_nf", "vnf", "name", "type", "core_nf_id", "vnf_id"
+        }));
+        const std::string node = json_string_any(nf, {
+            "node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"
+        });
+        if (!nf_type.empty()) parts.push_back(nf_type + "@" + node);
+    }
+    parts = sorted_strings(std::move(parts));
+    std::ostringstream oss;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) oss << ",";
+        oss << parts[i];
+    }
+    return oss.str();
+}
+
+std::string deployment_nodes_signature(const json& dep) {
+    std::vector<std::string> nodes;
+    if (dep.contains("deployed_nodes") && dep["deployed_nodes"].is_array()) {
+        for (const auto& node : dep["deployed_nodes"]) {
+            if (node.is_string()) nodes.push_back(node.get<std::string>());
+        }
+    }
+    nodes = sorted_strings(std::move(nodes));
+    std::ostringstream oss;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (i) oss << ",";
+        oss << nodes[i];
+    }
+    return oss.str();
+}
+
+json build_reschedule_diff(const json& before, const json& after, const json& fault_runtime) {
+    std::unordered_map<std::string, json> before_by_nf;
+    std::unordered_map<std::string, json> after_by_nf;
+    for (const auto& nf : per_nf_array(before)) {
+        const std::string nf_type = normalize_nf_token(json_string_any(nf, {
+            "nf_type", "core_nf_type", "vnf_type", "core_nf", "vnf", "name", "type", "core_nf_id", "vnf_id"
+        }));
+        if (!nf_type.empty()) before_by_nf[nf_type] = nf;
+    }
+    for (const auto& nf : per_nf_array(after)) {
+        const std::string nf_type = normalize_nf_token(json_string_any(nf, {
+            "nf_type", "core_nf_type", "vnf_type", "core_nf", "vnf", "name", "type", "core_nf_id", "vnf_id"
+        }));
+        if (!nf_type.empty()) after_by_nf[nf_type] = nf;
+    }
+
+    json moves = json::array();
+    int moved_count = 0;
+    int total_count = 0;
+    const std::string before_dep_id = before.value("deployment_id", before.value("backend_deployment_id", std::string("")));
+    const std::string after_dep_id = after.value("deployment_id", after.value("backend_deployment_id", std::string("")));
+    for (const auto& kv : before_by_nf) {
+        const std::string nf_type = kv.first;
+        const std::string from_node = json_string_any(kv.second, {
+            "node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"
+        });
+        const auto it = after_by_nf.find(nf_type);
+        const std::string to_node = it == after_by_nf.end() ? "" : json_string_any(it->second, {
+            "node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"
+        });
+        const bool moved = !to_node.empty() && from_node != to_node;
+        if (moved) ++moved_count;
+        ++total_count;
+        moves.push_back({
+            {"nf_type", nf_type},
+            {"from_node", from_node},
+            {"to_node", to_node},
+            {"status", moved ? "moved" : (to_node.empty() ? "missing_after" : "unchanged")},
+            {"from_container", node_container_name(before_dep_id, from_node)},
+            {"to_container", to_node.empty() ? "" : node_container_name(after_dep_id, to_node)}
+        });
+    }
+
+    std::vector<std::string> before_nodes_vec;
+    std::vector<std::string> after_nodes_vec;
+    if (before.contains("deployed_nodes") && before["deployed_nodes"].is_array()) {
+        for (const auto& node : before["deployed_nodes"]) if (node.is_string()) before_nodes_vec.push_back(node.get<std::string>());
+    }
+    if (after.contains("deployed_nodes") && after["deployed_nodes"].is_array()) {
+        for (const auto& node : after["deployed_nodes"]) if (node.is_string()) after_nodes_vec.push_back(node.get<std::string>());
+    }
+    before_nodes_vec = sorted_strings(std::move(before_nodes_vec));
+    after_nodes_vec = sorted_strings(std::move(after_nodes_vec));
+
+    json removed_nodes = json::array();
+    json added_nodes = json::array();
+    for (const auto& n : before_nodes_vec) {
+        if (!std::binary_search(after_nodes_vec.begin(), after_nodes_vec.end(), n)) removed_nodes.push_back(n);
+    }
+    for (const auto& n : after_nodes_vec) {
+        if (!std::binary_search(before_nodes_vec.begin(), before_nodes_vec.end(), n)) added_nodes.push_back(n);
+    }
+
+    json stopped_nfs = json::array();
+    if (fault_runtime.is_array()) {
+        for (const auto& item : fault_runtime) {
+            if (!item.value("running", false) || !item.value("daemon_running", false)) {
+                stopped_nfs.push_back(item);
+            }
+        }
+    }
+
+    std::string scope = "none";
+    if (total_count > 0 && moved_count == total_count) scope = "overall";
+    else if (moved_count > 0 || !removed_nodes.empty() || !added_nodes.empty()) scope = "partial";
+
+    return {
+        {"scope", scope},
+        {"nf_total", total_count},
+        {"nf_moved", moved_count},
+        {"nf_moves", moves},
+        {"removed_nodes", removed_nodes},
+        {"added_nodes", added_nodes},
+        {"stopped_nfs", stopped_nfs}
+    };
 }
 
 std::optional<json> find_deployment(const std::string& deployment_id) {
@@ -595,6 +918,7 @@ json job_to_json(const ValidationJob& job) {
     return {
         {"job_id", job.job_id},
         {"deployment_id", job.deployment_id},
+        {"mode", job.mode},
         {"status", job.status},
         {"progress", job.progress},
         {"message", job.message},
@@ -610,6 +934,7 @@ json job_to_json(const ValidationJob& job) {
         {"data_plane_verified", job.data_plane_verified},
         {"deployment", job.deployment},
         {"containers", job.containers},
+        {"reschedule_report", job.reschedule_report},
         {"steps", steps},
         {"ues", ues},
         {"logs", job.logs}
@@ -635,8 +960,393 @@ void write_ueransim_helpers(const std::filesystem::path& dir) {
     );
 }
 
+void cleanup_job_ueransim_containers(const std::shared_ptr<ValidationJob>& job) {
+    std::vector<std::string> containers;
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        if (!job->gnb_container.empty()) containers.push_back(job->gnb_container);
+        for (const auto& ue : job->ues) {
+            if (!ue.container.empty()) containers.push_back(ue.container);
+        }
+    }
+    for (const auto& c : containers) {
+        run_ok("docker rm -f " + shell_quote(c) + " >/dev/null");
+    }
+}
+
+json run_single_ue_smoke_phase(
+    const std::shared_ptr<ValidationJob>& job,
+    const json& dep,
+    const std::string& phase_tag,
+    const std::string& step_key,
+    int progress_start,
+    int progress_end,
+    bool cleanup_after
+) {
+    const std::string dep_id = dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")));
+    auto pct = [&](int step) {
+        return progress_start + ((progress_end - progress_start) * step / 5);
+    };
+    set_job_status(job, "running", progress_start, phase_tag + ": 核对核心网运行态");
+    throw_if_stopped(job);
+
+    json runtime = collect_deployment_runtime(dep);
+    int nf_total = 0;
+    int nf_ok = 0;
+    std::string amf_container;
+    for (const auto& item : runtime) {
+        ++nf_total;
+        if (item.value("daemon_running", false)) ++nf_ok;
+        if (item.value("nf_type", std::string("")) == "amf") amf_container = item.value("container", std::string(""));
+    }
+    if (nf_total == 0 || nf_ok != nf_total) {
+        throw std::runtime_error(phase_tag + " NF process verification failed: " + std::to_string(nf_ok) + "/" + std::to_string(nf_total));
+    }
+    if (amf_container.empty()) amf_container = find_container_by_daemon("open5gs-amfd");
+    if (amf_container.empty()) throw std::runtime_error(phase_tag + " unable to locate AMF container");
+
+    const std::string network = first_network_for_container(amf_container);
+    const std::string amf_ip = container_ip_on_network(amf_container, network);
+    if (network.empty() || amf_ip.empty()) throw std::runtime_error(phase_tag + " unable to resolve AMF network/IP");
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        job->deployment = dep;
+        job->containers = runtime;
+        job->amf_container = amf_container;
+        job->amf_ip = amf_ip;
+        job->network = network;
+    }
+    append_log(job, phase_tag + ": 核心网容器核验通过 NF=" + std::to_string(nf_ok) + "/" + std::to_string(nf_total) + ", AMF=" + amf_container);
+
+    const std::string image = std::getenv("UERANSIM_IMAGE") ? std::getenv("UERANSIM_IMAGE") : "docker.io/free5gc/ueransim:latest";
+    const std::string mcc = std::getenv("UERANSIM_MCC") ? std::getenv("UERANSIM_MCC") : "999";
+    const std::string mnc = std::getenv("UERANSIM_MNC") ? std::getenv("UERANSIM_MNC") : "70";
+    const std::string tac = std::getenv("UERANSIM_TAC") ? std::getenv("UERANSIM_TAC") : "1";
+    const std::string sst = std::getenv("UERANSIM_SST") ? std::getenv("UERANSIM_SST") : "1";
+    const std::string sd = normalize_sd(std::getenv("UERANSIM_SD") ? std::getenv("UERANSIM_SD") : "000001");
+    const std::string apn = std::getenv("UERANSIM_APN") ? std::getenv("UERANSIM_APN") : "internet";
+    const std::string key = std::getenv("UERANSIM_KEY") ? std::getenv("UERANSIM_KEY") : "465B5CE8B199B49FAA5F0A2EE238A6BC";
+    const std::string opc = std::getenv("UERANSIM_OPC") ? std::getenv("UERANSIM_OPC") : "E8ED289DEBA952E4283B54E88E6183CA";
+    const std::string mongo = std::getenv("SFC_OPEN5GS_MONGO_CONTAINER") ? std::getenv("SFC_OPEN5GS_MONGO_CONTAINER") : "sfc-open5gs-mongo";
+    std::string imsi = digits_only(std::getenv("UERANSIM_IMSI") ? std::getenv("UERANSIM_IMSI") : "999700000000001");
+    if (imsi.empty()) imsi = "999700000000001";
+
+    const std::string short_id = normalize_token(job->job_id).substr(0, 18);
+    const std::string suffix = normalize_token(phase_tag).substr(0, 14);
+    const std::string name_base = "sfc-ueransim-" + normalize_token(dep_id).substr(0, 22) + "-" + short_id + "-" + suffix;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / name_base;
+    std::filesystem::create_directories(dir);
+    write_ueransim_helpers(dir);
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        job->image = image;
+        job->tmp_dir = dir.string();
+        job->gnb_container = name_base + "-gnb";
+        job->ues = {{"ue1", "UE-1", imsi, name_base + "-ue1", "", false, false, false, "", ""}};
+    }
+
+    set_job_status(job, "running", pct(1), phase_tag + ": 写入 UE 订阅数据");
+    throw_if_stopped(job);
+    if (!provision_subscriber(dir, mongo, imsi, sst, sd, apn, key, opc)) {
+        throw std::runtime_error(phase_tag + " failed to provision subscriber IMSI=" + imsi + " on " + mongo);
+    }
+
+    set_job_status(job, "running", pct(2), phase_tag + ": 启动 UERANSIM 容器");
+    if (!run_ok("docker image inspect " + shell_quote(image) + " >/dev/null")) {
+        if (!run_ok("docker pull " + shell_quote(image) + " >/dev/null")) {
+            throw std::runtime_error(phase_tag + " failed to pull UERANSIM image: " + image);
+        }
+    }
+    const std::string mount = dir.string() + ":/config";
+    std::string gnb_container;
+    std::string ue_container;
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        gnb_container = job->gnb_container;
+        ue_container = job->ues.front().container;
+    }
+    if (!start_ueransim_container(gnb_container, image, network, mount)) {
+        throw std::runtime_error(phase_tag + " failed to start gNB container");
+    }
+    throw_if_stopped(job);
+    if (!start_ueransim_container(ue_container, image, network, mount)) {
+        throw std::runtime_error(phase_tag + " failed to start UE container");
+    }
+
+    const std::string gnb_bin = resolve_bin_path(gnb_container, {"/ueransim/nr-gnb", "/UERANSIM/build/nr-gnb", "nr-gnb"});
+    const std::string ue_bin = resolve_bin_path(ue_container, {"/ueransim/nr-ue", "/UERANSIM/build/nr-ue", "nr-ue"});
+    if (gnb_bin.empty() || ue_bin.empty()) throw std::runtime_error(phase_tag + " failed to locate UERANSIM binaries");
+    const std::string gnb_ip = container_ip_on_network(gnb_container, network);
+    if (gnb_ip.empty()) throw std::runtime_error(phase_tag + " failed to resolve gNB IP");
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        job->gnb_ip = gnb_ip;
+    }
+
+    std::ostringstream gnb_yaml;
+    gnb_yaml << "gnbId: 1\nmcc: '" << mcc << "'\nmnc: '" << mnc
+             << "'\nnci: '0x000000010'\nidLength: 32\ntac: " << tac
+             << "\nignoreStreamIds: true\nlinkIp: " << gnb_ip
+             << "\nngapIp: " << gnb_ip << "\ngtpIp: " << gnb_ip
+             << "\namfConfigs:\n  - address: " << amf_ip << "\n    port: 38412\nslices:\n  - sst: " << sst << "\n";
+    if (!sd.empty()) gnb_yaml << "    sd: " << sd << "\n";
+    write_file(dir / "gnb.yaml", gnb_yaml.str());
+
+    std::ostringstream ue_yaml;
+    ue_yaml << "supi: 'imsi-" << imsi << "'\nmcc: '" << mcc << "'\nmnc: '" << mnc
+            << "'\nkey: '" << key << "'\nopType: 'OPC'\nop: '" << opc
+            << "'\namf: '8000'\nimei: '356938035643803'\nimeiSv: '4370816125816151'\nintegrity:\n  IA1: true\n  IA2: true\n  IA3: true\nciphering:\n  EA1: true\n  EA2: true\n  EA3: true\nintegrityMaxRate:\n  uplink: full\n  downlink: full\nuacAic:\n  mps: false\n  mcs: false\nuacAcc:\n  normalClass: 0\n  class11: false\n  class12: false\n  class13: false\n  class14: false\n  class15: false\nconfigured-nssai:\n  - sst: " << sst << "\n";
+    if (!sd.empty()) ue_yaml << "    sd: " << sd << "\n";
+    ue_yaml << "default-nssai:\n  - sst: " << sst << "\n";
+    if (!sd.empty()) ue_yaml << "    sd: " << sd << "\n";
+    ue_yaml << "gnbSearchList:\n  - " << gnb_ip << "\nsessions:\n  - type: 'IPv4'\n    apn: '" << apn << "'\n    slice:\n      sst: " << sst << "\n";
+    if (!sd.empty()) ue_yaml << "      sd: " << sd << "\n";
+    write_file(dir / "ue1.yaml", ue_yaml.str());
+
+    set_job_status(job, "running", pct(3), phase_tag + ": gNB NG Setup");
+    run_ok("docker exec -d " + shell_quote(gnb_container) + " sh -lc " + shell_quote(shell_quote(gnb_bin) + " -c /config/gnb.yaml > /tmp/gnb.log 2>&1"));
+    if (!wait_for_log(gnb_container, "/tmp/gnb.log", "NG Setup procedure is successful|NG setup successful|NG Setup Response", 75)) {
+        throw std::runtime_error(phase_tag + " gNB NG Setup failed: " + tail_file(gnb_container, "/tmp/gnb.log", 80));
+    }
+
+    set_job_status(job, "running", pct(4), phase_tag + ": UE 注册与 PDU Session");
+    run_ok("docker exec -d " + shell_quote(ue_container) + " sh -lc " + shell_quote(shell_quote(ue_bin) + " -c /config/ue1.yaml > /tmp/ue.log 2>&1"));
+    if (!wait_for_log(ue_container, "/tmp/ue.log", "Registration complete|Initial Registration is successful|5GMM-REGISTERED", 135)) {
+        throw std::runtime_error(phase_tag + " UE registration failed: " + tail_file(ue_container, "/tmp/ue.log", 90));
+    }
+    if (!wait_for_log(ue_container, "/tmp/ue.log", "PDU Session establishment is successful|PDU Session Establishment Accept", 45)) {
+        throw std::runtime_error(phase_tag + " PDU session failed: " + tail_file(ue_container, "/tmp/ue.log", 90));
+    }
+    const std::string ue_ip = wait_for_ue_tun_ip(ue_container, "uesimtun0", 45);
+    if (ue_ip.empty()) throw std::runtime_error(phase_tag + " UE did not obtain IPv4 on uesimtun0");
+
+    {
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        job->ues.front().registered = true;
+        job->ues.front().pdu_session = true;
+        job->ues.front().ip = ue_ip;
+        job->ues.front().log_tail = tail_file(ue_container, "/tmp/ue.log", 120);
+        job->ues.front().received_messages = tail_file(ue_container, "/tmp/sfc_ue_rx.log", 20);
+    }
+    append_log(job, phase_tag + ": 单 UE 注册/PDU/隧道地址验证通过，UE IP=" + ue_ip);
+    set_step(job, step_key, "success", phase_tag + "通过，UE IP=" + ue_ip);
+    set_job_status(job, "running", progress_end, phase_tag + ": 单 UE 功能验证通过");
+
+    json result = {
+        {"deployment", dep},
+        {"runtime", deployment_runtime_summary(dep)},
+        {"containers", runtime},
+        {"ue_ip", ue_ip},
+        {"amf_container", amf_container},
+        {"amf_ip", amf_ip},
+        {"gnb_ip", gnb_ip}
+    };
+
+    if (cleanup_after) {
+        cleanup_job_ueransim_containers(job);
+        append_log(job, phase_tag + ": 已清理本阶段 UERANSIM 容器");
+    }
+    return result;
+}
+
+void update_reschedule_report(const std::shared_ptr<ValidationJob>& job, const json& patch) {
+    std::lock_guard<std::mutex> lock(g_jobs_mutex);
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        job->reschedule_report[it.key()] = it.value();
+    }
+}
+
+bool deployment_recovered_for_ueransim(const json& dep) {
+    return deployment_effectively_ready(dep, collect_deployment_runtime(dep));
+}
+
+void run_reschedule_validation_job(const std::shared_ptr<ValidationJob>& job) {
+    constexpr int kWaitFaultTimeoutSec = 600;
+    constexpr int kRecoveryTimeoutSec = 240;
+    constexpr int kPollSec = 2;
+
+    try {
+        set_job_status(job, "running", 2, "准备重调度恢复验证");
+        append_log(job, "开始重调度恢复验证：先执行单 UE 基线验证");
+
+        auto dep_opt = find_deployment(job->deployment_id);
+        if (!dep_opt) throw std::runtime_error("deployment_not_found");
+        json baseline_dep = *dep_opt;
+        const json baseline_runtime = collect_deployment_runtime(baseline_dep);
+        if (!deployment_effectively_ready(baseline_dep, baseline_runtime)) {
+            throw std::runtime_error("deployment is not service_ready && ready_for_ueransim");
+        }
+        baseline_dep["service_ready"] = true;
+        baseline_dep["ready_for_ueransim"] = true;
+
+        const std::string baseline_nf_sig = deployment_nf_signature(baseline_dep);
+        const std::string baseline_nodes_sig = deployment_nodes_signature(baseline_dep);
+        {
+            std::lock_guard<std::mutex> lock(g_jobs_mutex);
+            job->deployment = baseline_dep;
+            job->containers = baseline_runtime;
+            job->reschedule_report = {
+                {"baseline", deployment_runtime_summary(baseline_dep)},
+                {"baseline_containers", baseline_runtime},
+                {"wait_fault_timeout_sec", kWaitFaultTimeoutSec},
+                {"recovery_timeout_sec", kRecoveryTimeoutSec},
+                {"poll_sec", kPollSec},
+                {"state", "baseline_verifying"}
+            };
+        }
+
+        set_step(job, "baseline", "running", "对当前就绪核心网执行单 UE 注册/PDU 验证");
+        const json baseline_verify = run_single_ue_smoke_phase(job, baseline_dep, "基线验证", "baseline", 5, 25, true);
+        update_reschedule_report(job, {{"baseline_verify", baseline_verify}, {"state", "waiting_manual_fault"}});
+
+        set_step(job, "wait_fault", "running", "请在故障控制页手动注入卫星/链路故障，系统会自动检测原核心网停止服务");
+        set_job_status(job, "running", 32, "基线验证通过，请手动注入故障");
+        append_log(job, "基线验证通过。请在故障控制页手动注入故障，等待窗口 " + std::to_string(kWaitFaultTimeoutSec) + "s");
+
+        const int64_t wait_deadline_ms = now_ms() + static_cast<int64_t>(kWaitFaultTimeoutSec) * 1000;
+        bool detected = false;
+        int64_t recovery_start_ms = 0;
+        json fault_dep = json::object();
+        json fault_runtime = json::array();
+        std::string detection_reason;
+
+        while (now_ms() < wait_deadline_ms) {
+            throw_if_stopped(job);
+            auto current_opt = find_deployment(job->deployment_id);
+            if (!current_opt) {
+                std::this_thread::sleep_for(std::chrono::seconds(kPollSec));
+                continue;
+            }
+            json current = *current_opt;
+            const std::string phase = current.value("orchestration_phase", std::string(""));
+            const bool phase_hint =
+                phase == "stopping_old" || phase == "starting_containers" ||
+                phase == "starting_nfs" || phase == "probing" || phase == "degraded";
+            const bool signature_changed =
+                deployment_nf_signature(current) != baseline_nf_sig ||
+                deployment_nodes_signature(current) != baseline_nodes_sig;
+            const json current_runtime = collect_deployment_runtime(current);
+            const bool service_lost = !deployment_effectively_ready(current, current_runtime);
+
+            {
+                std::lock_guard<std::mutex> lock(g_jobs_mutex);
+                job->deployment = current;
+                job->containers = current_runtime;
+                job->reschedule_report["latest"] = deployment_runtime_summary(current);
+                job->reschedule_report["state"] = "waiting_manual_fault";
+            }
+
+            if (phase_hint || signature_changed || service_lost) {
+                detected = true;
+                recovery_start_ms = now_ms();
+                fault_dep = current;
+                fault_runtime = collect_deployment_runtime(current);
+                if (service_lost) detection_reason = "service_not_ready";
+                else if (phase_hint) detection_reason = "orchestration_phase_" + phase;
+                else detection_reason = "placement_signature_changed";
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(kPollSec));
+        }
+
+        if (!detected) {
+            throw std::runtime_error("no reschedule detected within wait window");
+        }
+
+        set_step(job, "wait_fault", "success", "已检测到故障/重调度信号: " + detection_reason);
+        set_step(job, "detect", "running", "原核心网停止服务或部署签名变化，开始等待恢复");
+        set_step(job, "recover", "running", "等待容器与核心网网元全部恢复运行");
+        set_job_status(job, "running", 45, "已检测到重调度，等待新核心网恢复");
+        append_log(job, "检测到重调度: " + detection_reason);
+        update_reschedule_report(job, {
+            {"state", "recovering"},
+            {"detection_reason", detection_reason},
+            {"recovery_start_at", iso_now()},
+            {"fault_snapshot", deployment_runtime_summary(fault_dep)},
+            {"fault_containers", fault_runtime}
+        });
+
+        const int64_t recovery_deadline_ms = now_ms() + static_cast<int64_t>(kRecoveryTimeoutSec) * 1000;
+        json recovered_dep = json::object();
+        while (now_ms() < recovery_deadline_ms) {
+            throw_if_stopped(job);
+            auto current_opt = find_deployment(job->deployment_id);
+            if (!current_opt) {
+                std::this_thread::sleep_for(std::chrono::seconds(kPollSec));
+                continue;
+            }
+            json current = *current_opt;
+            {
+                std::lock_guard<std::mutex> lock(g_jobs_mutex);
+                job->deployment = current;
+                job->containers = collect_deployment_runtime(current);
+                job->reschedule_report["latest"] = deployment_runtime_summary(current);
+            }
+            if (deployment_recovered_for_ueransim(current)) {
+                recovered_dep = current;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(kPollSec));
+        }
+
+        if (recovered_dep.empty()) {
+            throw std::runtime_error("service did not recover within timeout");
+        }
+
+        set_step(job, "detect", "success", "新核心网已恢复 service_ready/ready_for_ueransim");
+        set_step(job, "recover", "success", "容器与核心网网元全部恢复运行");
+        set_step(job, "recovery_verify", "running", "对恢复后核心网执行单 UE 重新接入验证");
+        set_job_status(job, "running", 76, "恢复态已观察到，执行 UE 重新接入验证");
+        append_log(job, "恢复态已观察到，开始恢复后 UE 验证");
+
+        const json recovery_verify = run_single_ue_smoke_phase(job, recovered_dep, "恢复验证", "recovery_verify", 78, 92, true);
+        const int64_t recovery_done_ms = now_ms();
+        const int64_t recovery_cost_ms = std::max<int64_t>(0, recovery_done_ms - recovery_start_ms);
+        const json recovered_runtime = collect_deployment_runtime(recovered_dep);
+        const json diff = build_reschedule_diff(baseline_dep, recovered_dep, fault_runtime);
+
+        update_reschedule_report(job, {
+            {"state", "success"},
+            {"recovered", deployment_runtime_summary(recovered_dep)},
+            {"recovered_containers", recovered_runtime},
+            {"recovery_verify", recovery_verify},
+            {"recovery_done_at", iso_now()},
+            {"recovery_time_ms", recovery_cost_ms},
+            {"diff", diff}
+        });
+        {
+            std::lock_guard<std::mutex> lock(g_jobs_mutex);
+            job->deployment = recovered_dep;
+            job->containers = recovered_runtime;
+            job->data_plane_verified = true;
+        }
+        set_step(job, "report", "success", "恢复耗时 " + std::to_string(recovery_cost_ms) + " ms，重调度范围=" + diff.value("scope", std::string("unknown")));
+        set_job_status(job, "success", 100, "重调度恢复验证通过，恢复耗时 " + std::to_string(recovery_cost_ms) + " ms");
+        cleanup_job_ueransim_containers(job);
+        append_log(job, "重调度验证流程已结束，已清理本次 UERANSIM gNB/UE 容器");
+        append_log(job, "重调度恢复验证通过，recovery_time_ms=" + std::to_string(recovery_cost_ms));
+    } catch (const std::exception& e) {
+        cleanup_job_ueransim_containers(job);
+        if (job_stop_requested(job) || std::string(e.what()) == "verification_stopped") {
+            append_log(job, "重调度恢复验证已由用户停止");
+            set_job_status(job, "stopped", job->progress, "已停止并清理 UERANSIM 容器");
+            return;
+        }
+        spdlog::error("UERANSIM reschedule validation job {} failed: {}", job->job_id, e.what());
+        append_log(job, std::string("重调度恢复验证失败: ") + e.what());
+        set_step(job, "report", "failed", e.what());
+        set_job_status(job, "failed", std::max(1, job->progress), e.what());
+        std::lock_guard<std::mutex> lock(g_jobs_mutex);
+        refresh_ue_logs_locked(*job);
+    }
+}
+
 void run_validation_job(const std::shared_ptr<ValidationJob>& job) {
     try {
+        if (job->mode == "reschedule") {
+            run_reschedule_validation_job(job);
+            return;
+        }
         set_job_status(job, "running", 2, "准备验证任务");
         append_log(job, "开始 UERANSIM 功能验证");
 
@@ -645,16 +1355,17 @@ void run_validation_job(const std::shared_ptr<ValidationJob>& job) {
         if (!dep_opt) throw std::runtime_error("deployment_not_found");
         json dep = *dep_opt;
         const std::string dep_id = dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")));
+        json deployment_runtime = collect_deployment_runtime(dep);
         {
             std::lock_guard<std::mutex> lock(g_jobs_mutex);
             job->deployment = dep;
-            job->containers = collect_deployment_runtime(dep);
+            job->containers = deployment_runtime;
         }
-        const bool service_ready = dep.value("service_ready", false);
-        const bool ready_for_ue = dep.value("ready_for_ueransim", false);
-        if (!service_ready || !ready_for_ue) {
+        if (!deployment_effectively_ready(dep, deployment_runtime)) {
             throw std::runtime_error("deployment is not service_ready && ready_for_ueransim");
         }
+        dep["service_ready"] = true;
+        dep["ready_for_ueransim"] = true;
         set_step(job, "deployment", "success", "核心网部署状态满足 UE 验证条件");
         set_job_status(job, "running", 8, "核对核心网容器与 NF 进程");
         throw_if_stopped(job);
@@ -662,14 +1373,15 @@ void run_validation_job(const std::shared_ptr<ValidationJob>& job) {
         int nf_total = 0;
         int nf_ok = 0;
         std::string amf_container;
-        for (const auto& item : collect_deployment_runtime(dep)) {
+        deployment_runtime = collect_deployment_runtime(dep);
+        for (const auto& item : deployment_runtime) {
             ++nf_total;
             if (item.value("daemon_running", false)) ++nf_ok;
             if (item.value("nf_type", std::string("")) == "amf") amf_container = item.value("container", std::string(""));
         }
         {
             std::lock_guard<std::mutex> lock(g_jobs_mutex);
-            job->containers = collect_deployment_runtime(dep);
+            job->containers = deployment_runtime;
         }
         if (nf_total == 0 || nf_ok != nf_total) {
             throw std::runtime_error("NF process verification failed: " + std::to_string(nf_ok) + "/" + std::to_string(nf_total));
@@ -905,8 +1617,24 @@ void UERANSIMController::listDeployments(
         if (deployments.is_array()) {
             for (const auto& dep : deployments) {
                 json item = dep;
-                item["eligible_for_ueransim"] = dep.value("service_ready", false) && dep.value("ready_for_ueransim", false);
-                item["runtime_containers"] = collect_deployment_runtime(dep);
+                json runtime = collect_deployment_runtime(dep);
+                const RuntimeHealth health = summarize_runtime_health(runtime);
+                if (health.containers_total > 0) {
+                    item["containers_total"] = health.containers_total;
+                    item["containers_running"] = health.containers_running;
+                }
+                if (health.core_nfs_total > 0) {
+                    item["core_nfs_total"] = health.core_nfs_total;
+                    item["core_nfs_running"] = health.core_nfs_running;
+                }
+                const bool effectively_ready = deployment_effectively_ready(dep, runtime);
+                if (effectively_ready) {
+                    item["service_ready"] = true;
+                    item["ready_for_ueransim"] = true;
+                    item["reason"] = "";
+                }
+                item["eligible_for_ueransim"] = effectively_ready;
+                item["runtime_containers"] = runtime;
                 items.push_back(item);
             }
         }
@@ -935,18 +1663,36 @@ void UERANSIMController::startVerification(
     const auto seq = g_job_seq.fetch_add(1);
     job->job_id = "ueransim-" + std::to_string(std::time(nullptr)) + "-" + std::to_string(seq);
     job->deployment_id = deployment_id;
+    if (body->isMember("mode") && (*body)["mode"].isString()) {
+        const std::string raw_mode = (*body)["mode"].asString();
+        job->mode = raw_mode == "reschedule" ? "reschedule" : "smoke";
+    } else if (body->isMember("flow") && (*body)["flow"].isString()) {
+        const std::string raw_mode = (*body)["flow"].asString();
+        job->mode = raw_mode == "reschedule" ? "reschedule" : "smoke";
+    }
     job->started_at = iso_now();
-    job->steps = {
-        {"deployment", "核心网就绪检查", "pending", ""},
-        {"nf", "核心网容器与 NF 进程核验", "pending", ""},
-        {"subscriber", "UE 订阅用户写入", "pending", ""},
-        {"containers", "UERANSIM 容器启动", "pending", ""},
-        {"gnb", "gNB NG Setup", "pending", ""},
-        {"registration", "UE 注册", "pending", ""},
-        {"pdu", "PDU Session 与 UE IP", "pending", ""},
-        {"dataplane", "UE 间业务面验证", "pending", ""},
-        {"message", "双 UE 消息面板", "pending", ""}
-    };
+    if (job->mode == "reschedule") {
+        job->steps = {
+            {"baseline", "基线单 UE 验证", "pending", ""},
+            {"wait_fault", "等待人工故障", "pending", ""},
+            {"detect", "检测重调度/停服", "pending", ""},
+            {"recover", "等待新核心网恢复", "pending", ""},
+            {"recovery_verify", "恢复后单 UE 验证", "pending", ""},
+            {"report", "恢复报告", "pending", ""}
+        };
+    } else {
+        job->steps = {
+            {"deployment", "核心网就绪检查", "pending", ""},
+            {"nf", "核心网容器与 NF 进程核验", "pending", ""},
+            {"subscriber", "UE 订阅用户写入", "pending", ""},
+            {"containers", "UERANSIM 容器启动", "pending", ""},
+            {"gnb", "gNB NG Setup", "pending", ""},
+            {"registration", "UE 注册", "pending", ""},
+            {"pdu", "PDU Session 与 UE IP", "pending", ""},
+            {"dataplane", "UE 间业务面验证", "pending", ""},
+            {"message", "双 UE 消息面板", "pending", ""}
+        };
+    }
     json initial_job;
     {
         std::lock_guard<std::mutex> lock(g_jobs_mutex);

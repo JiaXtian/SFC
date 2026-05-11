@@ -90,11 +90,9 @@ export default function SatelliteDetail() {
   const satFaultTag = String((sat as any)?.fault_tag ?? '')
   const isFault = isNodeFault(sat)
   const containerState = String((sat as any)?.container_state ?? 'stopped')
-  const serviceProbeOk = Boolean((sat as any)?.service_probe_ok ?? false)
   const runningCoreNfTypes = Array.isArray((sat as any)?.running_core_nf_types)
     ? (sat as any).running_core_nf_types.map((x: any) => String(x))
     : []
-  const runningCoreNfCount = Number((sat as any)?.running_core_nf_count ?? runningCoreNfTypes.length ?? 0)
   const coreBusinessLoad = (sat as any)?.core_business_load ?? {}
   const coreLoadIndex = Number((sat as any)?.core_network_load ?? coreBusinessLoad?.load_index ?? 0)
   const signalingLoad = Number(coreBusinessLoad?.signaling_load ?? 0)
@@ -120,8 +118,7 @@ export default function SatelliteDetail() {
   const coords: any = sat?.coordinates ?? {}
 
   const safeDeployments = deployments ?? []
-
-  const coreNfsOnNode = safeDeployments
+  const runningCoreNfs = safeDeployments
     .flatMap((d: any) => {
       const label = resolveSfcLabel(safeDeployments as any, {
         deploymentId: String(d?.deployment_id ?? ''),
@@ -133,18 +130,21 @@ export default function SatelliteDetail() {
         .filter((p: any) => String(p?.node ?? '') === String(sat?.id ?? ''))
         .map((p: any) => ({
           deployment_id: String(d?.deployment_id ?? ''),
-          sfc_name: label,
+          core_id: label,
           nf_type: String(p?.nf_type ?? p?.core_nf ?? p?.vnf ?? ''),
-          nf_name: String(p?.core_nf ?? p?.vnf ?? p?.nf_type ?? ''),
         }))
     })
-    .filter((x: any) => x && x.nf_type) as Array<{ deployment_id: string; sfc_name: string; nf_type: string; nf_name: string }>
+    .filter((x: any) => x && x.nf_type) as Array<{ deployment_id: string; core_id: string; nf_type: string }>
+  const runningDisplayNfs = runningCoreNfs.length > 0
+    ? runningCoreNfs
+    : runningCoreNfTypes.map((nfType: string, i: number) => ({ deployment_id: `runtime-${i}`, core_id: '-', nf_type: nfType }))
+  const runningCoreNfCount = Number((sat as any)?.running_core_nf_count ?? runningDisplayNfs.length ?? 0)
 
   return (
     <div
       className="absolute right-[348px] top-12 z-10 rounded-2xl overflow-hidden shadow-2xl"
       style={{
-        width: 260,
+        width: 318,
         background:
           'linear-gradient(180deg, rgba(20,20,35,0.97), rgba(10,10,20,0.97))',
         border: isFault ? '1px solid rgba(239,68,68,0.45)' : '1px solid rgba(0,255,136,0.3)',
@@ -173,7 +173,7 @@ export default function SatelliteDetail() {
           {sat?.id ?? 'Unknown'}
         </div>
 
-        <div className="flex items-center gap-2 text-[10px]">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] leading-4 pr-5">
           <div
             className={`w-2 h-2 rounded-full ${isFault ? '' : 'animate-pulse'}`}
             style={{ background: isFault ? '#ef4444' : '#22c55e' }}
@@ -189,9 +189,6 @@ export default function SatelliteDetail() {
           </span>
           <span className="text-cyan-300">
             · 容器 {containerState}
-          </span>
-          <span className={serviceProbeOk ? 'text-emerald-300' : 'text-amber-300'}>
-            · 探测 {serviceProbeOk ? 'OK' : 'Pending'}
           </span>
           {runningCoreNfCount > 0 && (
             <span className="text-yellow-400">
@@ -234,10 +231,6 @@ export default function SatelliteDetail() {
                 orbital?.raan != null ? `${Number(orbital.raan).toFixed(2)}°` : '-'
               ],
               [
-                '近地点幅角',
-                orbital?.argument_of_perigee_deg != null ? `${Number(orbital.argument_of_perigee_deg).toFixed(2)}°` : '-'
-              ],
-              [
                 '平近点角',
                 orbital?.mean_anomaly_deg != null ? `${Number(orbital.mean_anomaly_deg).toFixed(2)}°` : '-'
               ],
@@ -272,10 +265,8 @@ export default function SatelliteDetail() {
               </div>
             ))}
           </div>
-          <div className="mt-2 space-y-1 text-[9px] text-slate-500 font-mono">
+          <div className="mt-2 text-[9px] text-slate-500 font-mono">
             {orbital?.epoch_iso && <div>Epoch {String(orbital.epoch_iso)}</div>}
-            {orbital?.tle_line1 && <div className="break-all">{String(orbital.tle_line1)}</div>}
-            {orbital?.tle_line2 && <div className="break-all">{String(orbital.tle_line2)}</div>}
           </div>
         </div>
 
@@ -334,11 +325,11 @@ export default function SatelliteDetail() {
             运行中核心网网元 ({runningCoreNfCount})
           </div>
 
-          {runningCoreNfTypes.length > 0 ? (
+          {runningDisplayNfs.length > 0 ? (
             <div className="space-y-1.5">
-              {runningCoreNfTypes.map((nfType: string, i: number) => (
+              {runningDisplayNfs.map((item, i: number) => (
                 <div
-                  key={`${nfType}-${i}`}
+                  key={`${item.deployment_id}-${item.nf_type}-${i}`}
                   className="px-2.5 py-2 rounded-lg"
                   style={{
                     background:
@@ -346,12 +337,12 @@ export default function SatelliteDetail() {
                     border: '1px solid rgba(0,255,136,0.25)'
                   }}
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="grid grid-cols-[1fr_auto] items-center gap-2">
                     <span className="text-[11px] font-semibold text-green-300 font-mono">
-                      {nfType.toUpperCase()}
+                      {item.nf_type.toUpperCase()}
                     </span>
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-full text-green-400 bg-green-900/30">
-                      running
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full text-cyan-200 bg-cyan-900/30 font-mono">
+                      {item.core_id}
                     </span>
                   </div>
                 </div>
@@ -418,33 +409,6 @@ export default function SatelliteDetail() {
           </div>
         </div>
 
-        <div>
-          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
-            <Navigation className="w-3 h-3" />
-            承载核心网网元 ({coreNfsOnNode.length})
-          </div>
-
-          {coreNfsOnNode.length > 0 ? (
-            <div className="space-y-1.5">
-              {coreNfsOnNode.map((item, i) => (
-                <div
-                  key={`${item.deployment_id}-${i}`}
-                  className="px-2.5 py-2 rounded-lg"
-                  style={{ background: 'rgba(59,130,246,0.09)', border: '1px solid rgba(96,165,250,0.25)' }}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-slate-200">{item.sfc_name}</span>
-                    <span className="text-[9px] text-cyan-300 font-mono">{item.nf_type.toUpperCase()}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-[10px] text-gray-600 text-center py-2.5 rounded-lg" style={{ background: 'rgba(50,50,60,0.2)' }}>
-              该节点当前未承载核心网网元
-            </div>
-          )}
-        </div>
       </div>
     </div>
   )

@@ -14,6 +14,7 @@ import { useAuth } from '@/auth/AuthContext'
 import { useStore } from '@/store/useStore'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
 import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
+import { clearSfcIdentityRegistry, reserveSfcIdentityForPlan } from '@/utils/sfcLabel'
 
 const vnfTemplates = {
   amf: { cpu: 1.6, mem: 3.0, bw_in: 0.25, bw_out: 0.25, disk: 10 },
@@ -132,7 +133,7 @@ function InfoHint({ text }: { text: string }) {
 export default function SFCForm() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
-  const { setCandidateResult, addToast, openSystemPopup, topologyVersion, backendTopologySynced, satellites, simulation } = useStore()
+  const { setCandidateResult, addToast, openSystemPopup, topologyVersion, backendTopologySynced, satellites, simulation, deployments } = useStore()
 
   const [mode, setMode] = useState<'template' | 'custom'>('template')
   const [selectedTemplate, setSelectedTemplate] = useState(0)
@@ -433,9 +434,13 @@ export default function SFCForm() {
         return
       }
 
+      if (deployments.length === 0) clearSfcIdentityRegistry()
+      const identity = reserveSfcIdentityForPlan(deployments as any, { requestId: reqId })
       setCandidateResult({
         requestId: reqId,
-        sfcName: sfc.name,
+        sfcName: identity.core_network_label,
+        coreNetworkId: identity.core_network_id,
+        coreNetworkLabel: identity.core_network_label,
         candidates: finalCandidates,
         inferenceTime: result.inference_time_ms,
         topologyVersion: Number(result.topology_version ?? topologyVersion),

@@ -5,7 +5,7 @@ import { toChineseFailureText } from '@/utils/failureText'
 import { buildSfcLabelMaps, formatSfcSeq, resolveSfcLabel as resolveSfcSeqLabel } from '@/utils/sfcLabel'
 
 function extractSfcLabel(raw: string): string {
-  const m = /\b(?:CORE|SFC)-(\d{1,})\b/i.exec(String(raw ?? ''))
+  const m = /^(?:CORE|SFC)-(\d{1,})$/i.exec(String(raw ?? '').trim())
   if (!m) return ''
   const seq = Number(m[1])
   if (!Number.isFinite(seq) || seq <= 0) return ''
@@ -143,38 +143,20 @@ export default function SystemMessagePanel() {
     const bySession = new Map<string, string>(baseMaps.bySession)
     const byRequest = new Map<string, string>(baseMaps.byRequest)
     const byDeployment = new Map<string, string>(baseMaps.byDeployment)
-    const usedLabels = new Set<string>()
-    ;[...bySession.values(), ...byRequest.values(), ...byDeployment.values()].forEach((x) => usedLabels.add(String(x)))
 
-    const parseSeq = (label: string) => {
-      const m = /^(?:CORE|SFC)-(\d{2,})$/.exec(label.trim())
-      return m ? Number(m[1]) : 0
-    }
-    let nextSeq = Math.max(
-      0,
-      ...Array.from(usedLabels).map((x) => parseSeq(String(x))).filter((v) => Number.isFinite(v) && v > 0),
-    ) + 1
-
-    const allocLabel = () => {
-      let label = formatSfcSeq(nextSeq++)
-      while (usedLabels.has(label)) {
-        label = formatSfcSeq(nextSeq++)
-      }
-      usedLabels.add(label)
-      return label
-    }
-
-    // Fill labels for sessions/requests that have appeared in events but not yet materialized in deployments.
+    // Link event aliases to already-known labels only. New CORE labels are allocated centrally
+    // when a deployment is actually reserved/created, not by replaying historical messages.
     ;[...runtimeEvents].reverse().forEach((e) => {
       const raw: any = e.raw ?? {}
       const sid = String(raw.session_id ?? (raw.entity_type === 'session' ? raw.entity_id : '') ?? '')
       const rid = String(raw.request_id ?? '')
       const did = String(raw.deployment_id ?? '')
+      const fromName = extractSfcLabel(String(raw.core_network_label ?? raw.sfc_name ?? ''))
       let label = ''
-      if (did && byDeployment.has(did)) label = String(byDeployment.get(did))
+      if (fromName) label = fromName
+      else if (did && byDeployment.has(did)) label = String(byDeployment.get(did))
       else if (sid && bySession.has(sid)) label = String(bySession.get(sid))
       else if (rid && byRequest.has(rid)) label = String(byRequest.get(rid))
-      else if (sid || rid || did) label = allocLabel()
       if (!label) return
       if (did && !byDeployment.has(did)) byDeployment.set(did, label)
       if (sid && !bySession.has(sid)) bySession.set(sid, label)
@@ -487,13 +469,28 @@ export default function SystemMessagePanel() {
         }
 
         if (e.type === 'deployment_action') {
-          const detail = replaceDeployIdsWithLabel(String((e.raw as any)?.detail ?? e.message), resolveSfcLabel)
+          const raw: any = e.raw ?? {}
+          const label = resolveSfcLabel({
+            deploymentId: String(raw.deployment_id ?? ''),
+            sessionId: String(raw.session_id ?? ''),
+            requestId: String(raw.request_id ?? ''),
+            sfcName: String(raw.core_network_label ?? raw.sfc_name ?? ''),
+          })
+          const title = String(raw.title ?? '部署动作')
+          const detail = replaceDeployIdsWithLabel(String(raw.detail ?? e.message), resolveSfcLabel)
+          const text = label !== 'CORE-未编号' && /deployment_id=/.test(detail)
+            ? (/回滚完成/.test(title)
+                ? `${label} 已回滚并释放资源`
+                : /部署完成/.test(title)
+                  ? `${label} 已完成部署`
+                  : label)
+            : detail
           return {
             id: e.id,
             time,
-            tone: String((e.raw as any)?.level ?? 'info'),
-            title: String((e.raw as any)?.title ?? '部署动作'),
-            text: short(detail),
+            tone: String(raw.level ?? 'info'),
+            title,
+            text: short(text),
           }
         }
 

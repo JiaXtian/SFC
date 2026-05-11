@@ -494,7 +494,6 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                     运行网元<ArrowDownUp className="w-3 h-3" />
                   </button>
                 </th>
-                <th className="px-2 py-2 text-left">服务探测</th>
                 <th className="px-2 py-2 text-left">业务负载</th>
                 <th className="px-2 py-2 text-left">已部署核心网</th>
                 <th className="px-2 py-2 text-left">核心网网元类型</th>
@@ -512,7 +511,6 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                   : (Array.isArray(sat?.running_core_nf_types) ? sat.running_core_nf_types.map((x: any) => String(x)) : [])
                 const containerState = String(sat?.container_state ?? 'stopped')
                 const runningCoreNfCount = Number(sat?.running_core_nf_count ?? sat?.deployed_vnf_count ?? nfTypes.length ?? 0)
-                const serviceProbeOk = Boolean(sat?.service_probe_ok ?? false)
                 const coreBusinessLoadRaw = Number(sat?.core_network_load ?? sat?.core_business_load?.load_index ?? 0)
                 const coreBusinessLoad = Number.isFinite(coreBusinessLoadRaw) ? coreBusinessLoadRaw : 0
                 return (
@@ -564,11 +562,6 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                       </span>
                     </td>
                     <td className="px-2 py-2">{runningCoreNfCount}</td>
-                    <td className="px-2 py-2">
-                      <span className={`px-1.5 py-0.5 rounded ${serviceProbeOk ? 'text-emerald-200 bg-emerald-500/20' : 'text-amber-200 bg-amber-500/20'}`}>
-                        {serviceProbeOk ? 'OK' : 'Pending'}
-                      </span>
-                    </td>
                     <td className="px-2 py-2 font-mono">{(coreBusinessLoad * 100).toFixed(1)}%</td>
                     <td className="px-2 py-2">
                       {sfcNames.length > 0 ? (
@@ -622,7 +615,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={16} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
+                  <td colSpan={15} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
                 </tr>
               )}
             </tbody>
@@ -712,11 +705,10 @@ function SatelliteDetailDrawer({ sat, loading }: { sat: any | null; loading: boo
         ['状态', sat?.status ?? 'active'],
         ['故障标签', sat?.fault_tag || '无'],
         ['容器', sat?.container_state ?? 'stopped'],
-        ['服务探测', sat?.service_probe_ok ? 'OK' : 'Pending'],
         ['运行网元', nfTypes || '无'],
         ['可靠性', fmtNum(Number(sat?.node_reliability ?? 0) * 100, 2, '%')],
       ]} />
-      <DetailSection title="SGP4 / TLE 轨道根数" rows={[
+      <DetailSection title="SGP4 轨道根数" rows={[
         ['传播模型', op.propagation_model ?? 'SGP4'],
         ['Epoch ISO', op.epoch_iso],
         ['Epoch JD', fmtNum(op.epoch_jd, 8)],
@@ -730,8 +722,6 @@ function SatelliteDetailDrawer({ sat, loading }: { sat: any | null; loading: boo
         ['Semi-major axis', fmtNum(op.semi_major_axis_km, 3, ' km')],
         ['Period', fmtNum(op.period_minutes, 3, ' min')],
         ['Propagation', fmtNum(op.propagation_minutes, 2, ' min')],
-        ['TLE line 1', op.tle_line1 || '-'],
-        ['TLE line 2', op.tle_line2 || '-'],
       ]} />
       <DetailSection title="当前位置" rows={[
         ['Latitude', fmtNum(c.lat, 4, ' deg')],
@@ -754,12 +744,6 @@ function SatelliteDetailDrawer({ sat, loading }: { sat: any | null; loading: boo
         ['Policy', fmtNum(Number(core.policy_load ?? 0) * 100, 2, '%')],
         ['Auth', fmtNum(Number(core.auth_load ?? 0) * 100, 2, '%')],
       ]} />
-      <div className="rounded-xl border border-slate-800/80 bg-slate-900/35 p-3">
-        <div className="mb-2 text-[11px] font-semibold text-cyan-100">完整原始参数</div>
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950/70 p-2 text-[10px] leading-relaxed text-slate-300">
-          {JSON.stringify(sat ?? {}, null, 2)}
-        </pre>
-      </div>
     </div>
   )
 }

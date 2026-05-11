@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { RefreshCw, Upload, Orbit, Activity, Cpu, Database } from 'lucide-react'
+import { RefreshCw, Upload, Orbit, Activity, Cpu, Database, FileText, X } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import {
@@ -55,6 +55,7 @@ export default function ConstellationControlPanel({
   const [type, setType] = useState<ConstellationType>('starlink_v1')
   const [total, setTotal] = useState(72)
   const [planes, setPlanes] = useState(6)
+  const [showImportExample, setShowImportExample] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
 
   const {
@@ -256,14 +257,24 @@ export default function ConstellationControlPanel({
           {loading ? '处理中...' : '生成模拟星座'}
         </button>
 
-        <button
-          onClick={() => importInputRef.current?.click()}
-          disabled={loading}
-          className="w-full h-9 rounded-lg text-[13px] text-slate-200 flex items-center justify-center gap-2 disabled:opacity-60 bg-slate-900/50 border border-slate-700/70"
-        >
-          <Upload className="w-3.5 h-3.5" />
-          导入第三方拓扑
-        </button>
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={loading}
+            className="h-9 rounded-lg text-[13px] text-slate-200 flex items-center justify-center gap-2 disabled:opacity-60 bg-slate-900/50 border border-slate-700/70"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            导入第三方拓扑
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowImportExample(true)}
+            className="h-9 px-3 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/10 border border-cyan-500/35 inline-flex items-center justify-center gap-1.5"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            示例
+          </button>
+        </div>
         <input
           ref={importInputRef}
           type="file"
@@ -272,6 +283,100 @@ export default function ConstellationControlPanel({
           onChange={(e) => onImportThirdParty(e.target.files?.[0])}
         />
       </div>
+      {showImportExample && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 px-4">
+          <div className="w-[680px] max-w-full max-h-[82vh] overflow-hidden rounded-2xl border border-cyan-400/25 bg-slate-950 shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
+              <div>
+                <div className="text-[13px] font-semibold text-cyan-100">第三方拓扑 JSON 示例字段</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">支持 nodes/links 直接结构或 topology.nodes/topology.links 嵌套结构</div>
+              </div>
+              <button onClick={() => setShowImportExample(false)} className="h-8 w-8 rounded-lg inline-flex items-center justify-center text-slate-300 hover:bg-white/10">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="max-h-[65vh] overflow-auto p-4 text-[11px] leading-relaxed text-slate-200 bg-slate-950/95">
+{`{
+  "metadata": {
+    "total_sats": 2,
+    "num_planes": 1,
+    "altitude_km": 550,
+    "inclination_deg": 53,
+    "propagation_model": "SGP4"
+  },
+  "nodes": [
+    {
+      "id": "SAT_000_000",
+      "type": "satellite",
+      "orbital_params": {
+        "propagation_model": "SGP4",
+        "plane": 0,
+        "position_in_plane": 0,
+        "raan": 0,
+        "true_anomaly": 0,
+        "altitude_km": 550,
+        "inclination_deg": 53,
+        "eccentricity": 0.0001,
+        "mean_anomaly_deg": 0,
+        "mean_motion_rev_per_day": 15.05,
+        "bstar": 0.00005,
+        "epoch_iso": "2026-05-11T00:00:00Z"
+      },
+      "coordinates": { "x": 6928.1, "y": 0, "z": 0, "lat": 0, "lon": 0 },
+      "cpu_total": 24,
+      "cpu_available": 24,
+      "mem_total": 64,
+      "mem_available": 64,
+      "disk_total": 320,
+      "disk_available": 320,
+      "node_reliability": 0.985,
+      "status": "active"
+    },
+    {
+      "id": "SAT_000_001",
+      "type": "satellite",
+      "orbital_params": {
+        "propagation_model": "SGP4",
+        "plane": 0,
+        "position_in_plane": 1,
+        "raan": 0,
+        "true_anomaly": 180,
+        "altitude_km": 550,
+        "inclination_deg": 53,
+        "eccentricity": 0.0001,
+        "mean_anomaly_deg": 180,
+        "mean_motion_rev_per_day": 15.05,
+        "bstar": 0.00005,
+        "epoch_iso": "2026-05-11T00:00:00Z"
+      },
+      "coordinates": { "x": -6928.1, "y": 0, "z": 0, "lat": 0, "lon": 180 },
+      "cpu_total": 24,
+      "cpu_available": 24,
+      "mem_total": 64,
+      "mem_available": 64,
+      "disk_total": 320,
+      "disk_available": 320,
+      "node_reliability": 0.985,
+      "status": "active"
+    }
+  ],
+  "links": [
+    {
+      "source": "SAT_000_000",
+      "target": "SAT_000_001",
+      "link_type": "intra_orbit",
+      "status": "active",
+      "latency_ms": 2.4,
+      "reliability": 0.999,
+      "bandwidth_gbps": 20,
+      "bandwidth_available_gbps": 18
+    }
+  ]
+}`}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import { computeScoreBreakdown, normalizeWeights } from '@/utils/scoring'
 import { toChineseFailureList, toChineseFailureText } from '@/utils/failureText'
+import { rememberSfcIdentity, reserveSfcIdentityForPlan } from '@/utils/sfcLabel'
 
 function sanitizeLinkDetails(linkDetails: any[]): any[] {
   if (!Array.isArray(linkDetails)) return []
@@ -92,6 +93,7 @@ export default function CandidateModal() {
     applyTopologySnapshot,
     backendTopologySynced,
     satellites,
+    deployments,
     pushRuntimeEvent,
     openSystemPopup,
   } = useStore()
@@ -111,6 +113,8 @@ export default function CandidateModal() {
     deployableCount,
     requestPayload,
     sessionConfig,
+    coreNetworkId: plannedCoreNetworkId,
+    coreNetworkLabel: plannedCoreNetworkLabel,
   } = candidateResult
   const cand = candidates[sel] ?? candidates[0]
   if (!cand) return null
@@ -171,13 +175,29 @@ export default function CandidateModal() {
     deployingRef.current = true
     setBusy(true)
     try {
+      const identity = (plannedCoreNetworkLabel || sfcName)
+        ? rememberSfcIdentity({
+            requestId,
+            coreNetworkId: plannedCoreNetworkId,
+            label: plannedCoreNetworkLabel || sfcName,
+          })
+        : reserveSfcIdentityForPlan(deployments as any, {
+            requestId,
+            coreNetworkId: plannedCoreNetworkId,
+          })
+      const coreLabel = identity.core_network_label
+      const coreNetworkId = identity.core_network_id
       pushRuntimeEvent({
         type: 'deployment_action',
-        message: `开始部署 ${sfcName || requestId}`,
+        message: `开始部署 ${coreLabel}`,
         raw: {
           title: '策略部署开始',
-          detail: `${sfcName || requestId} · 候选#${sel + 1}`,
+          detail: `${coreLabel} · 候选#${sel + 1}`,
           level: 'info',
+          request_id: requestId,
+          core_network_id: coreNetworkId,
+          core_network_label: coreLabel,
+          sfc_name: coreLabel,
         },
       })
       const sanitizedLinks = sanitizeLinkDetails(cand.link_details ?? [])
@@ -186,13 +206,15 @@ export default function CandidateModal() {
         request_id: requestId,
         candidate_index: sel,
         candidate: cand,
+        core_network_id: coreNetworkId,
+        core_network_label: coreLabel,
         core_nf_dependencies: Array.isArray((requestPayload as any)?.core_nf_dependencies)
           ? (requestPayload as any).core_nf_dependencies
           : [],
         custom_nf_bindings: Array.isArray((requestPayload as any)?.custom_nf_bindings)
           ? (requestPayload as any).custom_nf_bindings
           : [],
-        sfc_name: sfcName || requestId,
+        sfc_name: coreLabel,
         inference_latency_ms: Number(inferenceTime ?? 0),
         score_breakdown: {
           latency: scoreBreakdown.latencyScore,
@@ -212,6 +234,13 @@ export default function CandidateModal() {
         strategy_mode: 'single_request',
       })
       const backendDeploymentId = String(deployResp?.deployment_id ?? `dep-${Date.now()}`)
+      rememberSfcIdentity({
+        requestId,
+        deploymentId: backendDeploymentId,
+        backendDeploymentId,
+        coreNetworkId,
+        label: coreLabel,
+      })
 
       let sessionId = ''
       try {
@@ -236,6 +265,8 @@ export default function CandidateModal() {
             topk: candidateResult.requestedTopk ?? 1,
           }),
           request_id: requestId,
+          core_network_id: coreNetworkId,
+          core_network_label: coreLabel,
           realtime_mode: true,
           max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 20),
           planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
@@ -257,6 +288,16 @@ export default function CandidateModal() {
         }
         const sessionResp = await apiClient.startSFCSession(sessionStartPayload)
         sessionId = String(sessionResp?.session_id ?? '')
+        if (sessionId) {
+          rememberSfcIdentity({
+            sessionId,
+            requestId,
+            deploymentId: `sess-deploy-${sessionId}`,
+            backendDeploymentId,
+            coreNetworkId,
+            label: coreLabel,
+          })
+        }
       } catch (e: any) {
         openSystemPopup(
           '会话启动失败',
@@ -269,8 +310,10 @@ export default function CandidateModal() {
       addDeployment({
         deployment_id: deploymentId,
         backend_deployment_id: backendDeploymentId,
+        core_network_id: coreNetworkId,
+        core_network_label: coreLabel,
         request_id: requestId,
-        sfc_name: sfcName || requestId,
+        sfc_name: coreLabel,
         candidate_index: sel,
         status: 'completed',
         path_nodes: pathNodes,
@@ -323,11 +366,18 @@ export default function CandidateModal() {
       })
       pushRuntimeEvent({
         type: 'deployment_action',
-        message: `部署完成 ${sfcName || requestId}`,
+        message: `部署完成 ${coreLabel}`,
         raw: {
           title: '策略部署完成',
-          detail: `${sfcName || requestId} · 节点${(cand.deployed_nodes ?? []).length} · 链路${sanitizedLinks.length}`,
+          detail: `${coreLabel} · 节点${(cand.deployed_nodes ?? []).length} · 链路${sanitizedLinks.length}`,
           level: 'ok',
+          deployment_id: deploymentId,
+          backend_deployment_id: backendDeploymentId,
+          request_id: requestId,
+          session_id: sessionId || undefined,
+          core_network_id: coreNetworkId,
+          core_network_label: coreLabel,
+          sfc_name: coreLabel,
         },
       })
 

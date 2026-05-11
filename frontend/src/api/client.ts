@@ -147,6 +147,8 @@ class APIClient {
     candidate: any; // 完整的候选方案
     core_nf_dependencies?: any[];
     custom_nf_bindings?: string[][];
+    core_network_id?: string;
+    core_network_label?: string;
     sfc_name?: string;
     source_node?: string;
     destination_node?: string;
@@ -168,7 +170,7 @@ class APIClient {
   async getUERANSIMDeployments() {
     return (await http.get('/ueransim/deployments')).data as { items: any[] }
   }
-  async startUERANSIMVerification(p: { deployment_id: string }) {
+  async startUERANSIMVerification(p: { deployment_id: string; mode?: 'smoke' | 'reschedule'; flow?: 'smoke' | 'reschedule' }) {
     return (await http.post('/ueransim/verification/start', p, { timeout: 30000 })).data as { job: any }
   }
   async getUERANSIMVerification(jobId: string) {

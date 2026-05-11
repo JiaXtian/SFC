@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, CheckCircle2, Circle, RadioTower, RefreshCw, Send, Square, Terminal, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, CheckCircle2, Circle, GitCompare, RadioTower, RefreshCw, Send, Square, Terminal, XCircle } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { formatSfcSeq, resolveSfcLabel } from '@/utils/sfcLabel'
 
 type Direction = 'ue1' | 'ue2'
+type ValidationFlow = 'smoke' | 'reschedule'
+type PersistedValidationState = {
+  jobId?: string
+  selectedId?: string
+  flow?: ValidationFlow
+  from?: Direction
+  updatedAt?: number
+}
 
 function pillClass(ok: boolean) {
   return ok ? 'text-emerald-200 bg-emerald-500/20 border-emerald-400/30' : 'text-amber-200 bg-amber-500/20 border-amber-400/30'
@@ -36,15 +44,101 @@ function deploymentLabel(dep: any, deployments: any[]) {
   })
 }
 
-export default function UERANSIMValidationPage() {
+const VALIDATION_STATE_KEY = 'sfc.ueransim.validation.state'
+
+function normalizeFlow(raw: any): ValidationFlow | undefined {
+  if (raw === 'smoke' || raw === 'reschedule') return raw
+  return undefined
+}
+
+function normalizeDirection(raw: any): Direction | undefined {
+  if (raw === 'ue1' || raw === 'ue2') return raw
+  return undefined
+}
+
+function isActiveJobStatus(raw: any) {
+  const status = String(raw ?? '')
+  return status === 'running' || status === 'queued'
+}
+
+function readPersistedValidationState(): PersistedValidationState {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(VALIDATION_STATE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return {
+      jobId: typeof parsed?.jobId === 'string' ? parsed.jobId : undefined,
+      selectedId: typeof parsed?.selectedId === 'string' ? parsed.selectedId : undefined,
+      flow: normalizeFlow(parsed?.flow),
+      from: normalizeDirection(parsed?.from),
+      updatedAt: typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+function writePersistedValidationState(patch: PersistedValidationState) {
+  if (typeof window === 'undefined') return
+  try {
+    const prev = readPersistedValidationState()
+    window.localStorage.setItem(
+      VALIDATION_STATE_KEY,
+      JSON.stringify({
+        ...prev,
+        ...patch,
+        updatedAt: Date.now(),
+      }),
+    )
+  } catch {
+    // Persistence is best-effort; the backend job remains the source of truth.
+  }
+}
+
+export default function UERANSIMValidationPage({ active = true }: { active?: boolean }) {
   const { addToast } = useStore()
+  const persistedInitial = useMemo(() => readPersistedValidationState(), [])
   const [deployments, setDeployments] = useState<any[]>([])
-  const [selectedId, setSelectedId] = useState('')
+  const [selectedId, setSelectedId] = useState(() => persistedInitial.selectedId ?? '')
   const [loading, setLoading] = useState(false)
   const [job, setJob] = useState<any>(null)
   const [message, setMessage] = useState('')
-  const [from, setFrom] = useState<Direction>('ue1')
+  const [from, setFrom] = useState<Direction>(() => persistedInitial.from ?? 'ue1')
+  const [flow, setFlow] = useState<ValidationFlow>(() => persistedInitial.flow ?? 'smoke')
   const [sending, setSending] = useState(false)
+
+  const applyJob = (nextJob: any) => {
+    setJob(nextJob)
+    const jobFlow = normalizeFlow(nextJob?.mode)
+    const deploymentId = String(nextJob?.deployment_id ?? nextJob?.backend_deployment_id ?? '')
+    if (jobFlow) setFlow(jobFlow)
+    if (deploymentId) setSelectedId(deploymentId)
+    if (nextJob?.job_id) {
+      writePersistedValidationState({
+        jobId: String(nextJob.job_id),
+        selectedId: deploymentId || selectedId,
+        flow: jobFlow ?? flow,
+        from,
+      })
+    }
+  }
+
+  const selectFlow = (nextFlow: ValidationFlow) => {
+    setFlow(nextFlow)
+    if (job?.job_id && !isActiveJobStatus(job.status)) {
+      setJob(null)
+      writePersistedValidationState({ jobId: '', flow: nextFlow, selectedId, from })
+    }
+  }
+
+  const selectDeployment = (nextId: string) => {
+    setSelectedId(nextId)
+    if (job?.job_id && !isActiveJobStatus(job.status)) {
+      setJob(null)
+      writePersistedValidationState({ jobId: '', selectedId: nextId, flow, from })
+    }
+  }
 
   const selected = useMemo(
     () => deployments.find((d) => String(d?.deployment_id ?? d?.backend_deployment_id ?? '') === selectedId),
@@ -57,7 +151,8 @@ export default function UERANSIMValidationPage() {
       const res = await apiClient.getUERANSIMDeployments()
       const items = Array.isArray(res.items) ? res.items : []
       setDeployments(items)
-      if (!selectedId) {
+      const hasSelected = Boolean(selectedId) && items.some((d: any) => String(d?.deployment_id ?? d?.backend_deployment_id ?? '') === selectedId)
+      if (!hasSelected && !isActiveJobStatus(job?.status)) {
         const first = items.find((d: any) => d?.eligible_for_ueransim) ?? items[0]
         if (first) setSelectedId(String(first?.deployment_id ?? first?.backend_deployment_id ?? ''))
       }
@@ -69,19 +164,40 @@ export default function UERANSIMValidationPage() {
   }
 
   useEffect(() => {
-    loadDeployments()
+    if (active) loadDeployments()
+  }, [active])
+
+  useEffect(() => {
+    const saved = readPersistedValidationState()
+    if (!saved.jobId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await apiClient.getUERANSIMVerification(saved.jobId as string)
+        if (!cancelled) applyJob(res.job)
+      } catch {
+        // Keep the saved selection/flow. A missing in-memory backend job will be replaced by the next start.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
-    if (!job?.job_id) return
+    writePersistedValidationState({ selectedId, flow, from })
+  }, [selectedId, flow, from])
+
+  useEffect(() => {
+    if (!job?.job_id || !isActiveJobStatus(job.status)) return
     const timer = window.setInterval(async () => {
       try {
         const res = await apiClient.getUERANSIMVerification(job.job_id)
-        setJob(res.job)
+        applyJob(res.job)
       } catch {
         // keep the last visible state
       }
-    }, job.status === 'running' || job.status === 'queued' ? 1600 : 3500)
+    }, 1600)
     return () => window.clearInterval(timer)
   }, [job?.job_id, job?.status])
 
@@ -92,9 +208,9 @@ export default function UERANSIMValidationPage() {
     }
     setLoading(true)
     try {
-      const res = await apiClient.startUERANSIMVerification({ deployment_id: selectedId })
-      setJob(res.job)
-      addToast('已启动 UERANSIM 功能验证', 'success')
+      const res = await apiClient.startUERANSIMVerification({ deployment_id: selectedId, mode: flow })
+      applyJob(res.job)
+      addToast(flow === 'reschedule' ? '已启动重调度恢复验证' : '已启动 UERANSIM 功能验证', 'success')
     } catch (e: any) {
       addToast(`启动失败: ${e?.response?.data?.message ?? e?.message ?? e}`, 'error')
     } finally {
@@ -107,7 +223,7 @@ export default function UERANSIMValidationPage() {
     setLoading(true)
     try {
       const res = await apiClient.stopUERANSIMVerification(job.job_id)
-      setJob(res.job)
+      applyJob(res.job)
       addToast('已停止验证容器', 'success')
     } catch (e: any) {
       addToast(`停止失败: ${e?.message ?? e}`, 'error')
@@ -123,7 +239,7 @@ export default function UERANSIMValidationPage() {
     setSending(true)
     try {
       const res = await apiClient.sendUERANSIMMessage(job.job_id, { from, to, message: text })
-      setJob(res.job)
+      applyJob(res.job)
       setMessage('')
       addToast(res.transport === 'udp_over_ue_tunnel' ? '消息已通过 UE 隧道发送' : '消息已写入对端面板', 'success')
     } catch (e: any) {
@@ -134,12 +250,19 @@ export default function UERANSIMValidationPage() {
   }
 
   const containers = Array.isArray(selected?.runtime_containers) ? selected.runtime_containers : []
-  const jobContainers = Array.isArray(job?.containers) ? job.containers : containers
+  const jobRuntimeContainers = Array.isArray(job?.containers) ? job.containers : []
+  const jobContainers = jobRuntimeContainers.length > 0 ? jobRuntimeContainers : containers
   const ues = Array.isArray(job?.ues) ? job.ues : []
   const status = String(job?.status ?? 'idle')
-  const canSend = status === 'success' && ues.length >= 2
+  const activeMode = String(job?.mode ?? flow) as ValidationFlow
+  const canSend = activeMode === 'smoke' && status === 'success' && ues.length >= 2
   const selectedLabel = selected ? deploymentLabel(selected, deployments) : ''
   const isRunning = status === 'running' || status === 'queued'
+  const report = job?.reschedule_report && typeof job.reschedule_report === 'object' ? job.reschedule_report : null
+  const diff = report?.diff ?? null
+  const movedNfs = Array.isArray(diff?.nf_moves) ? diff.nf_moves : []
+  const stoppedNfs = Array.isArray(diff?.stopped_nfs) ? diff.stopped_nfs : []
+  const showReschedule = activeMode === 'reschedule' || flow === 'reschedule'
 
   return (
     <div className="h-full grid grid-cols-12 gap-2.5 overflow-hidden">
@@ -157,7 +280,7 @@ export default function UERANSIMValidationPage() {
               <RadioTower className="w-4 h-4 text-cyan-300" />
               功能验证
             </div>
-            <div className="text-[10px] text-slate-400 mt-0.5">选择服务就绪核心网，启动 gNB 与双 UE 进行端到端验证</div>
+            <div className="text-[10px] text-slate-400 mt-0.5">选择服务就绪核心网，执行 UE 功能或重调度恢复验证</div>
           </div>
           <button
             onClick={loadDeployments}
@@ -170,10 +293,36 @@ export default function UERANSIMValidationPage() {
         </div>
 
         <div className="space-y-2">
+          <div>
+            <label className="block text-[10px] text-slate-400 mb-1.5">验证流程</label>
+            <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-slate-700/80 bg-slate-950/35 p-1">
+              <button
+                onClick={() => selectFlow('smoke')}
+                disabled={isRunning}
+                className={`h-8 rounded-md text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 ${
+                  flow === 'smoke' ? 'text-cyan-100 bg-cyan-500/20 border border-cyan-400/30' : 'text-slate-300 border border-transparent'
+                } disabled:opacity-50`}
+              >
+                <RadioTower className="w-3.5 h-3.5" />
+                双 UE 功能
+              </button>
+              <button
+                onClick={() => selectFlow('reschedule')}
+                disabled={isRunning}
+                className={`h-8 rounded-md text-[11px] font-semibold inline-flex items-center justify-center gap-1.5 ${
+                  flow === 'reschedule' ? 'text-cyan-100 bg-cyan-500/20 border border-cyan-400/30' : 'text-slate-300 border border-transparent'
+                } disabled:opacity-50`}
+              >
+                <GitCompare className="w-3.5 h-3.5" />
+                重调度恢复
+              </button>
+            </div>
+          </div>
+
           <label className="block text-[10px] text-slate-400">核心网部署</label>
           <select
             value={selectedId}
-            onChange={(e) => setSelectedId(e.target.value)}
+            onChange={(e) => selectDeployment(e.target.value)}
             className="w-full h-9 rounded-lg bg-slate-950/70 border border-slate-700/80 text-slate-100 text-[12px] px-2 outline-none"
           >
             {deployments.map((dep) => {
@@ -218,7 +367,7 @@ export default function UERANSIMValidationPage() {
               className="h-9 flex-1 rounded-lg bg-cyan-500/15 border border-cyan-400/30 text-cyan-100 text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 disabled:opacity-45"
             >
               <Activity className="w-3.5 h-3.5" />
-              启动验证
+              {flow === 'reschedule' ? '启动重调度验证' : '启动验证'}
             </button>
             <button
               onClick={stop}
@@ -267,7 +416,7 @@ export default function UERANSIMValidationPage() {
         </div>
       </div>
 
-      <div className="col-span-12 xl:col-span-8 h-full min-h-0 grid grid-rows-[128px_minmax(0,1fr)] gap-2.5 overflow-hidden">
+      <div className="col-span-12 xl:col-span-8 h-full min-h-0 grid grid-rows-[176px_minmax(0,1fr)] gap-2.5 overflow-hidden">
         <div
           className="rounded-2xl p-2.5 overflow-hidden"
           style={{
@@ -294,14 +443,14 @@ export default function UERANSIMValidationPage() {
           <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden mb-2">
             <div className="h-full bg-cyan-400 transition-all" style={{ width: `${Number(job?.progress ?? 0)}%` }} />
           </div>
-          <div className="grid grid-cols-3 xl:grid-cols-5 gap-1.5">
+          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-1.5 max-h-[118px] overflow-y-auto pr-1">
             {(Array.isArray(job?.steps) ? job.steps : []).map((s: any) => (
-              <div key={String(s?.key)} className="rounded-md border border-slate-700/70 bg-slate-950/25 px-2 py-1.5 min-h-[34px]">
-                <div className="flex items-center gap-1.5 text-[10px] text-slate-100 truncate">
+              <div key={String(s?.key)} className="rounded-md border border-slate-700/70 bg-slate-950/25 px-2 py-1.5 min-h-[50px]">
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-100">
                   {stepIcon(String(s?.status ?? 'pending'))}
-                  <span className="truncate">{String(s?.label ?? '-')}</span>
+                  <span>{String(s?.label ?? '-')}</span>
                 </div>
-                <div className="text-[8px] text-slate-400 mt-0.5 truncate">{String(s?.detail ?? '')}</div>
+                <div className="text-[8.5px] text-slate-400 mt-0.5 leading-3 break-words">{String(s?.detail ?? '')}</div>
               </div>
             ))}
             {!job?.steps && (
@@ -344,36 +493,42 @@ export default function UERANSIMValidationPage() {
               {ues.length === 0 && <div className="col-span-2 text-[11px] text-slate-500 py-6 text-center">UE 容器启动后显示终端状态</div>}
             </div>
 
-            <div className="flex items-center gap-2 mb-2">
-              <select
-                value={from}
-                onChange={(e) => setFrom(e.target.value as Direction)}
-                className="h-8 rounded-lg bg-slate-950/70 border border-slate-700/80 text-slate-100 text-[11px] px-2 outline-none"
-                disabled={!canSend}
-              >
-                <option value="ue1">UE-1 → UE-2</option>
-                <option value="ue2">UE-2 → UE-1</option>
-              </select>
-              <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') send()
-                }}
-                disabled={!canSend}
-                maxLength={512}
-                className="h-8 min-w-0 flex-1 rounded-lg bg-slate-950/70 border border-slate-700/80 text-slate-100 text-[11px] px-2 outline-none disabled:opacity-50"
-                placeholder={canSend ? '输入要发送到另一个 UE 的消息' : '验证成功后可发送 UE 间消息'}
-              />
-              <button
-                onClick={send}
-                disabled={!canSend || sending || !message.trim()}
-                className="h-8 px-3 rounded-lg bg-cyan-500/15 border border-cyan-400/30 text-cyan-100 text-[11px] inline-flex items-center gap-1.5 disabled:opacity-45"
-              >
-                <Send className="w-3.5 h-3.5" />
-                发送
-              </button>
-            </div>
+            {activeMode === 'smoke' ? (
+              <div className="flex items-center gap-2 mb-2">
+                <select
+                  value={from}
+                  onChange={(e) => setFrom(e.target.value as Direction)}
+                  className="h-8 rounded-lg bg-slate-950/70 border border-slate-700/80 text-slate-100 text-[11px] px-2 outline-none"
+                  disabled={!canSend}
+                >
+                  <option value="ue1">UE-1 → UE-2</option>
+                  <option value="ue2">UE-2 → UE-1</option>
+                </select>
+                <input
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') send()
+                  }}
+                  disabled={!canSend}
+                  maxLength={512}
+                  className="h-8 min-w-0 flex-1 rounded-lg bg-slate-950/70 border border-slate-700/80 text-slate-100 text-[11px] px-2 outline-none disabled:opacity-50"
+                  placeholder={canSend ? '输入要发送到另一个 UE 的消息' : '验证成功后可发送 UE 间消息'}
+                />
+                <button
+                  onClick={send}
+                  disabled={!canSend || sending || !message.trim()}
+                  className="h-8 px-3 rounded-lg bg-cyan-500/15 border border-cyan-400/30 text-cyan-100 text-[11px] inline-flex items-center gap-1.5 disabled:opacity-45"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  发送
+                </button>
+              </div>
+            ) : (
+              <div className="mb-2 rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-2 text-[10px] text-slate-400">
+                重调度恢复流程使用单 UE 验证注册、PDU Session 和恢复后重新接入，双 UE 消息面板仅在“双 UE 功能”流程中启用。
+              </div>
+            )}
 
             <div className="min-h-0 flex-1 grid grid-cols-2 gap-2 overflow-hidden">
               {ues.map((ue: any) => (
@@ -397,13 +552,74 @@ export default function UERANSIMValidationPage() {
               backdropFilter: 'blur(14px)',
             }}
           >
-            <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold mb-2">验证日志</div>
+            <div className="flex items-center gap-2 mb-2">
+              <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold">验证日志</div>
+              {showReschedule && (
+                <span className="ml-auto text-[10px] px-2 py-0.5 rounded border border-cyan-400/25 bg-cyan-500/10 text-cyan-100">重调度流程</span>
+              )}
+            </div>
+            {showReschedule && report?.state === 'waiting_manual_fault' && (
+              <div className="mb-2 rounded-lg border border-amber-400/35 bg-amber-500/12 px-2 py-2 text-[10px] text-amber-100 flex gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-300 mt-0.5 flex-none" />
+                <div>基线单 UE 验证已通过。请在“故障控制”页手动注入卫星或链路故障，本页面会自动检测原核心网停服与重调度恢复。</div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2 text-[10px] mb-2">
               <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-slate-300">状态: {status}</div>
               <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-slate-300">进度: {Number(job?.progress ?? 0)}%</div>
               <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-slate-300">AMF: {String(job?.amf_ip ?? '-')}</div>
               <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-slate-300">gNB: {String(job?.gnb_ip ?? '-')}</div>
             </div>
+            {showReschedule && report && (
+              <div className="mb-2 rounded-xl border border-slate-700/70 bg-slate-950/30 p-2 text-[10px] text-slate-300 max-h-[190px] overflow-auto">
+                <div className="flex items-center gap-1.5 text-cyan-100 font-semibold mb-1.5">
+                  <GitCompare className="w-3.5 h-3.5" />
+                  恢复对比
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 mb-2">
+                  <div className="rounded-md bg-slate-900/70 border border-slate-700/70 px-2 py-1">
+                    原部署: {Number(report?.baseline?.core_nfs_running ?? 0)}/{Number(report?.baseline?.core_nfs_total ?? 0)} NF
+                  </div>
+                  <div className="rounded-md bg-slate-900/70 border border-slate-700/70 px-2 py-1">
+                    恢复后: {Number(report?.recovered?.core_nfs_running ?? 0)}/{Number(report?.recovered?.core_nfs_total ?? 0)} NF
+                  </div>
+                  <div className="rounded-md bg-slate-900/70 border border-slate-700/70 px-2 py-1">
+                    恢复耗时: {report?.recovery_time_ms != null ? `${Number(report.recovery_time_ms)} ms` : '-'}
+                  </div>
+                  <div className="rounded-md bg-slate-900/70 border border-slate-700/70 px-2 py-1">
+                    范围: {diff?.scope === 'overall' ? '整体重调度' : diff?.scope === 'partial' ? '局部重调度' : '-'}
+                  </div>
+                </div>
+                {stoppedNfs.length > 0 && (
+                  <div className="mb-2">
+                    <div className="text-amber-200 mb-1">故障时停止网元</div>
+                    <div className="space-y-1">
+                      {stoppedNfs.slice(0, 6).map((nf: any, idx: number) => (
+                        <div key={`stopped-${idx}`} className="font-mono text-[9px] text-slate-400">
+                          {String(nf?.nf_type ?? '-').toUpperCase()} @ {String(nf?.node ?? '-')} · {String(nf?.container ?? '-')}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {movedNfs.length > 0 && (
+                  <div>
+                    <div className="text-cyan-200 mb-1">网元重放置</div>
+                    <div className="space-y-1">
+                      {movedNfs.slice(0, 10).map((nf: any, idx: number) => (
+                        <div key={`move-${idx}`} className={String(nf?.status) === 'moved' ? 'text-emerald-200' : 'text-slate-500'}>
+                          <span className="font-mono">{String(nf?.nf_type ?? '-').toUpperCase()}</span>
+                          <span className="text-slate-500">: </span>
+                          <span className="font-mono">{String(nf?.from_node ?? '-')}</span>
+                          <span className="text-slate-500"> → </span>
+                          <span className="font-mono">{String(nf?.to_node ?? '-')}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <pre className="min-h-0 flex-1 overflow-auto rounded-xl border border-slate-700/70 bg-black/35 p-2 text-[9px] leading-4 text-slate-300 whitespace-pre-wrap font-mono">
 {Array.isArray(job?.logs) && job.logs.length > 0 ? job.logs.join('\n') : '等待启动验证...'}
             </pre>

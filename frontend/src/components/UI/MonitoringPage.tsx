@@ -386,14 +386,6 @@ export default function MonitoringPage() {
     [orchestrationTraces]
   )
 
-  const faultEvents = useMemo(
-    () => runtimeEvents.filter((e) => e.type === 'fault_event').slice(0, 20),
-    [runtimeEvents]
-  )
-  const recoveryEvents = useMemo(
-    () => runtimeEvents.filter((e) => e.type === 'recovery_event').slice(0, 20),
-    [runtimeEvents]
-  )
   const faultHeatmap = useMemo(() => {
     const fallbackRows = DEFAULT_NODE_FAULT_TYPES
     const rows: string[] = []
@@ -442,15 +434,22 @@ export default function MonitoringPage() {
     return { rows: rows.map((r) => faultTypeLabel(r)), matrix }
   }, [runtimeEvents])
 
-  const sessionImpactSeries = useMemo(() => {
-    const ordered = [...runtimeEvents].reverse()
-    const vals: number[] = []
-    ordered.forEach((e) => {
-      if (e.type !== 'recovery_event') return
-      const impact = Number(e.raw?.affected_services ?? (e.raw?.entity_type === 'session' ? 1 : 0))
-      vals.push(Math.max(0, impact))
+  const faultVolumeSeries = useMemo(() => {
+    const buckets = new Array(12).fill(0)
+    const faults = runtimeEvents.filter((e) => e.type === 'fault_event')
+    const times = faults
+      .map((e) => Date.parse(String(e.sim_time ?? '')))
+      .filter((t) => Number.isFinite(t))
+    const latest = times.length > 0 ? Math.max(...times) : Date.now()
+    const bucketMs = 5 * 60 * 1000
+    const start = latest - buckets.length * bucketMs
+    faults.forEach((e) => {
+      const ts = Date.parse(String(e.sim_time ?? ''))
+      if (!Number.isFinite(ts) || ts < start) return
+      const idx = Math.min(buckets.length - 1, Math.max(0, Math.floor((ts - start) / bucketMs)))
+      buckets[idx] += 1
     })
-    return vals.slice(-80)
+    return buckets
   }, [runtimeEvents])
 
   const decisionQuality = useMemo(() => {
@@ -714,7 +713,7 @@ export default function MonitoringPage() {
             </div>
           </div>
 
-          <div className="col-span-12 lg:col-span-7 rounded-2xl p-3"
+          <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold flex items-center gap-1.5">
               <Timer className="w-4 h-4 text-violet-300" />编排性能指标
@@ -742,54 +741,6 @@ export default function MonitoringPage() {
             </div>
             <div className="mt-2">
               <AxisLineChart values={inferenceSeries} color="#a78bfa" title="最近策略推理时延趋势" yLabel="时延(ms)" xLabel="决策序列" />
-            </div>
-          </div>
-
-          <div className="col-span-12 lg:col-span-5 rounded-2xl p-3"
-            style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
-            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4 text-amber-300" />故障-恢复事件流
-            </div>
-            <div className="text-[10px] text-slate-500 mb-2">
-              说明：按时间展示故障与恢复事件，可用于定位影响范围与恢复链路。
-            </div>
-            <div className="grid grid-cols-2 gap-2 mb-2 text-[11px]">
-              <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">最近故障事件</div>
-                <div className="text-amber-200 text-lg font-semibold">{faultEvents.length}</div>
-              </div>
-              <div className="rounded-lg p-2 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">最近恢复事件</div>
-                <div className="text-emerald-200 text-lg font-semibold">{recoveryEvents.length}</div>
-              </div>
-            </div>
-            <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
-              {[...runtimeEvents.filter((e) => e.type === 'fault_event' || e.type === 'recovery_event').slice(0, 30)].map((e) => (
-                <div
-                  key={e.id}
-                  className="rounded-lg p-2 border text-[11px]"
-                  style={{
-                    background: e.type === 'fault_event' ? 'rgba(113,42,27,0.3)' : 'rgba(16,84,67,0.28)',
-                    borderColor: e.type === 'fault_event' ? 'rgba(251,146,60,0.35)' : 'rgba(74,222,128,0.3)',
-                  }}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={e.type === 'fault_event' ? 'text-amber-200' : 'text-emerald-200'}>
-                      {e.type === 'fault_event' ? '故障' : '恢复'}
-                    </span>
-                    <span className="text-slate-400">{e.sim_time || '-'}</span>
-                  </div>
-                  <div className="text-slate-200 mt-0.5">
-                    {String(e.raw?.entity_type ?? '') === 'session'
-                      ? `${e.type === 'fault_event' ? '故障事件' : '恢复事件'} ${resolveSfcLabel(String(e.raw?.entity_id ?? ''), String(e.raw?.request_id ?? ''))}`
-                      : e.message}
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    类型: {faultTypeLabel(String(e.raw?.fault_type ?? e.raw?.reason ?? 'unknown'))}
-                  </div>
-                </div>
-              ))}
-              {runtimeEvents.length === 0 && <div className="text-[11px] text-slate-500">暂无事件</div>}
             </div>
           </div>
 
@@ -850,15 +801,15 @@ export default function MonitoringPage() {
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4 text-sky-300" />故障热力与会话影响
+              <AlertTriangle className="w-4 h-4 text-sky-300" />故障热力与故障规模
             </div>
             <div className="text-[10px] text-slate-500 mb-1">
-              说明：热力图反映时间窗口内不同故障类型密度；曲线展示恢复事件造成的业务影响量。
+              说明：热力图反映时间窗口内不同故障类型密度；曲线展示故障事件数量变化。
             </div>
             <div className="text-[10px] text-slate-400">最近 60 分钟故障热力（5分钟粒度）</div>
             <Heatmap matrix={faultHeatmap.matrix} rowLabels={faultHeatmap.rows} title="故障类型时序热力图" />
-            <div className="mt-1 text-[10px] text-slate-400">恢复事件会话影响趋势（受影响业务数）</div>
-            <AxisLineChart values={sessionImpactSeries} color="#22d3ee" title="恢复事件会话影响趋势" yLabel="受影响业务数" xLabel="事件序列" />
+            <div className="mt-1 text-[10px] text-slate-400">最近 60 分钟故障数量趋势（5分钟粒度）</div>
+            <AxisLineChart values={faultVolumeSeries} color="#22d3ee" title="故障事件数量趋势" yLabel="事件数" xLabel="时间窗口" />
           </div>
 
           <div className="col-span-12 rounded-2xl p-3"

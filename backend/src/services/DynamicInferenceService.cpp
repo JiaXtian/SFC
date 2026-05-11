@@ -1521,6 +1521,29 @@ nlohmann::json DynamicInferenceService::start_session(
     }
     session.auto_redeploy = auto_redeploy;
     session.active = true;
+
+    if (!initial_deployment_id.empty()) {
+        for (const auto& kv : sessions_) {
+            const auto& existing = kv.second;
+            if (!existing.active) continue;
+            if (existing.orchestration_deployment_id != initial_deployment_id) continue;
+            return {
+                {"session_id", existing.session_id},
+                {"active", true},
+                {"auto_redeploy", existing.auto_redeploy},
+                {"request_id", existing.request.request_id},
+                {"deduplicated", true},
+                {"initial_result", {
+                    {"session_id", existing.session_id},
+                    {"status", "stable"},
+                    {"topology_version", existing.last_topology_version},
+                    {"sim_time", existing.last_sim_time},
+                    {"inference_time_ms", existing.last_inference_time_ms}
+                }}
+            };
+        }
+    }
+
     sessions_[session.session_id] = session;
     sessions_[session.session_id].orchestration_deployment_id = initial_deployment_id;
 
@@ -1724,6 +1747,52 @@ bool DynamicInferenceService::stop_session(const std::string& session_id) {
     }
     it->second.active = false;
     return true;
+}
+
+std::vector<std::string> DynamicInferenceService::stop_sessions_for_deployment(
+    const std::string& deployment_id,
+    const std::string& request_id
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> released_ids;
+    bool released_any = false;
+
+    for (auto& kv : sessions_) {
+        auto& session = kv.second;
+        if (!session.active) continue;
+        const bool deployment_match =
+            !deployment_id.empty() &&
+            (session.orchestration_deployment_id == deployment_id ||
+             session.active_resource_deployment_id == deployment_id);
+        const bool request_match =
+            !request_id.empty() && session.request.request_id == request_id;
+        if (!deployment_match && !request_match) continue;
+
+        if (!session.active_resource_deployment_id.empty()) {
+            const std::string alloc_id = session.active_resource_deployment_id;
+            if (res_mgr_->release_resources(alloc_id)) {
+                released_ids.push_back(alloc_id);
+                released_any = true;
+            } else {
+                spdlog::debug(
+                    "Session {} failed to release allocation {} while stopping deployment {}",
+                    session.session_id,
+                    alloc_id,
+                    deployment_id
+                );
+            }
+            session.active_resource_deployment_id.clear();
+        }
+        session.active = false;
+        session.auto_redeploy = false;
+        session.pending_replanning = false;
+    }
+
+    if (released_any) {
+        auto updated_topology = res_mgr_->export_current_topology();
+        topo_mgr_->save_current_topology(updated_topology);
+    }
+    return released_ids;
 }
 
 nlohmann::json DynamicInferenceService::list_sessions() const {

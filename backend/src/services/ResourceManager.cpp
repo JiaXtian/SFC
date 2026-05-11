@@ -1,10 +1,38 @@
 #include "services/ResourceManager.h"
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <unordered_set>
 
 namespace sfc {
+namespace {
+
+struct EffectiveResource {
+    double cpu = 0.0;
+    double mem = 0.0;
+    double disk = 0.0;
+};
+
+EffectiveResource effective_resource_for(
+    const DeploymentCandidate::PerVNF& pv,
+    const std::vector<VNF>& vnfs,
+    size_t index
+) {
+    EffectiveResource res;
+    if (index < vnfs.size()) {
+        res.cpu = std::max(0.0, vnfs[index].cpu);
+        res.mem = std::max(0.0, vnfs[index].mem);
+        res.disk = std::max(0.0, vnfs[index].disk);
+    }
+    if (res.cpu <= 1e-9) res.cpu = std::max(0.0, pv.cpu_used);
+    if (res.mem <= 1e-9) res.mem = std::max(0.0, pv.mem_used);
+    if (res.disk <= 1e-9) res.disk = std::max(0.0, pv.disk_used);
+    if (res.disk <= 1e-9 && res.mem > 1e-9) res.disk = res.mem * 2.0;
+    return res;
+}
+
+} // namespace
 
 ResourceManager::ResourceManager() {
     metadata_.total_sats = 0;
@@ -130,35 +158,84 @@ bool ResourceManager::allocate_resources(
     std::lock_guard<std::mutex> lock(mutex_);
     
     ResourceSnapshot snapshot;
+    auto rollback_partial = [&]() {
+        for (const auto& [node_id, cpu_amount] : snapshot.cpu_allocations) {
+            auto node_it = satellites_.find(node_id);
+            if (node_it != satellites_.end()) {
+                node_it->second.cpu_available = std::min(node_it->second.cpu_total, node_it->second.cpu_available + cpu_amount);
+            }
+        }
+        for (const auto& [node_id, mem_amount] : snapshot.mem_allocations) {
+            auto node_it = satellites_.find(node_id);
+            if (node_it != satellites_.end()) {
+                node_it->second.mem_available = std::min(node_it->second.mem_total, node_it->second.mem_available + mem_amount);
+            }
+        }
+        for (const auto& [node_id, disk_amount] : snapshot.disk_allocations) {
+            auto node_it = satellites_.find(node_id);
+            if (node_it != satellites_.end()) {
+                node_it->second.disk_available = std::min(node_it->second.disk_total, node_it->second.disk_available + disk_amount);
+            }
+        }
+        for (const auto& [src, dst, bw_amount] : snapshot.bw_allocations) {
+            std::string key1 = make_link_key(src, dst);
+            std::string key2 = make_link_key(dst, src);
+            auto link_it = links_.find(key1);
+            if (link_it == links_.end()) link_it = links_.find(key2);
+            if (link_it != links_.end()) {
+                link_it->second.bandwidth_available_gbps =
+                    std::min(link_it->second.bandwidth_gbps, link_it->second.bandwidth_available_gbps + bw_amount);
+                link_it->second.status =
+                    (link_it->second.bandwidth_available_gbps <= link_it->second.bandwidth_gbps * 0.15)
+                        ? "congested" : "active";
+                links_[key1] = link_it->second;
+                links_[key2] = link_it->second;
+            }
+            auto alloc_it = link_allocated_gbps_.find(make_canonical_link_key(src, dst));
+            if (alloc_it != link_allocated_gbps_.end()) {
+                alloc_it->second -= bw_amount;
+                if (alloc_it->second <= 1e-9) link_allocated_gbps_.erase(alloc_it);
+            }
+        }
+    };
     
-    // 分配节点资源
-    for (size_t i = 0; i < candidate.per_vnf.size() && i < vnfs.size(); ++i) {
+    // 分配节点资源。以 candidate.per_vnf 为主，vnfs 仅作为资源规格补充；
+    // 避免核心网候选只携带 per_core_nf/per_vnf 时因为 vnfs 为空而没有扣减。
+    for (size_t i = 0; i < candidate.per_vnf.size(); ++i) {
         const auto& pv = candidate.per_vnf[i];
-        const auto& vnf = vnfs[i];
+        const auto res = effective_resource_for(pv, vnfs, i);
+        if (pv.node.empty()) continue;
+        if (res.cpu <= 1e-9 && res.mem <= 1e-9 && res.disk <= 1e-9) {
+            spdlog::warn("Skip zero resource allocation for deployment {} NF {} on {}",
+                         deployment_id, pv.core_nf.empty() ? pv.vnf : pv.core_nf, pv.node);
+            continue;
+        }
         
         auto it = satellites_.find(pv.node);
         if (it == satellites_.end()) {
             spdlog::error("Node {} not found", pv.node);
+            rollback_partial();
             return false;
         }
         
-        if (it->second.cpu_available < vnf.cpu ||
-            it->second.mem_available < vnf.mem ||
-            it->second.disk_available < vnf.disk) {
+        if (it->second.cpu_available < res.cpu ||
+            it->second.mem_available < res.mem ||
+            it->second.disk_available < res.disk) {
             spdlog::error("Insufficient resources on node {}", pv.node);
+            rollback_partial();
             return false;
         }
         
-        it->second.cpu_available -= vnf.cpu;
-        it->second.mem_available -= vnf.mem;
-        it->second.disk_available -= vnf.disk;
+        it->second.cpu_available -= res.cpu;
+        it->second.mem_available -= res.mem;
+        it->second.disk_available -= res.disk;
         
-        snapshot.cpu_allocations.push_back({pv.node, vnf.cpu});
-        snapshot.mem_allocations.push_back({pv.node, vnf.mem});
-        snapshot.disk_allocations.push_back({pv.node, vnf.disk});
+        snapshot.cpu_allocations.push_back({pv.node, res.cpu});
+        snapshot.mem_allocations.push_back({pv.node, res.mem});
+        snapshot.disk_allocations.push_back({pv.node, res.disk});
         
         spdlog::debug("Allocated on {}: CPU {:.2f}, MEM {:.2f}, DISK {:.2f}", 
-                     pv.node, vnf.cpu, vnf.mem, vnf.disk);
+                     pv.node, res.cpu, res.mem, res.disk);
     }
     
     // 分配链路带宽
@@ -173,32 +250,87 @@ bool ResourceManager::allocate_resources(
         
         if (it == links_.end()) {
             spdlog::error("Link {}->{} not found", link_detail.src, link_detail.dst);
-            continue;  // 跳过而不是失败
+            rollback_partial();
+            return false;
         }
         
         double bw_needed = link_detail.bandwidth_required_gbps > 0.0
                          ? link_detail.bandwidth_required_gbps
                          : 0.1;
-        if (it->second.bandwidth_available_gbps >= bw_needed) {
-            it->second.bandwidth_available_gbps -= bw_needed;
-            if (it->second.bandwidth_available_gbps <= it->second.bandwidth_gbps * 0.15) {
-                it->second.status = "congested";
-            } else {
-                it->second.status = "active";
-            }
-            snapshot.bw_allocations.push_back({link_detail.src, link_detail.dst, bw_needed});
-            link_allocated_gbps_[make_canonical_link_key(link_detail.src, link_detail.dst)] += bw_needed;
+        if (it->second.bandwidth_available_gbps + 1e-9 < bw_needed) {
+            spdlog::error(
+                "Insufficient bandwidth on link {}->{}: need {:.3f}Gbps, available {:.3f}Gbps",
+                link_detail.src,
+                link_detail.dst,
+                bw_needed,
+                it->second.bandwidth_available_gbps
+            );
+            rollback_partial();
+            return false;
+        }
 
-            // 双向键都更新，保持状态一致
-            if (key1 != key2) {
-                links_[key1] = it->second;
-                links_[key2] = it->second;
-            }
+        it->second.bandwidth_available_gbps -= bw_needed;
+        if (it->second.bandwidth_available_gbps <= it->second.bandwidth_gbps * 0.15) {
+            it->second.status = "congested";
+        } else {
+            it->second.status = "active";
+        }
+        snapshot.bw_allocations.push_back({link_detail.src, link_detail.dst, bw_needed});
+        link_allocated_gbps_[make_canonical_link_key(link_detail.src, link_detail.dst)] += bw_needed;
+
+        // 双向键都更新，保持状态一致
+        if (key1 != key2) {
+            links_[key1] = it->second;
+            links_[key2] = it->second;
         }
     }
     
     deployments_[deployment_id] = snapshot;
     spdlog::info("Resources allocated for deployment {}", deployment_id);
+    return true;
+}
+
+bool ResourceManager::restore_allocation_snapshot(
+    const std::string& deployment_id,
+    const DeploymentCandidate& candidate,
+    const std::vector<VNF>& vnfs
+) {
+    if (deployment_id.empty()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    const auto existing = deployments_.find(deployment_id);
+    if (existing != deployments_.end()) {
+        for (const auto& [src, dst, bw] : existing->second.bw_allocations) {
+            auto alloc_it = link_allocated_gbps_.find(make_canonical_link_key(src, dst));
+            if (alloc_it == link_allocated_gbps_.end()) continue;
+            alloc_it->second -= bw;
+            if (alloc_it->second <= 1e-9) link_allocated_gbps_.erase(alloc_it);
+        }
+        deployments_.erase(existing);
+    }
+
+    ResourceSnapshot snapshot;
+    for (size_t i = 0; i < candidate.per_vnf.size(); ++i) {
+        const auto& pv = candidate.per_vnf[i];
+        if (pv.node.empty()) continue;
+        const auto res = effective_resource_for(pv, vnfs, i);
+        if (res.cpu <= 1e-9 && res.mem <= 1e-9 && res.disk <= 1e-9) continue;
+        snapshot.cpu_allocations.push_back({pv.node, res.cpu});
+        snapshot.mem_allocations.push_back({pv.node, res.mem});
+        snapshot.disk_allocations.push_back({pv.node, res.disk});
+    }
+
+    for (const auto& link_detail : candidate.link_details) {
+        if (link_detail.src.empty() || link_detail.dst.empty() || link_detail.src == link_detail.dst) continue;
+        double bw_needed = link_detail.bandwidth_required_gbps > 0.0
+                         ? link_detail.bandwidth_required_gbps
+                         : 0.1;
+        snapshot.bw_allocations.push_back({link_detail.src, link_detail.dst, bw_needed});
+        link_allocated_gbps_[make_canonical_link_key(link_detail.src, link_detail.dst)] += bw_needed;
+    }
+
+    deployments_[deployment_id] = std::move(snapshot);
+    spdlog::info("Resource allocation snapshot restored for deployment {}", deployment_id);
     return true;
 }
 

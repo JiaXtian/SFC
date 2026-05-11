@@ -36,6 +36,8 @@ export interface CoreNFDependency {
 export interface Deployment {
   deployment_id: string
   backend_deployment_id?: string
+  core_network_id?: string
+  core_network_label?: string
   request_id: string
   sfc_name: string
   candidate_index: number
@@ -107,6 +109,8 @@ export interface Deployment {
 export interface CandidateResult {
   requestId: string
   sfcName: string
+  coreNetworkId?: string
+  coreNetworkLabel?: string
   candidates: any[]
   inferenceTime?: number
   topologyVersion: number
@@ -204,6 +208,8 @@ export interface DecisionTrace {
   trigger?: string
   session_id?: string
   request_id: string
+  core_network_id?: string
+  core_network_label?: string
   source_node?: string
   destination_node?: string
   topology_version: number
@@ -1141,6 +1147,22 @@ export const useStore = create<Store>((set, get) => ({
       return {
         deployments: nextDeployments,
         highlightedDeploymentIds: nextHighlighted,
+        runtimeEvents: nextDeployments.length === 0
+          ? s.runtimeEvents.filter((evt) => {
+              const type = String(evt.type)
+              if (type === 'recovery_event') return String(evt.raw?.entity_type ?? '') !== 'session'
+              return ![
+                'deployment_action',
+                'deployment_update',
+                'deployment_runtime_update',
+                'decision_trace',
+                'session_update',
+                'reschedule_trigger',
+                'path_recompute_trigger',
+                'planning_result',
+              ].includes(type)
+            })
+          : s.runtimeEvents,
       }
     })
     get().refreshDeploymentPaths()
@@ -1405,8 +1427,10 @@ export const useStore = create<Store>((set, get) => ({
     const base: Deployment = {
       deployment_id: depId,
       backend_deployment_id: existing?.backend_deployment_id,
+      core_network_id: existing?.core_network_id ?? String(trace.core_network_id ?? depId),
+      core_network_label: existing?.core_network_label ?? String(trace.core_network_label ?? ''),
       request_id: trace.request_id,
-      sfc_name: `核心网策略 ${trace.request_id}`,
+      sfc_name: existing?.core_network_label ?? String(trace.core_network_label ?? existing?.sfc_name ?? `核心网策略 ${trace.request_id}`),
       candidate_index: 0,
       status: chosen.satisfies_constraints ? 'completed' : 'in-progress',
       inference_latency_ms: resolvedInference,

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
-import { resolveSfcLabel } from '@/utils/sfcLabel'
+import { clearSfcIdentityRegistry, rememberSfcIdentity, resolveSfcLabel } from '@/utils/sfcLabel'
 import { getAuthToken } from '@/auth/session'
 import { apiClient } from '@/api/client'
 
@@ -93,8 +93,15 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
             if (type === 'deployment_update') {
               const deploymentId = String(data.deployment_id ?? '')
               const sfcLabel = sfcLabelByDeploymentId(deploymentId)
+              const eventLabel = String(data.core_network_label || data.sfc_name || sfcLabel)
               const status = String(data.status ?? 'completed')
               if (status === 'rolled_back') {
+                rememberSfcIdentity({
+                  deploymentId,
+                  requestId: String(data.request_id ?? ''),
+                  coreNetworkId: String(data.core_network_id ?? ''),
+                  label: eventLabel,
+                })
                 removeDeployment(deploymentId)
                 const removedIds = Array.isArray(data?.removed_deployment_ids) ? data.removed_deployment_ids : []
                 removedIds.forEach((id: any) => {
@@ -108,6 +115,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                       apiClient.getTopology(),
                     ])
                     if (Array.isArray(depList)) {
+                      if (depList.length === 0) clearSfcIdentityRegistry()
                       setDeployments(depList as any)
                     }
                     if (applyTopologySnapshotEnabled) {
@@ -126,16 +134,22 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                   }
                 })()
               } else {
-                updateDeployment(deploymentId, {
+                const patch: any = {
                   status: status as any,
                   progress: Number(data.progress ?? 100),
-                })
+                }
+                if (data.core_network_id) patch.core_network_id = String(data.core_network_id)
+                if (data.core_network_label) {
+                  patch.core_network_label = String(data.core_network_label)
+                  patch.sfc_name = String(data.core_network_label)
+                }
+                updateDeployment(deploymentId, patch)
               }
               pushRuntimeEvent({
                 type: 'deployment_update',
                 sim_time: data.sim_time,
-                message: `部署进度 ${sfcLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
-                raw: { ...data, sfc_name: sfcLabel },
+                message: `部署进度 ${eventLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
+                raw: { ...data, sfc_name: eventLabel },
               })
               return
             }
