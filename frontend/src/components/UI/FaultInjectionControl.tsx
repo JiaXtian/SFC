@@ -586,9 +586,15 @@ export default function FaultInjectionControl() {
                 ))}
               </div>
             )}
-            <button disabled={injectingFaults} onClick={injectNodeFault} className="w-full h-8 rounded-lg text-[12px] font-semibold text-white bg-rose-600/85 border border-rose-400/55 hover:bg-rose-500/90 disabled:opacity-60">
-              {injectingFaults ? '注入中...' : '执行节点故障注入'}
-            </button>
+            <div className="flex justify-end pt-0.5">
+              <button
+                disabled={injectingFaults}
+                onClick={injectNodeFault}
+                className="h-7 min-w-[132px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition"
+              >
+                {injectingFaults ? '注入中...' : '节点故障注入'}
+              </button>
+            </div>
           </section>
 
           <section className="col-span-12 xl:col-span-6 p-2 rounded-xl border border-slate-700/60 bg-slate-900/25 space-y-1.5">
@@ -617,9 +623,15 @@ export default function FaultInjectionControl() {
                 <input type="number" min={1} max={3600} step={1} value={linkFaultDurationSec} onChange={(e) => setLinkFaultDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))} className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-200" />
               </label>
             </div>
-            <button disabled={injectingFaults} onClick={injectLinkFault} className="w-full h-8 rounded-lg text-[12px] font-semibold text-white bg-rose-600/85 border border-rose-400/55 hover:bg-rose-500/90 disabled:opacity-60">
-              {injectingFaults ? '注入中...' : '执行链路故障注入'}
-            </button>
+            <div className="flex justify-end pt-0.5">
+              <button
+                disabled={injectingFaults}
+                onClick={injectLinkFault}
+                className="h-7 min-w-[132px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition"
+              >
+                {injectingFaults ? '注入中...' : '链路故障注入'}
+              </button>
+            </div>
           </section>
         </div>
 

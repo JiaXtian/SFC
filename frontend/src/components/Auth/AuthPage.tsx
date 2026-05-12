@@ -73,9 +73,6 @@ export default function AuthPage({ portal = 'main' as 'main' | 'control' }) {
 
   return (
     <div className="auth-shell w-screen h-screen overflow-hidden flex items-center justify-center px-4">
-      <div className="auth-starfield auth-starfield-a" />
-      <div className="auth-starfield auth-starfield-b" />
-      <div className="auth-starfield auth-starfield-c" />
       <div className="auth-card w-full max-w-[450px] p-7 sm:p-8 relative z-10">
         <div className="flex items-center gap-2.5 mb-5">
           <div className="h-10 w-10 rounded-xl flex items-center justify-center auth-logo-wrap">
@@ -162,12 +159,6 @@ export default function AuthPage({ portal = 'main' as 'main' | 'control' }) {
           </button>
         </form>
 
-        <div className="mt-4 text-[11px] text-slate-400/90">
-          默认账号：
-          <span className="text-cyan-200 ml-1">admin / 123456</span>
-          <span className="mx-1 text-slate-500">|</span>
-          <span className="text-cyan-200">user / 123456</span>
-        </div>
       </div>
     </div>
   )
