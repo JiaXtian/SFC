@@ -10,12 +10,12 @@ SKIP_INFER=0
 
 DEVICE="auto"
 EPOCHS=80
-MAX_REQUESTS_PER_FILE=10
+MAX_REQUESTS_PER_FILE=15
 MAX_DATA_FILES=16
 WARMUP_EPOCHS=6
 TIME_BUDGET_HOURS=0.0
 MIN_EPOCHS=0
-HEURISTIC_TOP_M=64
+HEURISTIC_TOP_M=80
 EVAL_DATA_FILES=10
 EVAL_REQUESTS_PER_FILE=8
 
@@ -24,8 +24,11 @@ REL_CURR_END_EPOCH=32
 REL_CURR_MIN_SCALE=0.72
 REL_CURR_STRICT_RATIO=0.78
 REL_CURR_STRICT_RAMP_RATIO=0.24
-SHARED_RESOURCES_PROB_MIN=0.18
-SHARED_RESOURCES_PROB_MAX=0.42
+SHARED_RESOURCES_PROB_MIN=0.60
+SHARED_RESOURCES_PROB_MAX=0.90
+CONTINUOUS_GROUP_LEN_MIN=6
+CONTINUOUS_GROUP_LEN_MAX=15
+EVAL_CONTINUOUS_GROUP_LEN=15
 
 TRAIN_TOPOLOGIES=20
 TRAIN_GROUPS_PER_TOPOLOGY=4
@@ -84,6 +87,9 @@ usage() {
   --rel-curr-strict-ramp-ratio N
   --shared-resources-prob-min N
   --shared-resources-prob-max N
+  --continuous-group-len-min N
+  --continuous-group-len-max N
+  --eval-continuous-group-len N
 
 推理参数:
   --top-m N
@@ -146,6 +152,9 @@ while [[ $# -gt 0 ]]; do
     --rel-curr-strict-ramp-ratio) REL_CURR_STRICT_RAMP_RATIO="$2"; shift 2 ;;
     --shared-resources-prob-min) SHARED_RESOURCES_PROB_MIN="$2"; shift 2 ;;
     --shared-resources-prob-max) SHARED_RESOURCES_PROB_MAX="$2"; shift 2 ;;
+    --continuous-group-len-min) CONTINUOUS_GROUP_LEN_MIN="$2"; shift 2 ;;
+    --continuous-group-len-max) CONTINUOUS_GROUP_LEN_MAX="$2"; shift 2 ;;
+    --eval-continuous-group-len) EVAL_CONTINUOUS_GROUP_LEN="$2"; shift 2 ;;
     --train-topologies) TRAIN_TOPOLOGIES="$2"; shift 2 ;;
     --train-groups-per-topology) TRAIN_GROUPS_PER_TOPOLOGY="$2"; shift 2 ;;
     --train-requests-per-group) TRAIN_REQUESTS_PER_GROUP="$2"; shift 2 ;;
@@ -216,7 +225,10 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
     --rel_curr_strict_ratio "$REL_CURR_STRICT_RATIO" \
     --rel_curr_strict_ramp_ratio "$REL_CURR_STRICT_RAMP_RATIO" \
     --shared_resources_prob_min "$SHARED_RESOURCES_PROB_MIN" \
-    --shared_resources_prob_max "$SHARED_RESOURCES_PROB_MAX"
+    --shared_resources_prob_max "$SHARED_RESOURCES_PROB_MAX" \
+    --continuous_group_len_min "$CONTINUOUS_GROUP_LEN_MIN" \
+    --continuous_group_len_max "$CONTINUOUS_GROUP_LEN_MAX" \
+    --eval_continuous_group_len "$EVAL_CONTINUOUS_GROUP_LEN"
 else
   log "2/5" "跳过训练"
 fi

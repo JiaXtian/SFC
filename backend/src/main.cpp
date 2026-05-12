@@ -372,6 +372,19 @@ sfc::SFCRequest request_from_deployment_record(const nlohmann::json& dep, const 
             }
         }
     }
+    if (dep.contains("independent_core_nfs") && dep["independent_core_nfs"].is_array()) {
+        std::unordered_set<std::string> seen;
+        for (const auto& item : dep["independent_core_nfs"]) {
+            if (!item.is_string()) continue;
+            std::string token = lower_ascii_copy(item.get<std::string>());
+            token.erase(std::remove_if(token.begin(), token.end(), [](unsigned char ch) {
+                return std::isspace(ch);
+            }), token.end());
+            if (!token.empty() && seen.insert(token).second) {
+                request.independent_core_nfs.push_back(token);
+            }
+        }
+    }
     return request;
 }
 
@@ -664,7 +677,7 @@ int main() {
             if (control_config.contains("resource_sampling_interval_sec")) {
                 boot_sampling_interval_sec = std::max(
                     10.0,
-                    std::min(30.0, control_config.value("resource_sampling_interval_sec", 15.0))
+                    std::min(120.0, control_config.value("resource_sampling_interval_sec", 15.0))
                 );
             }
             if (control_config.contains("simulation_speed")) {

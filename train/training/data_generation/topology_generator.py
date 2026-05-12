@@ -5,6 +5,7 @@ from datetime import datetime
 
 import networkx as nx
 import numpy as np
+from sgp4.api import Satrec
 
 try:
     from training.open5gs_profile import BUSINESS_DIMENSIONS, NODE_FEATURE_DIM, zero_business_load
@@ -13,7 +14,7 @@ except ImportError:  # pragma: no cover - direct script execution from train/tra
 
 
 class SatelliteConstellationGenerator:
-    """Walker-Delta LEO 星座生成器，使用 SGP4/TLE 风格平均根数生成节点/链路指标。"""
+    """Walker-Delta LEO 星座生成器，使用 SGP4/TLE 两行根数生成节点/链路指标。"""
 
     def __init__(
         self,
@@ -53,7 +54,6 @@ class SatelliteConstellationGenerator:
         self.earth_radius_km = 6371.0
         self.sgp4_earth_radius_km = 6378.135
         self.sgp4_mu_km3_s2 = 398600.8
-        self.sgp4_j2 = 1.082616e-3
         self.orbit_radius_km = self.sgp4_earth_radius_km + self.altitude_km
 
     def generate(self, seed=42):
@@ -211,48 +211,22 @@ class SatelliteConstellationGenerator:
         params["tle_line2"] = line2
         return params
 
-    @staticmethod
-    def _solve_kepler(mean_anomaly_rad, eccentricity):
-        ecc_anomaly = mean_anomaly_rad
-        for _ in range(10):
-            f = ecc_anomaly - eccentricity * math.sin(ecc_anomaly) - mean_anomaly_rad
-            fp = 1.0 - eccentricity * math.cos(ecc_anomaly)
-            if abs(fp) < 1e-12:
-                break
-            step = f / fp
-            ecc_anomaly -= step
-            if abs(step) < 1e-12:
-                break
-        return ecc_anomaly
-
     def _propagate_sgp4(self, params, minutes_since_epoch):
-        eccentricity = max(0.0, min(0.25, float(params.get("eccentricity", 0.0001))))
-        mean_motion = float(params.get("mean_motion_rev_per_day") or self._mean_motion_from_altitude(self.altitude_km))
-        semi_major = self._semi_major_axis(mean_motion)
-        inclination = math.radians(float(params.get("inclination_deg", params.get("inclination", self.inclination_deg))))
-        p = semi_major * (1.0 - eccentricity**2)
-        n_rad_min = mean_motion * 2.0 * math.pi / 1440.0
-        coeff = 1.5 * self.sgp4_j2 * (self.sgp4_earth_radius_km**2) / (p**2) * n_rad_min
-        raan_rate = -coeff * math.cos(inclination)
-        argp_rate = 0.5 * coeff * (5.0 * math.cos(inclination) ** 2 - 1.0)
-        mean_rate = n_rad_min + 0.5 * coeff * math.sqrt(max(1e-9, 1.0 - eccentricity**2)) * (
-            3.0 * math.cos(inclination) ** 2 - 1.0
-        )
+        line1 = str(params.get("tle_line1", "")).strip()
+        line2 = str(params.get("tle_line2", "")).strip()
+        if not line1 or not line2:
+            raise ValueError("SGP4 propagation requires tle_line1 and tle_line2")
 
-        raan = math.radians(float(params.get("raan", 0.0))) + raan_rate * minutes_since_epoch
-        argp = math.radians(float(params.get("argument_of_perigee_deg", 0.0))) + argp_rate * minutes_since_epoch
-        mean = math.radians(float(params.get("mean_anomaly_deg", params.get("true_anomaly", 0.0)))) + mean_rate * minutes_since_epoch
-        ecc_anomaly = self._solve_kepler(mean % (2.0 * math.pi), eccentricity)
-        radius = semi_major * (1.0 - eccentricity * math.cos(ecc_anomaly))
-        true_anomaly = math.atan2(
-            math.sqrt(max(0.0, 1.0 - eccentricity**2)) * math.sin(ecc_anomaly),
-            math.cos(ecc_anomaly) - eccentricity,
-        )
+        satrec = Satrec.twoline2rv(line1, line2)
+        epoch_jd = float(params.get("epoch_jd", satrec.jdsatepoch + satrec.jdsatepochF))
+        target_jd = epoch_jd + float(minutes_since_epoch) / 1440.0
+        jd_whole = math.floor(target_jd)
+        error, position_km, _velocity_km_s = satrec.sgp4(jd_whole, target_jd - jd_whole)
+        if error != 0:
+            raise ValueError(f"SGP4 propagation failed with code {error}")
 
-        u = argp + true_anomaly
-        x = radius * (math.cos(raan) * math.cos(u) - math.sin(raan) * math.sin(u) * math.cos(inclination))
-        y = radius * (math.sin(raan) * math.cos(u) + math.cos(raan) * math.sin(u) * math.cos(inclination))
-        z = radius * (math.sin(u) * math.sin(inclination))
+        x, y, z = map(float, position_km)
+        radius = math.sqrt(x * x + y * y + z * z)
 
         return {
             "coordinates": {
@@ -262,9 +236,9 @@ class SatelliteConstellationGenerator:
                 "lat": float(math.degrees(math.asin(max(-1.0, min(1.0, z / max(1.0, radius)))))),
                 "lon": float(math.degrees(math.atan2(y, x))),
             },
-            "true_anomaly": self._wrap_deg(math.degrees(true_anomaly)),
-            "raan": self._wrap_deg(math.degrees(raan)),
-            "argument_of_perigee_deg": self._wrap_deg(math.degrees(argp)),
+            "true_anomaly": self._wrap_deg(float(params.get("mean_anomaly_deg", 0.0))),
+            "raan": self._wrap_deg(float(params.get("raan", 0.0))),
+            "argument_of_perigee_deg": self._wrap_deg(float(params.get("argument_of_perigee_deg", 0.0))),
             "altitude_km": float(radius - self.sgp4_earth_radius_km),
         }
 

@@ -379,6 +379,7 @@ struct SFCRequest {
     std::vector<VNF> vnfs;
     std::vector<CoreNFDependency> core_nf_dependencies;
     std::vector<std::vector<std::string>> custom_nf_bindings;
+    std::vector<std::string> independent_core_nfs;
     struct {
         double max_latency_ms;
         double registration_latency_ms = 120.0;
@@ -401,7 +402,6 @@ struct SFCRequest {
         double resource = -1.0;
         double reliability = -1.0;
         double bandwidth = -1.0;
-        double dispersion = -1.0;
     } score_weights;
 };
 

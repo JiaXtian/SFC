@@ -20,13 +20,18 @@ $SKIP_BUILD = 0
 $SKIP_INFER = 0
 
 $DEVICE = "auto"
+<<<<<<< HEAD
 $EPOCHS = 40
 $MAX_REQUESTS_PER_FILE = 10
+=======
+$EPOCHS = 80
+$MAX_REQUESTS_PER_FILE = 15
+>>>>>>> 22fb55667fa7e7ad0dd1314a414a2a8e7c9dbc30
 $MAX_DATA_FILES = 16
 $WARMUP_EPOCHS = 6
 $TIME_BUDGET_HOURS = 0.0
 $MIN_EPOCHS = 0
-$HEURISTIC_TOP_M = 64
+$HEURISTIC_TOP_M = 80
 $EVAL_DATA_FILES = 10
 $EVAL_REQUESTS_PER_FILE = 8
 
@@ -35,8 +40,11 @@ $REL_CURR_END_EPOCH = 32
 $REL_CURR_MIN_SCALE = 0.72
 $REL_CURR_STRICT_RATIO = 0.78
 $REL_CURR_STRICT_RAMP_RATIO = 0.24
-$SHARED_RESOURCES_PROB_MIN = 0.18
-$SHARED_RESOURCES_PROB_MAX = 0.42
+$SHARED_RESOURCES_PROB_MIN = 0.60
+$SHARED_RESOURCES_PROB_MAX = 0.90
+$CONTINUOUS_GROUP_LEN_MIN = 6
+$CONTINUOUS_GROUP_LEN_MAX = 15
+$EVAL_CONTINUOUS_GROUP_LEN = 15
 
 $TRAIN_TOPOLOGIES = 20
 $TRAIN_GROUPS_PER_TOPOLOGY = 4
@@ -93,6 +101,9 @@ Training/data options:
   --rel-curr-strict-ramp-ratio N
   --shared-resources-prob-min N
   --shared-resources-prob-max N
+  --continuous-group-len-min N
+  --continuous-group-len-max N
+  --eval-continuous-group-len N
 
 Inference/build options:
   --top-m N
@@ -306,6 +317,18 @@ while ($i -lt $args.Count) {
             $SHARED_RESOURCES_PROB_MAX = [double](Need-Value $arg $i $args)
             $i += 2
         }
+        "--continuous-group-len-min" {
+            $CONTINUOUS_GROUP_LEN_MIN = [int](Need-Value $arg $i $args)
+            $i += 2
+        }
+        "--continuous-group-len-max" {
+            $CONTINUOUS_GROUP_LEN_MAX = [int](Need-Value $arg $i $args)
+            $i += 2
+        }
+        "--eval-continuous-group-len" {
+            $EVAL_CONTINUOUS_GROUP_LEN = [int](Need-Value $arg $i $args)
+            $i += 2
+        }
         "--train-topologies" {
             $TRAIN_TOPOLOGIES = [int](Need-Value $arg $i $args)
             $i += 2
@@ -457,7 +480,10 @@ if ($SKIP_TRAIN -eq 0) {
         "--rel_curr_strict_ratio", "$REL_CURR_STRICT_RATIO",
         "--rel_curr_strict_ramp_ratio", "$REL_CURR_STRICT_RAMP_RATIO",
         "--shared_resources_prob_min", "$SHARED_RESOURCES_PROB_MIN",
-        "--shared_resources_prob_max", "$SHARED_RESOURCES_PROB_MAX"
+        "--shared_resources_prob_max", "$SHARED_RESOURCES_PROB_MAX",
+        "--continuous_group_len_min", "$CONTINUOUS_GROUP_LEN_MIN",
+        "--continuous_group_len_max", "$CONTINUOUS_GROUP_LEN_MAX",
+        "--eval_continuous_group_len", "$EVAL_CONTINUOUS_GROUP_LEN"
     )
 
     & python @trainArgs

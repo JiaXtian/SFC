@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { RefreshCw, Upload, Orbit, Activity, Cpu, Database, FileText, X } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
@@ -283,8 +284,8 @@ export default function ConstellationControlPanel({
           onChange={(e) => onImportThirdParty(e.target.files?.[0])}
         />
       </div>
-      {showImportExample && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 px-4">
+      {showImportExample && createPortal((
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/65 px-4">
           <div className="w-[680px] max-w-full max-h-[82vh] overflow-hidden rounded-2xl border border-cyan-400/25 bg-slate-950 shadow-2xl">
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
               <div>
@@ -310,6 +311,8 @@ export default function ConstellationControlPanel({
       "type": "satellite",
       "orbital_params": {
         "propagation_model": "SGP4",
+        "tle_line1": "1 00001U 26001A   26131.00000000  .00000000  00000-0  50000-4 0  9990",
+        "tle_line2": "2 00001  53.0000   0.0000 0001000   0.0000   0.0000 15.05500000000000",
         "plane": 0,
         "position_in_plane": 0,
         "raan": 0,
@@ -337,6 +340,8 @@ export default function ConstellationControlPanel({
       "type": "satellite",
       "orbital_params": {
         "propagation_model": "SGP4",
+        "tle_line1": "1 00002U 26001A   26131.00000000  .00000000  00000-0  50000-4 0  9990",
+        "tle_line2": "2 00002  53.0000   0.0000 0001000   0.0000 180.0000 15.05500000000000",
         "plane": 0,
         "position_in_plane": 1,
         "raan": 0,
@@ -376,7 +381,7 @@ export default function ConstellationControlPanel({
             </pre>
           </div>
         </div>
-      )}
+      ), document.body)}
     </div>
   )
 }

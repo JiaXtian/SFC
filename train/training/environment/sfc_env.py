@@ -51,6 +51,9 @@ class SFCEnvironment:
             "sla_fail": -8.0,
             "hotspot_penalty": -2.2,
             "fragment_penalty": -1.6,
+            "latency_margin": 1.0,
+            "quality_resource_pressure": 1.55,
+            "quality_business_pressure": 1.35,
         }
         self.request = None
         self.core_nfs: List[Dict] = []
@@ -388,7 +391,8 @@ class SFCEnvironment:
         node_business_pressure = max(node_load_after.values()) if node_load_after else 0.0
         projected_delay = self.accumulated_dependency_delay + total_delay
         sla = self._extract_sla()
-        if projected_delay > sla["latency_requirement_ms"] * 1.08:
+        latency_margin = float(self.reward_config.get("latency_margin", 1.0))
+        if projected_delay > sla["latency_requirement_ms"] * latency_margin:
             return None
         score = (
             total_delay
@@ -651,10 +655,12 @@ class SFCEnvironment:
         max_utils = []
         mean_utils = []
         colocations = []
+        pressure = float(self.reward_config.get("quality_resource_pressure", 1.0))
         for _, node in records:
             utils = self._node_resource_utils(node)
-            max_utils.append(max(utils))
-            mean_utils.append(float(np.mean(utils)))
+            amplified = [self._clamp01(value * pressure) for value in utils]
+            max_utils.append(max(amplified))
+            mean_utils.append(float(np.mean(amplified)))
             colocations.append(max(0, int(node.get("deployed_core_nf_count", 0)) - 1))
         mean_pressure = float(np.mean(max_utils))
         peak_pressure = float(max(max_utils))
@@ -662,11 +668,11 @@ class SFCEnvironment:
         colocation_penalty = min(1.0, float(sum(colocations)) / max(1.0, len(self.core_nfs)))
         score = (
             1.0
-            - 1.05 * mean_pressure
-            - 0.35 * peak_pressure
-            - 0.35 * spread
+            - 0.76 * mean_pressure
+            - 0.22 * peak_pressure
+            - 0.24 * spread
             - 0.18 * colocation_penalty
-            + 0.12 * (1.0 - float(np.mean(mean_utils)))
+            + 0.10 * (1.0 - float(np.mean(mean_utils)))
         )
         return self._clamp01(score)
 
@@ -676,15 +682,19 @@ class SFCEnvironment:
             return 0.70
         max_loads = []
         avg_loads = []
+        pressure = float(self.reward_config.get("quality_business_pressure", 1.0))
         for _, node in records:
             load = node.get("core_business_load", {})
-            values = [float(load.get(dim, node.get(dim, 0.0))) for dim in BUSINESS_DIMENSIONS]
+            values = [
+                self._clamp01(float(load.get(dim, node.get(dim, 0.0))) * pressure)
+                for dim in BUSINESS_DIMENSIONS
+            ]
             max_loads.append(max(values))
             avg_loads.append(float(np.mean(values)))
         mean_load = float(np.mean(max_loads))
         peak_load = float(max(max_loads))
         spread = float(np.std(max_loads)) if len(max_loads) > 1 else 0.0
-        score = 1.0 - 0.95 * mean_load - 0.35 * peak_load - 0.35 * spread + 0.08 * (1.0 - float(np.mean(avg_loads)))
+        score = 1.0 - 0.78 * mean_load - 0.22 * peak_load - 0.24 * spread + 0.08 * (1.0 - float(np.mean(avg_loads)))
         return self._clamp01(score)
 
     def _future_feasibility_score(self) -> float:
@@ -692,6 +702,8 @@ class SFCEnvironment:
         if not nodes or not self.core_nfs:
             return 0.0
         per_nf_scores = []
+        resource_pressure = float(self.reward_config.get("quality_resource_pressure", 1.0))
+        business_pressure_scale = float(self.reward_config.get("quality_business_pressure", 1.0))
         for nf in self.core_nfs:
             feasible = 0
             projected_pressures = []
@@ -708,8 +720,8 @@ class SFCEnvironment:
                 if business_pressure > 0.92:
                     continue
                 feasible += 1
-                projected_pressures.append(self._projected_resource_pressure(node, nf))
-                business_pressures.append(business_pressure)
+                projected_pressures.append(self._clamp01(self._projected_resource_pressure(node, nf) * resource_pressure))
+                business_pressures.append(self._clamp01(business_pressure * business_pressure_scale))
             feasible_ratio = feasible / max(1, len(nodes))
             if feasible == 0:
                 per_nf_scores.append(0.0)

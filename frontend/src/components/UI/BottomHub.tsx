@@ -51,7 +51,7 @@ export default function BottomHub() {
   const [searchInput, setSearchInput] = useState('')
   const speedSyncTimerRef = useRef<number | null>(null)
   const speed = Math.max(0.1, Math.min(8, Number(useStore((s) => s.autoDynamics.time_scale) || 1)))
-  const resourceUpdateSec = Math.max(10, Math.min(30, Number(useStore((s) => s.autoDynamics.resource_update_sec) || 15)))
+  const resourceUpdateSec = Math.max(10, Math.min(120, Number(useStore((s) => s.autoDynamics.resource_update_sec) || 15)))
 
   const satIndex = useMemo(() => {
     const exact = new Map<string, any>()

@@ -114,7 +114,7 @@ private:
         const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
         std::string* disconnected_from = nullptr,
         std::string* disconnected_to = nullptr
-    ) const;
+    );
     void trim_latency_window_locked();
     nlohmann::json build_metrics_payload_locked(
         int decisions_this_tick,

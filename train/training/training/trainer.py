@@ -34,7 +34,8 @@ class SFCTrainer:
         backend_align_context=True,
         max_probe_candidates=5,
         max_decision_ms=420.0,
-        teacher_probe_candidates=10,
+        teacher_probe_candidates=32,
+        teacher_rescue_candidates=48,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -45,6 +46,7 @@ class SFCTrainer:
         self.max_probe_candidates = int(max(4, max_probe_candidates))
         self.max_decision_ms = float(max(120.0, max_decision_ms))
         self.teacher_probe_candidates = int(max(6, teacher_probe_candidates))
+        self.teacher_rescue_candidates = int(max(8, teacher_rescue_candidates))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -506,7 +508,10 @@ class SFCTrainer:
                 )
 
             actor_action_idx = int(max(0, min(actor_action_idx, len(candidate_indices) - 1)))
-            probe_order = [actor_action_idx] + [idx for idx in range(len(candidate_indices)) if idx != actor_action_idx]
+            if execution_mode == "teacher":
+                probe_order = list(range(len(candidate_indices)))
+            else:
+                probe_order = [actor_action_idx] + [idx for idx in range(len(candidate_indices)) if idx != actor_action_idx]
             max_probe = min(self.max_probe_candidates, len(probe_order))
             if execution_mode == "teacher":
                 max_probe = min(max(self.teacher_probe_candidates, max_probe), len(probe_order))
@@ -523,7 +528,7 @@ class SFCTrainer:
                     if execution_mode == "actor":
                         break
             if not probe_candidates:
-                extra_fallback = 4 if execution_mode == "actor" else 8
+                extra_fallback = 12 if execution_mode == "actor" else 16
                 fallback_limit = min(max_probe + extra_fallback, len(probe_order))
                 for probe_idx in probe_order[max_probe:fallback_limit]:
                     if (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
@@ -533,6 +538,42 @@ class SFCTrainer:
                     if plan:
                         probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
                         break
+            if not probe_candidates and execution_mode == "teacher":
+                rescue_candidates = heuristic_pruner.prune(
+                    env.topology,
+                    vnf,
+                    deployed_by_type=state.get("deployed_by_type", {}),
+                    dependencies=state.get("dependencies", []),
+                    remaining_delay=float(state.get("remaining_delay", float("inf"))),
+                    top_m=max(heuristic_pruner.top_m, 128),
+                    current_nf_idx=int(state.get("current_nf_idx", 0)),
+                    total_core_nfs=int(state.get("total_core_nfs", 12)),
+                    accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
+                    reliability_requirement=float(state.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(state.get("accumulated_hops", 0)),
+                    max_dependency_hops=max(24, int(state.get("max_dependency_hops", 16))),
+                )
+                rescue_seen = set()
+                for node_id in rescue_candidates[: self.teacher_rescue_candidates]:
+                    if node_id in rescue_seen or node_id not in node_index:
+                        continue
+                    rescue_seen.add(node_id)
+                    plan = env.plan_candidate(node_id)
+                    if plan:
+                        node_idx = node_index[node_id]
+                        if node_idx in candidate_indices:
+                            candidate_pos = candidate_indices.index(node_idx)
+                        else:
+                            candidate_pos = len(candidate_indices)
+                            candidate_indices.append(node_idx)
+                        probe_candidates.append(
+                            (
+                                float(plan.get("score", 0.0)),
+                                candidate_pos,
+                                node_id,
+                                plan,
+                            )
+                        )
             if probe_candidates:
                 if execution_mode == "teacher":
                     probe_candidates.sort(key=lambda x: x[0])
@@ -606,6 +647,7 @@ class SFCTrainer:
         max_requests_per_file=100,
         total_epochs=1,
         reliability_curriculum=None,
+        continuous_group_len=3,
     ):
         from training.environment.sfc_env import SFCEnvironment
 
@@ -636,6 +678,7 @@ class SFCTrainer:
         reliability_scale, strict_reliability_prob = self._resolve_reliability_curriculum(
             epoch, total_epochs, reliability_curriculum
         )
+        continuous_group_len = int(max(1, continuous_group_len))
 
         pbar = tqdm(train_data, desc=f"Epoch {epoch}")
         for topo_idx, (topo_file, req_file) in enumerate(pbar):
@@ -664,7 +707,7 @@ class SFCTrainer:
                     request_for_train,
                     epsilon,
                     heuristic_pruner,
-                    reset_resources=(not use_shared),
+                    reset_resources=(not use_shared) or (req_idx % continuous_group_len == 0),
                     execution_mode="teacher",
                 )
 
@@ -781,6 +824,7 @@ class SFCTrainer:
         heuristic_pruner,
         max_requests_per_file=4,
         shared_resources=False,
+        continuous_group_len=4,
     ):
         from training.environment.sfc_env import SFCEnvironment
 
@@ -802,6 +846,7 @@ class SFCTrainer:
         actor_hit_rates = []
         fallback_counts = []
         failure_reason_counts = {}
+        continuous_group_len = int(max(1, continuous_group_len))
 
         was_training = self.gnn.training
         self.gnn.eval()
@@ -815,7 +860,7 @@ class SFCTrainer:
             with open(req_file) as f:
                 req_data = json.load(f)
             env = SFCEnvironment(graph, self.device, shared_resources=shared_resources)
-            for request in req_data.get("requests", [])[:max_requests_per_file]:
+            for req_idx, request in enumerate(req_data.get("requests", [])[:max_requests_per_file]):
                 total_requests += 1
                 result = self._train_episode(
                     env,
@@ -823,7 +868,7 @@ class SFCTrainer:
                     request,
                     epsilon=0.0,
                     heuristic_pruner=heuristic_pruner,
-                    reset_resources=(not shared_resources),
+                    reset_resources=(not shared_resources) or (req_idx % continuous_group_len == 0),
                     update_model=False,
                     deterministic_policy=True,
                     execution_mode="actor",

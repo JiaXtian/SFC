@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <iomanip>
+#include <stdexcept>
 #include <sstream>
 
 namespace sfc::sgp4 {
@@ -30,6 +32,75 @@ double wrap_deg(double v) {
 
 double clamp(double v, double lo, double hi) {
     return std::max(lo, std::min(hi, v));
+}
+
+std::string trim(std::string s) {
+    const auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
+double parse_double_field(const std::string& raw, const char* name) {
+    const std::string value = trim(raw);
+    if (value.empty()) throw std::runtime_error(std::string("missing TLE field: ") + name);
+    return std::stod(value);
+}
+
+double julian_day_ymd(int year, int month, int day) {
+    if (month <= 2) {
+        year -= 1;
+        month += 12;
+    }
+    const int a = year / 100;
+    const int b = 2 - a + a / 4;
+    return std::floor(365.25 * static_cast<double>(year + 4716))
+        + std::floor(30.6001 * static_cast<double>(month + 1))
+        + static_cast<double>(day) + static_cast<double>(b) - 1524.5;
+}
+
+double parse_tle_epoch_jd(const std::string& line1) {
+    if (line1.size() < 32) throw std::runtime_error("TLE line1 is too short for epoch");
+    const std::string epoch = trim(line1.substr(18, 14));
+    if (epoch.size() < 5) throw std::runtime_error("invalid TLE epoch");
+    const int yy = std::stoi(epoch.substr(0, 2));
+    const int year = yy < 57 ? 2000 + yy : 1900 + yy;
+    const double day_of_year = std::stod(epoch.substr(2));
+    return julian_day_ymd(year, 1, 1) + (day_of_year - 1.0);
+}
+
+std::string iso_utc_from_julian(double epoch_jd) {
+    const double unix_seconds = (epoch_jd - 2440587.5) * kSecondsPerDay;
+    const auto whole = static_cast<std::time_t>(std::floor(unix_seconds));
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &whole);
+#else
+    gmtime_r(&whole, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return std::string(buf);
+}
+
+double parse_compact_tle_exponential(const std::string& raw) {
+    std::string s = trim(raw);
+    if (s.empty()) return 0.0;
+
+    int sign = 1;
+    if (!s.empty() && (s[0] == '-' || s[0] == '+')) {
+        sign = s[0] == '-' ? -1 : 1;
+        s = s.substr(1);
+    }
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
+    if (s.size() < 3) return 0.0;
+    const size_t exp_pos = s.find_last_of("+-");
+    if (exp_pos == std::string::npos || exp_pos == 0 || exp_pos + 1 >= s.size()) return 0.0;
+    const std::string mantissa_digits = s.substr(0, exp_pos);
+    const int exp = std::stoi(s.substr(exp_pos));
+    const double mantissa = static_cast<double>(std::stoll(mantissa_digits))
+        / std::pow(10.0, static_cast<int>(mantissa_digits.size()));
+    return static_cast<double>(sign) * mantissa * std::pow(10.0, exp);
 }
 
 double solve_kepler(double mean_anomaly_rad, double eccentricity) {
@@ -163,6 +234,45 @@ double orbital_period_minutes(double mean_motion_rev_per_day) {
     return kMinutesPerDay / std::max(1e-9, mean_motion_rev_per_day);
 }
 
+bool parse_tle_into_params(OrbitalParams& params, const std::string& tle_line1, const std::string& tle_line2, std::string* error) {
+    try {
+        const std::string line1 = trim(tle_line1);
+        const std::string line2 = trim(tle_line2);
+        if (line1.size() < 63 || line2.size() < 63) {
+            throw std::runtime_error("TLE line length is incomplete");
+        }
+        if (line1[0] != '1' || line2[0] != '2') {
+            throw std::runtime_error("TLE lines must start with 1/2");
+        }
+
+        params.propagation_model = "SGP4";
+        params.tle_line1 = line1;
+        params.tle_line2 = line2;
+        params.epoch_jd = parse_tle_epoch_jd(line1);
+        params.epoch_iso = iso_utc_from_julian(params.epoch_jd);
+        params.bstar = line1.size() >= 61 ? parse_compact_tle_exponential(line1.substr(53, 8)) : params.bstar;
+
+        params.inclination_deg = parse_double_field(line2.substr(8, 8), "inclination");
+        params.raan = wrap_deg(parse_double_field(line2.substr(17, 8), "raan"));
+        const std::string ecc_digits = trim(line2.substr(26, 7));
+        params.eccentricity = ecc_digits.empty() ? 0.0 : std::stod("0." + ecc_digits);
+        params.argument_of_perigee_deg = wrap_deg(parse_double_field(line2.substr(34, 8), "argument_of_perigee"));
+        params.mean_anomaly_deg = wrap_deg(parse_double_field(line2.substr(43, 8), "mean_anomaly"));
+        params.true_anomaly = params.mean_anomaly_deg;
+        params.mean_motion_rev_per_day = parse_double_field(line2.substr(52, 11), "mean_motion");
+        params.semi_major_axis_km = semi_major_axis_from_mean_motion_km(params.mean_motion_rev_per_day);
+        params.period_minutes = orbital_period_minutes(params.mean_motion_rev_per_day);
+        if (params.altitude_km <= 0.0 || params.altitude_km == 550.0) {
+            params.altitude_km = params.semi_major_axis_km - kEarthRadiusKm;
+        }
+        if (error) error->clear();
+        return true;
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
 OrbitalParams make_walker_sgp4_params(
     int plane,
     int position_in_plane,
@@ -212,6 +322,12 @@ OrbitalParams make_walker_sgp4_params(
 
 void ensure_sgp4_defaults(OrbitalParams& params, double fallback_altitude_km, double fallback_inclination_deg) {
     if (params.propagation_model.empty()) params.propagation_model = "SGP4";
+    if (!params.tle_line1.empty() || !params.tle_line2.empty()) {
+        std::string parse_error;
+        if (!parse_tle_into_params(params, params.tle_line1, params.tle_line2, &parse_error)) {
+            throw std::runtime_error("Invalid SGP4 TLE: " + parse_error);
+        }
+    }
     if (params.altitude_km <= 0.0) params.altitude_km = fallback_altitude_km > 0.0 ? fallback_altitude_km : 550.0;
     if (params.inclination_deg == 0.0 && fallback_inclination_deg > 0.0) params.inclination_deg = fallback_inclination_deg;
     if (params.mean_motion_rev_per_day <= 0.0) {
@@ -289,14 +405,15 @@ PropagationResult propagate(const OrbitalParams& raw_params, double minutes_sinc
 void propagate_inplace(Satellite& sat, double minutes_since_epoch) {
     ensure_sgp4_defaults(sat.orbital_params, sat.orbital_params.altitude_km, sat.orbital_params.inclination_deg);
     const double prior_minutes = sat.orbital_params.propagation_minutes;
-    const auto propagated = propagate(sat.orbital_params, minutes_since_epoch);
+    const double total_minutes = prior_minutes + std::max(0.0, minutes_since_epoch);
+    const auto propagated = propagate(sat.orbital_params, total_minutes);
     sat.coordinates = propagated.coordinates;
     sat.orbital_params.true_anomaly = propagated.true_anomaly_deg;
     sat.orbital_params.mean_anomaly_deg = propagated.mean_anomaly_deg;
     sat.orbital_params.raan = propagated.raan_deg;
     sat.orbital_params.argument_of_perigee_deg = propagated.argument_of_perigee_deg;
     sat.orbital_params.altitude_km = propagated.altitude_km;
-    sat.orbital_params.propagation_minutes = prior_minutes + propagated.minutes_since_epoch;
+    sat.orbital_params.propagation_minutes = total_minutes;
     sat.orbital_params.semi_major_axis_km = semi_major_axis_from_mean_motion_km(sat.orbital_params.mean_motion_rev_per_day);
     sat.orbital_params.period_minutes = orbital_period_minutes(sat.orbital_params.mean_motion_rev_per_day);
 }

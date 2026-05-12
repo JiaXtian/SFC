@@ -16,7 +16,7 @@ namespace sfc {
 namespace {
 
 constexpr double kMinSamplingIntervalSec = 10.0;
-constexpr double kMaxSamplingIntervalSec = 30.0;
+constexpr double kMaxSamplingIntervalSec = 120.0;
 
 constexpr double kEarthRadiusKm = 6371.0;
 constexpr double kLightSpeedKmPerSec = 299792.458;

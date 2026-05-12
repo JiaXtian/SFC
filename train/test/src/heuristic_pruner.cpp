@@ -96,6 +96,23 @@ std::vector<std::string> HeuristicPruner::get_candidate_nodes(
     float remaining_delay) {
     std::vector<std::pair<float, std::string>> scored_candidates;
     const std::string current_type = nf_type_of(vnf);
+    struct DependencyDistance {
+        CoreDependency dependency;
+        std::unordered_map<std::string, float> distances;
+    };
+    std::vector<DependencyDistance> dependency_distances;
+
+    for (const auto& dep : dependencies) {
+        if (dep.source == current_type) {
+            auto it = deployed_by_type.find(dep.target);
+            if (it == deployed_by_type.end()) continue;
+            dependency_distances.push_back({dep, dijkstra_single_source(graph, it->second, true)});
+        } else if (dep.target == current_type) {
+            auto it = deployed_by_type.find(dep.source);
+            if (it == deployed_by_type.end()) continue;
+            dependency_distances.push_back({dep, dijkstra_single_source(graph, it->second, false)});
+        }
+    }
 
     for (const auto& node : graph.get_nodes()) {
         if (!node.resources.has_sufficient_resources(vnf.cpu_required, vnf.mem_required, vnf.disk_required_gb)) {
@@ -106,26 +123,10 @@ std::vector<std::string> HeuristicPruner::get_candidate_nodes(
         float dependency_hops = 0.0f;
         float dependency_count = 0.0f;
         bool feasible = true;
-        for (const auto& dep : dependencies) {
-            std::string src_node;
-            std::string dst_node;
-            if (dep.source == current_type) {
-                auto it = deployed_by_type.find(dep.target);
-                if (it == deployed_by_type.end()) continue;
-                src_node = node.id;
-                dst_node = it->second;
-            } else if (dep.target == current_type) {
-                auto it = deployed_by_type.find(dep.source);
-                if (it == deployed_by_type.end()) continue;
-                src_node = it->second;
-                dst_node = node.id;
-            } else {
-                continue;
-            }
-
-            auto dist = dijkstra_single_source(graph, src_node, false);
-            auto it_dist = dist.find(dst_node);
-            if (it_dist == dist.end() || it_dist->second == std::numeric_limits<float>::infinity()) {
+        for (const auto& dep_dist : dependency_distances) {
+            const auto& dep = dep_dist.dependency;
+            auto it_dist = dep_dist.distances.find(node.id);
+            if (it_dist == dep_dist.distances.end() || it_dist->second == std::numeric_limits<float>::infinity()) {
                 feasible = false;
                 break;
             }

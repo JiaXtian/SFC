@@ -22,6 +22,7 @@ std::string iso_utc_now();
 double mean_motion_from_altitude_rev_per_day(double altitude_km);
 double semi_major_axis_from_mean_motion_km(double mean_motion_rev_per_day);
 double orbital_period_minutes(double mean_motion_rev_per_day);
+bool parse_tle_into_params(OrbitalParams& params, const std::string& tle_line1, const std::string& tle_line2, std::string* error = nullptr);
 
 OrbitalParams make_walker_sgp4_params(
     int plane,

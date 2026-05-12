@@ -41,7 +41,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_breakdown?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_breakdown?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_breakdown?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_breakdown?.dispersion ?? 0, 0),
         }
       : undefined,
     score_weights: raw?.score_weights && typeof raw.score_weights === 'object'
@@ -50,7 +49,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_weights?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_weights?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_weights?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_weights?.dispersion ?? 0, 0),
         }
       : undefined,
     score_constraints: raw?.score_constraints && typeof raw.score_constraints === 'object'
@@ -142,7 +140,7 @@ export function useBootstrapRuntime() {
       if (configRes.status === 'fulfilled') {
         const cfg = configRes.value ?? {}
         setAutoDynamics({
-          resource_update_sec: Math.max(10, Math.min(30, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
+          resource_update_sec: Math.max(10, Math.min(120, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
           time_scale: Math.max(0.1, Math.min(8, toNumber(cfg?.simulation_speed ?? 1, 1))),
         })
       }

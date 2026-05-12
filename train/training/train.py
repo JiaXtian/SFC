@@ -52,6 +52,51 @@ class HeuristicPruner:
         return self.fast_prefilter_limit
 
     @staticmethod
+    def _dependency_anchor_nodes(nf_type, deployed_by_type, dependencies):
+        anchors = []
+        for dep in dependencies or []:
+            src_type = str(dep.get("source", "")).lower()
+            dst_type = str(dep.get("target", "")).lower()
+            if src_type == nf_type and dst_type in deployed_by_type:
+                anchors.append(deployed_by_type[dst_type]["node"])
+            elif dst_type == nf_type and src_type in deployed_by_type:
+                anchors.append(deployed_by_type[src_type]["node"])
+        return anchors
+
+    @staticmethod
+    def _local_anchor_candidates(G, anchors, fast_by_node, radius=2, limit=192):
+        if not anchors:
+            return []
+        selected = []
+        seen = set()
+        frontier = [node for node in anchors if node in G]
+        for node in frontier:
+            if node in fast_by_node and node not in seen:
+                selected.append(fast_by_node[node])
+                seen.add(node)
+        current = set(frontier)
+        visited = set(frontier)
+        for _depth in range(max(1, int(radius))):
+            nxt = set()
+            for node in current:
+                if node not in G:
+                    continue
+                nxt.update(G.successors(node))
+                nxt.update(G.predecessors(node))
+            nxt -= visited
+            for node in sorted(nxt):
+                if node in fast_by_node and node not in seen:
+                    selected.append(fast_by_node[node])
+                    seen.add(node)
+                    if len(selected) >= limit:
+                        return selected
+            visited.update(nxt)
+            current = nxt
+            if not current:
+                break
+        return selected
+
+    @staticmethod
     def _nf_type(vnf: dict) -> str:
         return str(vnf.get("nf_type", vnf.get("core_nf_type", vnf.get("vnf_type", "")))).lower().replace("-", "_").replace(" ", "_")
 
@@ -230,8 +275,24 @@ class HeuristicPruner:
             return [node for node, *_ in best_fast]
 
         candidates = []
+        fast_by_node = {item[0]: item for item in fast_candidates}
         prefilter_limit = min(len(fast_candidates), self._prefilter_limit(len(G), top_m))
         best_fast = heapq.nsmallest(prefilter_limit, fast_candidates, key=lambda item: item[1])
+        anchors = self._dependency_anchor_nodes(nf_type, deployed_by_type, dependencies)
+        anchor_fast = self._local_anchor_candidates(
+            G,
+            anchors,
+            fast_by_node,
+            radius=2 if len(G) >= 1000 else 1,
+            limit=max(96, int(top_m) * 2),
+        )
+        merged_fast = []
+        seen_nodes = set()
+        for item in best_fast + anchor_fast:
+            if item[0] in seen_nodes:
+                continue
+            merged_fast.append(item)
+            seen_nodes.add(item[0])
         for (
             node_id,
             _fast_score,
@@ -240,7 +301,7 @@ class HeuristicPruner:
             projected_business_max,
             co_location,
             upf_hotspot_penalty,
-        ) in best_fast:
+        ) in merged_fast:
             dep_score = self._score_dependency_paths(G, node_id, nf_type, deployed_by_type, dependencies, int(max_dependency_hops))
             if dep_score is None:
                 continue
@@ -547,8 +608,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
-    parser.add_argument("--heuristic_top_m", type=int, default=64, help="候选剪枝上限")
-    parser.add_argument("--max_requests_per_file", type=int, default=10)
+    parser.add_argument("--heuristic_top_m", type=int, default=80, help="候选剪枝上限")
+    parser.add_argument("--max_requests_per_file", type=int, default=15)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
     parser.add_argument("--max_data_files", type=int, default=16, help="每个epoch最多使用的训练文件数，0表示全部")
     parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
@@ -559,8 +620,11 @@ def main():
     parser.add_argument("--rel_curr_min_scale", type=float, default=0.75, help="课程学习初始可靠性缩放系数")
     parser.add_argument("--rel_curr_strict_ratio", type=float, default=0.7, help="课程进度达到该比例后启用严格可靠性硬约束")
     parser.add_argument("--rel_curr_strict_ramp_ratio", type=float, default=0.2, help="严格可靠性从0到1的渐进区间比例")
-    parser.add_argument("--shared_resources_prob_min", type=float, default=0.25, help="训练早期共享资源模式概率")
-    parser.add_argument("--shared_resources_prob_max", type=float, default=0.45, help="训练后期共享资源模式概率")
+    parser.add_argument("--shared_resources_prob_min", type=float, default=0.60, help="训练早期共享资源模式概率")
+    parser.add_argument("--shared_resources_prob_max", type=float, default=0.90, help="训练后期共享资源模式概率")
+    parser.add_argument("--continuous_group_len_min", type=int, default=6, help="训练早期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--continuous_group_len_max", type=int, default=15, help="训练后期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--eval_continuous_group_len", type=int, default=15, help="验证时每个拓扑连续累加部署的请求数")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
     parser.add_argument("--eval_data_files", type=int, default=10, help="每轮固定验证使用的文件数")
@@ -582,6 +646,9 @@ def main():
         "rel_curr_strict_ramp_ratio": args.rel_curr_strict_ramp_ratio,
         "shared_resources_prob_min": args.shared_resources_prob_min,
         "shared_resources_prob_max": args.shared_resources_prob_max,
+        "continuous_group_len_min": args.continuous_group_len_min,
+        "continuous_group_len_max": args.continuous_group_len_max,
+        "eval_continuous_group_len": args.eval_continuous_group_len,
     }
 
     print("=" * 72)
@@ -667,6 +734,12 @@ def main():
             args.shared_resources_prob_min
             + (args.shared_resources_prob_max - args.shared_resources_prob_min) * train_progress
         )
+        current_continuous_group_len = int(
+            round(
+                args.continuous_group_len_min
+                + (args.continuous_group_len_max - args.continuous_group_len_min) * train_progress
+            )
+        )
 
         if args.max_data_files > 0:
             target_files = args.max_data_files
@@ -706,6 +779,7 @@ def main():
             max_requests_per_file=epoch_requests_per_file,
             total_epochs=args.epochs,
             reliability_curriculum=reliability_curriculum,
+            continuous_group_len=current_continuous_group_len,
         )
         eval_metrics = trainer.evaluate_epoch(
             epoch,
@@ -713,6 +787,7 @@ def main():
             heuristic,
             max_requests_per_file=args.eval_requests_per_file,
             shared_resources=True,
+            continuous_group_len=args.eval_continuous_group_len,
         )
         epoch_metrics.update(eval_metrics)
         best_eval_quality = max(best_eval_quality, float(eval_metrics.get("eval_avg_quality_score", 0.0)))
@@ -741,6 +816,7 @@ def main():
             f"EvalFallback={epoch_metrics.get('eval_fallback_count', 0)} | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
             f"AlgP95={epoch_metrics.get('p95_algorithm_latency_ms', 0.0):.2f}ms | "
+            f"ContGroup={current_continuous_group_len} | "
             f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"
         )
 

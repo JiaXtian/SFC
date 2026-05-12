@@ -119,11 +119,11 @@ export default function TimeAxis() {
           <input
             type="number"
             min={10}
-            max={30}
+            max={120}
             step={1}
             value={autoDynamics.resource_update_sec}
             onChange={(e) => {
-              const sampling = Math.max(10, Math.min(30, Number(e.target.value) || 15))
+              const sampling = Math.max(10, Math.min(120, Number(e.target.value) || 15))
               setAutoDynamics({ resource_update_sec: sampling })
               syncBackendDynamicConfig(sampling, autoDynamics.time_scale)
             }}
