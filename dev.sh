@@ -23,6 +23,7 @@ MYSQL_BINLOG_KEEP_DAYS="${SFC_MYSQL_BINLOG_KEEP_DAYS:-1}"                  # pur
 MYSQL_MAX_BINLOG_SIZE="${SFC_MYSQL_MAX_BINLOG_SIZE:-134217728}"            # 128MB
 DB_EVENT_RETENTION_DAYS="${SFC_DB_EVENT_RETENTION_DAYS:-14}"
 DB_RUNTIME_EVENT_RETENTION_DAYS="${SFC_DB_RUNTIME_EVENT_RETENTION_DAYS:-14}"
+TRUNCATE_RUN_LOGS_ON_START="${SFC_TRUNCATE_RUN_LOGS_ON_START:-1}"
 
 mkdir -p "${PID_DIR}" "${LOG_DIR}"
 
@@ -67,6 +68,15 @@ build_backend() {
   echo "building backend..."
   cmake -S "${ROOT_DIR}/backend" -B "${BACKEND_BUILD_DIR}"
   cmake --build "${BACKEND_BUILD_DIR}" -j
+}
+
+truncate_log_file_for_start() {
+  local log_file="$1"
+  if [[ "${TRUNCATE_RUN_LOGS_ON_START}" != "1" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "${log_file}")"
+  : > "${log_file}"
 }
 
 apply_mysql_storage_policy() {
@@ -242,6 +252,7 @@ start_backend() {
     exit 1
   fi
 
+  truncate_log_file_for_start "${BACKEND_LOG_FILE}"
   echo "starting backend..."
   (
     cd "${ROOT_DIR}/backend"
@@ -258,6 +269,7 @@ start_frontend_main() {
   fi
 
   echo "starting frontend-main (port 3001)..."
+  truncate_log_file_for_start "${FRONTEND_MAIN_LOG_FILE}"
   (
     cd "${ROOT_DIR}/frontend"
     nohup npm run dev:main -- --host 0.0.0.0 --port 3001 >>"${FRONTEND_MAIN_LOG_FILE}" 2>&1 &
@@ -273,6 +285,7 @@ start_frontend_control() {
   fi
 
   echo "starting frontend-control (port 3002)..."
+  truncate_log_file_for_start "${FRONTEND_CONTROL_LOG_FILE}"
   (
     cd "${ROOT_DIR}/frontend"
     nohup npm run dev:control -- --host 0.0.0.0 --port 3002 >>"${FRONTEND_CONTROL_LOG_FILE}" 2>&1 &

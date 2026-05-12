@@ -434,13 +434,32 @@ function isSatelliteDown(sat: SatelliteData | undefined): boolean {
   return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
 }
 
-function buildAdjacency(links: LinkData[], satellites: SatelliteData[]): PathGraph {
+function collectDownNodeIds(satellites: SatelliteData[]): Set<string> {
   const downNodes = new Set<string>()
   satellites.forEach((sat: any) => {
     const id = String(sat?.id ?? '')
     if (!id) return
     if (isSatelliteDown(sat as SatelliteData)) downNodes.add(id)
   })
+  return downNodes
+}
+
+function buildUsableLinkMap(links: LinkData[], satellites: SatelliteData[]): Map<string, LinkData> {
+  const downNodes = collectDownNodeIds(satellites)
+  const linkMap = new Map<string, LinkData>()
+  links.forEach((l) => {
+    if (downNodes.has(l.source) || downNodes.has(l.target)) return
+    const status = (l as any).status ?? 'active'
+    const avail = Number((l as any).bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0)
+    if (status === 'down' || avail <= 0) return
+    linkMap.set(linkKey(l.source, l.target), l)
+    linkMap.set(linkKey(l.target, l.source), l)
+  })
+  return linkMap
+}
+
+function buildAdjacency(links: LinkData[], satellites: SatelliteData[]): PathGraph {
+  const downNodes = collectDownNodeIds(satellites)
   const adj = new Map<string, string[]>()
   const linkMap = new Map<string, LinkData>()
   links.forEach((l) => {
@@ -780,6 +799,31 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
 function pathSignature(linkDetails: LinkDetail[] | undefined): string {
   if (!Array.isArray(linkDetails) || linkDetails.length === 0) return ''
   return linkDetails.map((l) => `${l.src}->${l.dst}`).join('|')
+}
+
+function deploymentRuntimeSignature(dep: Deployment | undefined): string {
+  if (!dep) return ''
+  const nf = (Array.isArray(dep.per_vnf) ? dep.per_vnf : [])
+    .map((p: any) => [
+      String(p?.core_nf ?? p?.vnf ?? p?.nf_type ?? ''),
+      String(p?.node ?? ''),
+      Number(p?.cpu_used ?? 0).toFixed(2),
+      Number(p?.mem_used ?? 0).toFixed(2),
+      Number(p?.disk_used ?? 0).toFixed(2),
+    ].join(':'))
+    .join(',')
+  return [
+    String(dep.status ?? ''),
+    String(dep.satisfies_constraints ?? ''),
+    String(dep.decision_trigger ?? ''),
+    pathSignature(dep.link_details),
+    (Array.isArray(dep.deployed_nodes) ? dep.deployed_nodes : []).join(','),
+    nf,
+    Number(dep.total_latency_ms ?? 0).toFixed(1),
+    Number(dep.bottleneck_bandwidth_gbps ?? 0).toFixed(2),
+    Number(dep.estimated_reliability ?? 0).toFixed(4),
+    Number(dep.inference_latency_ms ?? 0).toFixed(1),
+  ].join('|')
 }
 
 function decisionTraceSignature(trace: DecisionTrace): string {
@@ -1195,11 +1239,27 @@ export const useStore = create<Store>((set, get) => ({
   clearDeployments: () => set({ deployments: [], highlightedDeploymentIds: [] }),
   refreshDeploymentPaths: () => set((s) => {
     if (s.deployments.length === 0) return s
-    const graph = buildAdjacency(s.links, s.satellites)
+    const linkMap = buildUsableLinkMap(s.links, s.satellites)
+    let graph: PathGraph | null = null
     const topoV = Number(s.simulation.topology_version || s.topologyVersion || 0)
     let stateChanged = false
     const nextDeployments = s.deployments.map((dep) => {
-      const rebuilt = rebuildDeploymentPath(dep, graph)
+      let rebuilt = dep
+      const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
+      if (currentLinks.length > 0 && linksAreStillUsable(dep, linkMap)) {
+        const { refreshed, changed } = refreshLinkMetrics(currentLinks, linkMap)
+        if (changed) {
+          const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+          rebuilt = {
+            ...dep,
+            link_details: refreshed,
+            total_latency_ms: totalLatency > 0 ? totalLatency : dep.total_latency_ms,
+          }
+        }
+      } else {
+        if (!graph) graph = buildAdjacency(s.links, s.satellites)
+        rebuilt = rebuildDeploymentPath(dep, graph)
+      }
       const oldSig = pathSignature(dep.link_details)
       const newSig = pathSignature(rebuilt.link_details)
       const pathChanged = oldSig !== newSig
@@ -1207,11 +1267,11 @@ export const useStore = create<Store>((set, get) => ({
       const trackRecompute = hasBoundVersion && (dep.strategy_mode === 'session_continuous' || dep.path_recompute_count != null)
       const nextRecomputeCountRaw = (dep.path_recompute_count ?? 0) + (pathChanged && trackRecompute ? 1 : 0)
       const nextRecomputeCount = dep.path_recompute_count == null && !trackRecompute ? undefined : nextRecomputeCountRaw
-      const topologyChanged = Number(dep.topology_version_bound ?? -1) !== topoV
+      const shouldBindTopology = !hasBoundVersion || pathChanged
       const deploymentChanged =
         rebuilt !== dep ||
         dep.path_recompute_count !== nextRecomputeCount ||
-        topologyChanged ||
+        (shouldBindTopology && Number(dep.topology_version_bound ?? -1) !== topoV) ||
         dep.previous_link_details !== undefined ||
         dep.path_transition_until !== undefined
 
@@ -1219,7 +1279,7 @@ export const useStore = create<Store>((set, get) => ({
       stateChanged = true
       return {
         ...rebuilt,
-        topology_version_bound: topoV,
+        topology_version_bound: shouldBindTopology ? topoV : dep.topology_version_bound,
         path_recompute_count: nextRecomputeCount,
         previous_link_details: undefined,
         path_transition_until: undefined,
@@ -1255,7 +1315,7 @@ export const useStore = create<Store>((set, get) => ({
     const speed = Number(next.time_scale ?? s.autoDynamics.time_scale ?? 1)
     next.time_scale = Math.max(0.1, Math.min(8, Number.isFinite(speed) ? speed : 1))
     const positionHz = Number(next.position_update_hz ?? s.autoDynamics.position_update_hz ?? 4)
-    next.position_update_hz = Math.max(0.5, Math.min(12, Number.isFinite(positionHz) ? positionHz : 4))
+    next.position_update_hz = Math.max(0.5, Math.min(5, Number.isFinite(positionHz) ? positionHz : 4))
     return { autoDynamics: next }
   }),
   setSimulationViewMode: (mode) => {
@@ -1461,21 +1521,50 @@ export const useStore = create<Store>((set, get) => ({
       path_transition_until: undefined,
     }
 
-    const rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links, s.satellites))
+    const linkMap = buildUsableLinkMap(s.links, s.satellites)
+    let rebuilt = base
+    if (Array.isArray(base.link_details) && base.link_details.length > 0 && linksAreStillUsable(base, linkMap)) {
+      const { refreshed, changed } = refreshLinkMetrics(base.link_details, linkMap)
+      if (changed) {
+        const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+        rebuilt = {
+          ...base,
+          link_details: refreshed,
+          total_latency_ms: totalLatency > 0 ? totalLatency : base.total_latency_ms,
+        }
+      }
+    } else {
+      rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links, s.satellites))
+    }
     const hasExisting = !!existing
-    const deployments = hasExisting
-      ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
-      : [
+    if (hasExisting) {
+      const pathChanged = pathSignature(existing?.link_details) !== pathSignature(rebuilt.link_details)
+      rebuilt = {
+        ...rebuilt,
+        topology_version_bound: pathChanged || existing?.topology_version_bound == null
+          ? topoV
+          : existing.topology_version_bound,
+        path_recompute_count: (existing?.path_recompute_count ?? 0) + (pathChanged ? 1 : 0),
+      }
+    }
+    const highlightedAlready = s.highlightedDeploymentIds.includes(depId)
+    const runtimeUnchanged = hasExisting && deploymentRuntimeSignature(existing) === deploymentRuntimeSignature(rebuilt)
+    const deployments = runtimeUnchanged
+      ? s.deployments
+      : (hasExisting
+        ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
+        : [
           rebuilt,
           ...s.deployments.filter((dep) =>
             !(dep.request_id === trace.request_id && !dep.session_id)
           ),
-        ]
+        ])
 
-    const highlighted = s.highlightedDeploymentIds.includes(depId)
+    const highlighted = highlightedAlready
       ? s.highlightedDeploymentIds
       : [depId, ...s.highlightedDeploymentIds]
 
+    if (runtimeUnchanged && highlightedAlready) return {}
     return { deployments, highlightedDeploymentIds: highlighted }
   }),
   suppressSessionDeployment: (sessionId) => set((s) => ({

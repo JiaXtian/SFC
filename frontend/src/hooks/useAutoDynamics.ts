@@ -157,7 +157,6 @@ export function useAutoDynamics() {
   const lastTsRef = useRef<number>(performance.now())
   const posAccRef = useRef(0)
   const resAccRef = useRef(0)
-  const pathRefreshAccRef = useRef(0)
   const resourceSyncRunningRef = useRef(false)
   const clockEpochMsRef = useRef<number>(Date.now())
   const inactiveSinceRef = useRef<number | null>(null)
@@ -272,7 +271,6 @@ export function useAutoDynamics() {
         if (inactiveSinceRef.current == null) inactiveSinceRef.current = ts
         lastTsRef.current = ts
         posAccRef.current = 0
-        pathRefreshAccRef.current = 0
         rafRef.current = window.requestAnimationFrame(frame)
         return
       }
@@ -291,8 +289,8 @@ export function useAutoDynamics() {
 
       if (ad.enabled && ad.playing && s.satellites.length > 0) {
         const satCount = s.satellites.length
-        const configuredHz = clamp(0.5, 12, Number(ad.position_update_hz ?? 4))
-        const maxHzByScale = satCount >= 5000 ? 4 : (satCount >= 3000 ? 6 : 12)
+        const configuredHz = clamp(0.5, 5, Number(ad.position_update_hz ?? 4))
+        const maxHzByScale = satCount >= 8000 ? 3 : 5
         const posInterval = 1 / Math.min(configuredHz, maxHzByScale)
         posAccRef.current += dtReal
         resAccRef.current += dtReal
@@ -464,14 +462,6 @@ export function useAutoDynamics() {
                 : prev.autoDynamics.snap_visual_token,
             },
           }))
-          if (s.deployments.length > 0) {
-            pathRefreshAccRef.current += stepReal
-            const refreshInterval = satCount >= 5000 ? 1.5 : (satCount >= 4200 ? 0.9 : (satCount >= 2200 ? 0.5 : 0.16))
-            if (pathRefreshAccRef.current >= refreshInterval) {
-              pathRefreshAccRef.current = 0
-              useStore.getState().refreshDeploymentPaths()
-            }
-          }
         }
 
         if (resAccRef.current >= Math.max(10, ad.resource_update_sec)) {

@@ -285,7 +285,7 @@ export default function ConstellationControlPanel({
         />
       </div>
       {showImportExample && createPortal((
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 px-4">
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/65 px-4">
           <div className="w-[680px] max-w-full max-h-[82vh] overflow-hidden rounded-2xl border border-cyan-400/25 bg-slate-950 shadow-2xl">
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
               <div>
