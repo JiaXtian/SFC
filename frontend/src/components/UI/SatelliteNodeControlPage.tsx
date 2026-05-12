@@ -162,7 +162,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
         ?? (status as any)?.sampling_interval_sec
         ?? samplingSec
       )
-      const next = Math.max(10, Math.min(30, Number.isFinite(raw) ? raw : 15))
+      const next = Math.max(10, Math.min(120, Number.isFinite(raw) ? raw : 15))
       setSamplingSec(next)
       setAutoDynamics({ resource_update_sec: next })
       setSimulationStatus({ sampling_interval_sec: next })
@@ -174,7 +174,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
   const saveSamplingConfig = async () => {
     setSamplingSaving(true)
     try {
-      const next = Math.max(10, Math.min(30, Number(samplingSec || 15)))
+      const next = Math.max(10, Math.min(120, Number(samplingSec || 15)))
       await apiClient.updateControlConfig({
         resource_sampling_interval_sec: next,
         apply_now: true,
@@ -323,17 +323,17 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
             <ListChecks className="w-3.5 h-3.5 text-cyan-300" />
             系统资源采样配置
           </div>
-          <div className="mt-1 text-[10px] text-slate-400">控制 CPU/内存/磁盘与核心网业务负载采样周期（10~30秒）。</div>
+          <div className="mt-1 text-[10px] text-slate-400">控制 CPU/内存/磁盘与核心网业务负载采样周期（10~120秒）。</div>
           <div className="mt-2 flex items-end gap-2">
             <label className="flex-1">
               <div className="text-[10px] text-slate-400 mb-1">采样间隔（秒）</div>
               <input
                 type="number"
                 min={10}
-                max={30}
+                max={120}
                 step={1}
                 value={samplingSec}
-                onChange={(e) => setSamplingSec(Math.max(10, Math.min(30, Number(e.target.value) || 15)))}
+                onChange={(e) => setSamplingSec(Math.max(10, Math.min(120, Number(e.target.value) || 15)))}
                 className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
               />
             </label>

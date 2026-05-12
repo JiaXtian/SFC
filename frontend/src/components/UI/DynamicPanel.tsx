@@ -55,13 +55,13 @@ export default function DynamicPanel() {
         if (!mounted) return
         setSimulationStatus({
           running: !!res.running,
-          sampling_interval_sec: Math.max(10, Math.min(30, Number(res.sampling_interval_sec ?? 15))),
+          sampling_interval_sec: Math.max(10, Math.min(120, Number(res.sampling_interval_sec ?? 15))),
           simulation_speed: Number(res.simulation_speed ?? 1),
           topology_version: Number(res.topology_version ?? 0),
           sim_time: String(res.sim_time ?? ''),
           metrics: res.metrics ?? null,
         })
-        setIntervalSec(Math.max(10, Math.min(30, Number(res.sampling_interval_sec ?? 15))))
+        setIntervalSec(Math.max(10, Math.min(120, Number(res.sampling_interval_sec ?? 15))))
         setSpeed(Math.max(0.1, Math.min(8, Number(res.simulation_speed ?? 1))))
       })
       .catch(() => {})
@@ -204,8 +204,8 @@ export default function DynamicPanel() {
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-1">
             <div className="text-[10px] text-slate-400">采样周期(s)</div>
-            <input type="number" min={10} max={30} step={1} value={intervalSec}
-              onChange={e => setIntervalSec(Math.max(10, Math.min(30, Number(e.target.value) || 15)))}
+            <input type="number" min={10} max={120} step={1} value={intervalSec}
+              onChange={e => setIntervalSec(Math.max(10, Math.min(120, Number(e.target.value) || 15)))}
               className="w-full px-2 py-1 rounded bg-slate-900/70 border border-slate-700" />
           </label>
           <label className="space-y-1">

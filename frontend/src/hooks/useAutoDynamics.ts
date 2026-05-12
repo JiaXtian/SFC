@@ -1,51 +1,16 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
+import { parseTleOrbitalParams, propagateSgp4Orbit } from '@/utils/constellationGenerator'
 
 const EARTH_RADIUS_KM = 6371
 const LIGHT_SPEED_KM_S = 299792.458
-const MU_EARTH = 398600.4418
 
 type Vec3 = { x: number; y: number; z: number }
 type LinkStatus = 'active' | 'congested' | 'down'
 
 function norm(v: Vec3) {
   return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
-}
-
-function toLatLon(v: Vec3) {
-  const r = Math.max(1e-9, norm(v))
-  const lat = Math.asin(Math.max(-1, Math.min(1, v.z / r))) * 180 / Math.PI
-  const lon = Math.atan2(v.y, v.x) * 180 / Math.PI
-  return { lat, lon }
-}
-
-function satPositionAtTime(
-  altitudeKm: number,
-  inclinationDeg: number,
-  raanDeg: number,
-  trueAnomalyDeg0: number,
-  elapsedSec: number
-) {
-  const r = EARTH_RADIUS_KM + altitudeKm
-  const inc = (inclinationDeg * Math.PI) / 180
-  const raan = (raanDeg * Math.PI) / 180
-  const n = Math.sqrt(MU_EARTH / (r * r * r))
-  const ta = ((trueAnomalyDeg0 * Math.PI) / 180 + n * elapsedSec) % (2 * Math.PI)
-
-  const cosO = Math.cos(raan)
-  const sinO = Math.sin(raan)
-  const cosI = Math.cos(inc)
-  const sinI = Math.sin(inc)
-  const cosV = Math.cos(ta)
-  const sinV = Math.sin(ta)
-  const xOrb = r * cosV
-  const yOrb = r * sinV
-
-  const x = cosO * xOrb - sinO * cosI * yOrb
-  const y = sinO * xOrb + cosO * cosI * yOrb
-  const z = sinI * yOrb
-  return { pos: { x, y, z }, trueAnomalyDeg: ((ta * 180) / Math.PI + 360) % 360 }
 }
 
 function minDistanceToOriginSegment(a: Vec3, b: Vec3) {
@@ -326,7 +291,9 @@ export function useAutoDynamics() {
 
       if (ad.enabled && ad.playing && s.satellites.length > 0) {
         const satCount = s.satellites.length
-        const posInterval = satCount >= 5000 ? 0.18 : (satCount >= 3000 ? 0.13 : 0.1)
+        const configuredHz = clamp(0.5, 12, Number(ad.position_update_hz ?? 4))
+        const maxHzByScale = satCount >= 5000 ? 4 : (satCount >= 3000 ? 6 : 12)
+        const posInterval = 1 / Math.min(configuredHz, maxHzByScale)
         posAccRef.current += dtReal
         resAccRef.current += dtReal
 
@@ -348,24 +315,32 @@ export function useAutoDynamics() {
           const posMap = new Map<string, Vec3>()
           const newSats = s.satellites.map((sat: any) => {
             const op = sat.orbital_params ?? {}
-            const altitudeKm = Number(op.altitude_km ?? 550)
-            const inclinationDeg = Number(op.inclination_deg ?? op.inclination ?? 53)
-            const raanDeg = Number(op.raan ?? 0)
-            const ta0 = Number((sat as any).__base_true_anomaly ?? op.true_anomaly ?? 0)
-            const { pos, trueAnomalyDeg } = satPositionAtTime(
-              altitudeKm,
-              inclinationDeg,
-              raanDeg,
-              ta0,
-              elapsedSec
-            )
+            const baseMinutes = Number((sat as any).__base_propagation_minutes ?? op.propagation_minutes ?? 0)
+            const baseOrbit = (sat as any).__sgp4_base_orbit ?? (() => {
+              const tle1 = String(op?.tle_line1 ?? '').trim()
+              const tle2 = String(op?.tle_line2 ?? '').trim()
+              if (tle1 && tle2) {
+                return { ...op, ...parseTleOrbitalParams(tle1, tle2), __tle_parsed: true }
+              }
+              return op
+            })()
+            const propagated = propagateSgp4Orbit(baseOrbit, baseMinutes + elapsedSec / 60)
+            const pos = { x: propagated.x, y: propagated.y, z: propagated.z }
             posMap.set(String(sat.id), pos)
-            const ll = toLatLon(pos)
             return {
               ...sat,
-              __base_true_anomaly: ta0,
-              coordinates: { ...sat.coordinates, ...pos, lat: ll.lat, lon: ll.lon },
-              orbital_params: { ...sat.orbital_params, true_anomaly: trueAnomalyDeg },
+              __base_propagation_minutes: baseMinutes,
+              __sgp4_base_orbit: baseOrbit,
+              coordinates: { ...sat.coordinates, ...pos, lat: propagated.lat, lon: propagated.lon },
+              orbital_params: {
+                ...sat.orbital_params,
+                true_anomaly: propagated.true_anomaly,
+                mean_anomaly_deg: propagated.mean_anomaly_deg,
+                raan: propagated.raan,
+                argument_of_perigee_deg: propagated.argument_of_perigee_deg,
+                altitude_km: propagated.altitude_km,
+                propagation_minutes: baseMinutes + elapsedSec / 60,
+              },
             }
           })
 

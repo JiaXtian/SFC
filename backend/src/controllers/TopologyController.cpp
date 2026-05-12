@@ -21,7 +21,7 @@
 namespace {
 
 constexpr double kMinSamplingIntervalSec = 10.0;
-constexpr double kMaxSamplingIntervalSec = 30.0;
+constexpr double kMaxSamplingIntervalSec = 120.0;
 constexpr double kDefaultSamplingIntervalSec = 15.0;
 
 bool json_bool(const Json::Value& obj, const std::string& key, bool fallback = false) {
@@ -198,6 +198,47 @@ void TopologyController::generateTopology(
             constellation_template = has_nodes ? "imported_topology" : "starlink_v1";
         }
 
+        if (has_nodes) {
+            Json::Value validation_errors(Json::arrayValue);
+            int idx = 0;
+            for (const auto& n : (*json)["nodes"]) {
+                const std::string node_id = n.get("id", "").asString();
+                if (!n.isMember("orbital_params") || !n["orbital_params"].isObject()) {
+                    validation_errors.append("node#" + std::to_string(idx + 1) + " missing orbital_params");
+                    ++idx;
+                    continue;
+                }
+                const auto& op = n["orbital_params"];
+                const std::string model = lower_ascii(op.get("propagation_model", "").asString());
+                const std::string line1 = op.get("tle_line1", "").asString();
+                const std::string line2 = op.get("tle_line2", "").asString();
+                if (model != "sgp4") {
+                    validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " propagation_model must be SGP4");
+                }
+                if (line1.empty() || line2.empty()) {
+                    validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " must include tle_line1 and tle_line2");
+                } else {
+                    OrbitalParams tmp;
+                    std::string parse_error;
+                    if (!sgp4::parse_tle_into_params(tmp, line1, line2, &parse_error)) {
+                        validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " invalid TLE: " + parse_error);
+                    }
+                }
+                ++idx;
+                if (validation_errors.size() >= 8) break;
+            }
+            if (!validation_errors.empty()) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "Imported topology requires SGP4 TLE orbital parameters";
+                error["details"] = validation_errors;
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+        }
+
         Topology existing = g_topo_mgr->get_current_topology();
         if (!force_replace && !existing.nodes.empty()) {
             Json::Value response;
@@ -266,43 +307,23 @@ void TopologyController::generateTopology(
                     const auto& op = n["orbital_params"];
                     sat.orbital_params.plane = op.get("plane", 0).asInt();
                     sat.orbital_params.position_in_plane = op.get("position_in_plane", 0).asInt();
-                    sat.orbital_params.raan = op.get("raan", 0.0).asDouble();
-                    sat.orbital_params.true_anomaly = op.get("true_anomaly", 0.0).asDouble();
-                    sat.orbital_params.altitude_km = op.get("altitude_km", altitude).asDouble();
-                    sat.orbital_params.inclination_deg = op.get(
-                        "inclination_deg",
-                        op.get("inclination", inclination).asDouble()
-                    ).asDouble();
-                    sat.orbital_params.propagation_model = op.get("propagation_model", "SGP4").asString();
-                    sat.orbital_params.eccentricity = op.get("eccentricity", 0.0001).asDouble();
-                    sat.orbital_params.argument_of_perigee_deg = op.get("argument_of_perigee_deg", 0.0).asDouble();
-                    sat.orbital_params.mean_anomaly_deg = op.get(
-                        "mean_anomaly_deg",
-                        sat.orbital_params.true_anomaly
-                    ).asDouble();
-                    sat.orbital_params.mean_motion_rev_per_day = op.get("mean_motion_rev_per_day", 0.0).asDouble();
-                    sat.orbital_params.bstar = op.get("bstar", 0.0).asDouble();
-                    sat.orbital_params.epoch_jd = op.get("epoch_jd", 0.0).asDouble();
-                    sat.orbital_params.epoch_iso = op.get("epoch_iso", "").asString();
+                    sat.orbital_params.propagation_model = "SGP4";
                     sat.orbital_params.propagation_minutes = op.get("propagation_minutes", 0.0).asDouble();
-                    sat.orbital_params.semi_major_axis_km = op.get("semi_major_axis_km", 0.0).asDouble();
-                    sat.orbital_params.period_minutes = op.get("period_minutes", 0.0).asDouble();
                     sat.orbital_params.tle_line1 = op.get("tle_line1", "").asString();
                     sat.orbital_params.tle_line2 = op.get("tle_line2", "").asString();
-                    sgp4::ensure_sgp4_defaults(sat.orbital_params, altitude, inclination);
+                    std::string parse_error;
+                    if (!sgp4::parse_tle_into_params(
+                            sat.orbital_params,
+                            sat.orbital_params.tle_line1,
+                            sat.orbital_params.tle_line2,
+                            &parse_error
+                        )) {
+                        throw std::runtime_error("Invalid TLE for " + sat.id + ": " + parse_error);
+                    }
                     max_plane_idx = std::max(max_plane_idx, sat.orbital_params.plane);
                 }
 
-                if (n.isMember("coordinates")) {
-                    const auto& c = n["coordinates"];
-                    sat.coordinates.x = c.get("x", 0.0).asDouble();
-                    sat.coordinates.y = c.get("y", 0.0).asDouble();
-                    sat.coordinates.z = c.get("z", 0.0).asDouble();
-                    sat.coordinates.lat = c.get("lat", 0.0).asDouble();
-                    sat.coordinates.lon = c.get("lon", 0.0).asDouble();
-                } else {
-                    sat.coordinates = sgp4::propagate(sat.orbital_params, sat.orbital_params.propagation_minutes).coordinates;
-                }
+                sat.coordinates = sgp4::propagate(sat.orbital_params, sat.orbital_params.propagation_minutes).coordinates;
 
                 sat.cpu_total = n.get("cpu_total", 16.0).asDouble();
                 sat.cpu_available = n.get("cpu_available", sat.cpu_total).asDouble();

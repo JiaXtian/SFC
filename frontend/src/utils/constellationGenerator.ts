@@ -255,6 +255,69 @@ function makeTleLines(satNum: number, op: any): { line1: string; line2: string }
   return { line1, line2 }
 }
 
+function julianDateFromYearDoy(year: number, dayOfYear: number): number {
+  const ms = Date.UTC(year, 0, 1) + (dayOfYear - 1) * 86400000
+  return 2440587.5 + ms / 86400000
+}
+
+function parseCompactTleExponential(raw: string): number {
+  let s = String(raw ?? '').trim()
+  if (!s) return 0
+  let sign = 1
+  if (s[0] === '-' || s[0] === '+') {
+    sign = s[0] === '-' ? -1 : 1
+    s = s.slice(1)
+  }
+  s = s.replace(/\s+/g, '')
+  const match = s.match(/^(\d+)([+-]\d+)$/)
+  if (!match) return 0
+  const mantissa = Number(match[1]) / Math.pow(10, match[1].length)
+  return sign * mantissa * Math.pow(10, Number(match[2]))
+}
+
+export function parseTleOrbitalParams(tleLine1: string, tleLine2: string): Partial<SatelliteData['orbital_params']> {
+  const line1 = String(tleLine1 ?? '').trim()
+  const line2 = String(tleLine2 ?? '').trim()
+  if (line1.length < 63 || line2.length < 63 || !line1.startsWith('1') || !line2.startsWith('2')) {
+    throw new Error('TLE 两行根数格式不完整')
+  }
+  const epochRaw = line1.slice(18, 32).trim()
+  const yy = Number(epochRaw.slice(0, 2))
+  const year = yy < 57 ? 2000 + yy : 1900 + yy
+  const dayOfYear = Number(epochRaw.slice(2))
+  const epochJd = julianDateFromYearDoy(year, dayOfYear)
+  const inclinationDeg = Number(line2.slice(8, 16).trim())
+  const raan = Number(line2.slice(17, 25).trim())
+  const eccDigits = line2.slice(26, 33).trim()
+  const eccentricity = Number(`0.${eccDigits || '0'}`)
+  const argumentOfPerigeeDeg = Number(line2.slice(34, 42).trim())
+  const meanAnomalyDeg = Number(line2.slice(43, 51).trim())
+  const meanMotionRevPerDay = Number(line2.slice(52, 63).trim())
+  if (![inclinationDeg, raan, eccentricity, argumentOfPerigeeDeg, meanAnomalyDeg, meanMotionRevPerDay, epochJd].every(Number.isFinite)) {
+    throw new Error('TLE 轨道根数字段无法解析')
+  }
+  const semiMajor = semiMajorAxis(meanMotionRevPerDay)
+  return {
+    propagation_model: 'SGP4',
+    raan: wrapDeg(raan),
+    true_anomaly: wrapDeg(meanAnomalyDeg),
+    inclination: inclinationDeg,
+    inclination_deg: inclinationDeg,
+    altitude_km: semiMajor - SGP4_EARTH_R,
+    eccentricity,
+    argument_of_perigee_deg: wrapDeg(argumentOfPerigeeDeg),
+    mean_anomaly_deg: wrapDeg(meanAnomalyDeg),
+    mean_motion_rev_per_day: meanMotionRevPerDay,
+    bstar: parseCompactTleExponential(line1.slice(53, 61)),
+    epoch_jd: epochJd,
+    epoch_iso: new Date((epochJd - 2440587.5) * 86400000).toISOString(),
+    semi_major_axis_km: semiMajor,
+    period_minutes: 1440 / meanMotionRevPerDay,
+    tle_line1: line1,
+    tle_line2: line2,
+  }
+}
+
 function makeWalkerSgp4Orbit(
   plane: number, numPlanes: number,
   pos: number, satsPerPlane: number,
@@ -293,20 +356,25 @@ function makeWalkerSgp4Orbit(
   return { ...op, tle_line1: tle.line1, tle_line2: tle.line2 }
 }
 
-function propagateSgp4Like(op: any, minutesSinceEpoch = 0): { x: number; y: number; z: number; lat: number; lon: number; true_anomaly: number; raan: number; argument_of_perigee_deg: number; altitude_km: number } {
-  const ecc = Math.max(0, Math.min(0.25, Number(op.eccentricity ?? 0.0001)))
-  const mm = Number(op.mean_motion_rev_per_day ?? meanMotionFromAltitude(Number(op.altitude_km ?? 550)))
+export function propagateSgp4Orbit(op: any, minutesSinceEpoch = 0): { x: number; y: number; z: number; lat: number; lon: number; true_anomaly: number; mean_anomaly_deg: number; raan: number; argument_of_perigee_deg: number; altitude_km: number } {
+  const tleLine1 = String(op?.tle_line1 ?? '').trim()
+  const tleLine2 = String(op?.tle_line2 ?? '').trim()
+  const source = (tleLine1 && tleLine2 && !op?.__tle_parsed)
+    ? { ...op, ...parseTleOrbitalParams(tleLine1, tleLine2), __tle_parsed: true }
+    : op
+  const ecc = Math.max(0, Math.min(0.25, Number(source.eccentricity ?? 0.0001)))
+  const mm = Number(source.mean_motion_rev_per_day ?? meanMotionFromAltitude(Number(source.altitude_km ?? 550)))
   const a = semiMajorAxis(mm)
-  const inc = Number(op.inclination_deg ?? op.inclination ?? 53) * PI / 180
+  const inc = Number(source.inclination_deg ?? source.inclination ?? 53) * PI / 180
   const p = a * (1 - ecc * ecc)
   const nRadMin = mm * 2 * PI / 1440
   const coeff = 1.5 * SGP4_J2 * SGP4_EARTH_R * SGP4_EARTH_R / (p * p) * nRadMin
   const raanRate = -coeff * Math.cos(inc)
   const argpRate = 0.5 * coeff * (5 * Math.cos(inc) * Math.cos(inc) - 1)
   const meanRate = nRadMin + 0.5 * coeff * Math.sqrt(Math.max(1e-9, 1 - ecc * ecc)) * (3 * Math.cos(inc) * Math.cos(inc) - 1)
-  const raan = Number(op.raan ?? 0) * PI / 180 + raanRate * minutesSinceEpoch
-  const argp = Number(op.argument_of_perigee_deg ?? 0) * PI / 180 + argpRate * minutesSinceEpoch
-  const mean = Number(op.mean_anomaly_deg ?? op.true_anomaly ?? 0) * PI / 180 + meanRate * minutesSinceEpoch
+  const raan = Number(source.raan ?? 0) * PI / 180 + raanRate * minutesSinceEpoch
+  const argp = Number(source.argument_of_perigee_deg ?? 0) * PI / 180 + argpRate * minutesSinceEpoch
+  const mean = Number(source.mean_anomaly_deg ?? source.true_anomaly ?? 0) * PI / 180 + meanRate * minutesSinceEpoch
   const eAnom = solveKepler(mean % (2 * PI), ecc)
   const radius = a * (1 - ecc * Math.cos(eAnom))
   const nu = Math.atan2(Math.sqrt(Math.max(0, 1 - ecc * ecc)) * Math.sin(eAnom), Math.cos(eAnom) - ecc)
@@ -319,6 +387,7 @@ function propagateSgp4Like(op: any, minutesSinceEpoch = 0): { x: number; y: numb
     lat: Math.asin(Math.max(-1, Math.min(1, z / radius))) * 180 / PI,
     lon: Math.atan2(y, x) * 180 / PI,
     true_anomaly: wrapDeg(nu * 180 / PI),
+    mean_anomaly_deg: wrapDeg((mean % (2 * PI)) * 180 / PI),
     raan: wrapDeg(raan * 180 / PI),
     argument_of_perigee_deg: wrapDeg(argp * 180 / PI),
     altitude_km: radius - SGP4_EARTH_R,
@@ -333,42 +402,12 @@ function walkerCoord(
   epochJd: number
 ): { orbit: SatelliteData['orbital_params']; coords: { x: number; y: number; z: number; lat: number; lon: number } } {
   const orbit = makeWalkerSgp4Orbit(plane, numPlanes, pos, satsPerPlane, altitude, inclination, fPhasing, isWalkerStar, epochJd)
-  const propagated = propagateSgp4Like(orbit, 0)
+  const propagated = propagateSgp4Orbit(orbit, 0)
   orbit.true_anomaly = propagated.true_anomaly
   orbit.raan = propagated.raan
   orbit.argument_of_perigee_deg = propagated.argument_of_perigee_deg
   orbit.altitude_km = propagated.altitude_km
   return { orbit, coords: { x: propagated.x, y: propagated.y, z: propagated.z, lat: propagated.lat, lon: propagated.lon } }
-}
-
-function legacyWalkerCoord(
-  plane: number, numPlanes: number,
-  pos: number, satsPerPlane: number,
-  altitude: number, inclination: number,
-  fPhasing: number, isWalkerStar: boolean
-): { x: number; y: number; z: number; lat: number; lon: number; raan: number; ta: number } {
-  const raan = isWalkerStar
-    ? (180 / numPlanes) * plane
-    : (360 / numPlanes) * plane
-  const phaseShift = isWalkerStar ? 0 : (360 / (numPlanes * satsPerPlane)) * plane * fPhasing
-  const ta = wrapDeg((360 / satsPerPlane) * pos + phaseShift)
-
-  const r = EARTH_R + altitude
-  const i = inclination * PI / 180
-  const O = raan * PI / 180
-  const v = ta * PI / 180
-
-  const xOrb = r * Math.cos(v)
-  const yOrb = r * Math.sin(v)
-
-  const x = Math.cos(O) * xOrb - Math.sin(O) * Math.cos(i) * yOrb
-  const y = Math.sin(O) * xOrb + Math.cos(O) * Math.cos(i) * yOrb
-  const z = Math.sin(i) * yOrb
-
-  const lon = Math.atan2(y, x) * 180 / PI
-  const lat = Math.asin(Math.max(-1, Math.min(1, z / r))) * 180 / PI
-
-  return { x, y, z, lat, lon, raan, ta }
 }
 
 // 生成与后端一致的卫星命名: SAT_XXX_XXX
@@ -608,8 +647,6 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
   const satellites: SatelliteData[] = nodesRaw.map((n: any, idx: number) => {
     const id = String(n.id ?? n.name ?? `SAT_EXT_${idx}`)
     const orbital = n.orbital_params ?? n.orbit ?? {}
-    const coords = n.coordinates ?? n.position ?? {}
-
     const cpuTotal = Number(n.cpu_total ?? n.cpu?.total ?? 16)
     const cpuAvail = Number(n.cpu_available ?? n.cpu?.available ?? cpuTotal)
     const memTotal = Number(n.mem_total ?? n.memory_total ?? n.mem?.total ?? 32)
@@ -618,52 +655,32 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
     const diskAvail = Number(n.disk_available ?? n.storage_available ?? n.disk?.available ?? diskTotal)
     const coreBusiness = n.core_business_load ?? {}
     const fallbackLoad = Number(n.core_network_load ?? 0.5)
-    const altitude = Number(orbital.altitude_km ?? orbital.altitude ?? 550)
-    const inclination = Number(orbital.inclination ?? orbital.inclination_deg ?? 53)
-    const meanMotion = Number(orbital.mean_motion_rev_per_day ?? meanMotionFromAltitude(altitude))
-    const epoch = Number(orbital.epoch_jd ?? julianDate())
+    const tleLine1 = String(orbital.tle_line1 ?? '').trim()
+    const tleLine2 = String(orbital.tle_line2 ?? '').trim()
+    if (!tleLine1 || !tleLine2) {
+      throw new Error(`节点 ${id} 缺少 SGP4 TLE 两行根数`)
+    }
+    const tleOrbit = parseTleOrbitalParams(tleLine1, tleLine2)
     const parsedOrbit: SatelliteData['orbital_params'] = {
-      propagation_model: String(orbital.propagation_model ?? 'SGP4'),
+      ...(tleOrbit as SatelliteData['orbital_params']),
+      propagation_model: 'SGP4',
       plane: Number(orbital.plane ?? orbital.plane_id ?? 0),
       position_in_plane: Number(orbital.position_in_plane ?? orbital.slot ?? idx),
-      raan: Number(orbital.raan ?? 0),
-      true_anomaly: Number(orbital.true_anomaly ?? orbital.ta ?? orbital.mean_anomaly_deg ?? 0),
-      altitude_km: altitude,
-      inclination,
-      inclination_deg: Number(orbital.inclination_deg ?? inclination),
-      eccentricity: Number(orbital.eccentricity ?? 0.0001),
-      argument_of_perigee_deg: Number(orbital.argument_of_perigee_deg ?? 0),
-      mean_anomaly_deg: Number(orbital.mean_anomaly_deg ?? orbital.true_anomaly ?? orbital.ta ?? 0),
-      mean_motion_rev_per_day: meanMotion,
-      bstar: Number(orbital.bstar ?? 0.00005),
-      epoch_jd: epoch,
-      epoch_iso: String(orbital.epoch_iso ?? new Date((epoch - 2440587.5) * 86400000).toISOString()),
       propagation_minutes: Number(orbital.propagation_minutes ?? 0),
-      semi_major_axis_km: Number(orbital.semi_major_axis_km ?? semiMajorAxis(meanMotion)),
-      period_minutes: Number(orbital.period_minutes ?? 1440 / meanMotion),
-      tle_line1: String(orbital.tle_line1 ?? ''),
-      tle_line2: String(orbital.tle_line2 ?? ''),
+      tle_line1: tleLine1,
+      tle_line2: tleLine2,
     }
-    if (!parsedOrbit.tle_line1 || !parsedOrbit.tle_line2) {
-      const tle = makeTleLines(idx + 1, {
-        ...parsedOrbit,
-        inclination_deg: parsedOrbit.inclination_deg ?? parsedOrbit.inclination,
-      })
-      parsedOrbit.tle_line1 = tle.line1
-      parsedOrbit.tle_line2 = tle.line2
-    }
-    const propagated = propagateSgp4Like(parsedOrbit, Number(parsedOrbit.propagation_minutes ?? 0))
-    const hasCoords = coords.x != null || coords.y != null || coords.z != null
+    const propagated = propagateSgp4Orbit(parsedOrbit, Number(parsedOrbit.propagation_minutes ?? 0))
 
     return {
       id,
       orbital_params: parsedOrbit,
       coordinates: {
-        x: Number(coords.x ?? propagated.x),
-        y: Number(coords.y ?? propagated.y),
-        z: Number(coords.z ?? propagated.z),
-        lat: Number(coords.lat ?? coords.latitude ?? (hasCoords ? 0 : propagated.lat)),
-        lon: Number(coords.lon ?? coords.longitude ?? (hasCoords ? 0 : propagated.lon)),
+        x: propagated.x,
+        y: propagated.y,
+        z: propagated.z,
+        lat: propagated.lat,
+        lon: propagated.lon,
       },
       cpu_total: cpuTotal,
       cpu_available: cpuAvail,

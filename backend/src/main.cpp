@@ -677,7 +677,7 @@ int main() {
             if (control_config.contains("resource_sampling_interval_sec")) {
                 boot_sampling_interval_sec = std::max(
                     10.0,
-                    std::min(30.0, control_config.value("resource_sampling_interval_sec", 15.0))
+                    std::min(120.0, control_config.value("resource_sampling_interval_sec", 15.0))
                 );
             }
             if (control_config.contains("simulation_speed")) {

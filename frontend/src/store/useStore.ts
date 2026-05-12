@@ -1251,9 +1251,11 @@ export const useStore = create<Store>((set, get) => ({
   setAutoDynamics: (patch) => set((s) => {
     const next = { ...s.autoDynamics, ...patch }
     const sampling = Number(next.resource_update_sec ?? s.autoDynamics.resource_update_sec ?? 15)
-    next.resource_update_sec = Math.max(10, Math.min(30, Number.isFinite(sampling) ? sampling : 15))
+    next.resource_update_sec = Math.max(10, Math.min(120, Number.isFinite(sampling) ? sampling : 15))
     const speed = Number(next.time_scale ?? s.autoDynamics.time_scale ?? 1)
     next.time_scale = Math.max(0.1, Math.min(8, Number.isFinite(speed) ? speed : 1))
+    const positionHz = Number(next.position_update_hz ?? s.autoDynamics.position_update_hz ?? 4)
+    next.position_update_hz = Math.max(0.5, Math.min(12, Number.isFinite(positionHz) ? positionHz : 4))
     return { autoDynamics: next }
   }),
   setSimulationViewMode: (mode) => {
