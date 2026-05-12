@@ -257,7 +257,7 @@ DeploymentResult SFCOrchestrator::deploy_sfc(
         }
 
         bool deployed = false;
-        const int max_probe = std::min<int>(12, static_cast<int>(probe_order.size()));
+        const int max_probe = std::min<int>(24, static_cast<int>(probe_order.size()));
         for (int p = 0; p < max_probe; ++p) {
             const std::string selected_node = candidates[probe_order[p]];
             CandidateAttemptTrace attempt;
