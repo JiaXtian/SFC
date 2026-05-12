@@ -67,6 +67,6 @@ models.zip
 *.bin
 
 # Logs / temp files
-*.log
+
 *.tmp
 *.temp
