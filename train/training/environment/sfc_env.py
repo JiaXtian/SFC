@@ -64,7 +64,9 @@ class SFCEnvironment:
         self.accumulated_hops = 0
         self.min_dependency_reliability = 1.0
         self.satisfied_dependency_keys = set()
+        self.used_dependency_paths: List[List[str]] = []
         self.last_quality_score = 0.0
+        self.last_quality_components: Dict[str, float] = {}
         self._path_cache = {}
 
     @staticmethod
@@ -114,7 +116,9 @@ class SFCEnvironment:
         self.accumulated_hops = 0
         self.min_dependency_reliability = 1.0
         self.satisfied_dependency_keys = set()
+        self.used_dependency_paths = []
         self.last_quality_score = 0.0
+        self.last_quality_components = {}
         self._path_cache = {}
         return self._build_state()
 
@@ -389,6 +393,8 @@ class SFCEnvironment:
         score = (
             total_delay
             + 1.8 * total_hops
+            + 4.0 * self._projected_resource_pressure(node, nf)
+            + 6.0 * node_business_pressure
             + 16.0 * max(0.0, node_business_pressure - 0.72)
             + 4.0 * float(node.get("deployed_core_nf_count", 0))
             - 1.5 * min(1.0, bottleneck / max(float(nf["bandwidth_required_gbps"]), 1e-6))
@@ -485,6 +491,7 @@ class SFCEnvironment:
         for item in plan["dependency_paths"]:
             bw_req = float(item["bandwidth_required_gbps"])
             path = item["path"]
+            self.used_dependency_paths.append(list(path))
             for i in range(len(path) - 1):
                 u, v = path[i], path[i + 1]
                 self.topology[u][v]["bandwidth_available_gbps"] = (
@@ -512,6 +519,7 @@ class SFCEnvironment:
         prev_quality = float(self.last_quality_score)
         quality = self._compute_quality_score()
         self.last_quality_score = quality
+        quality_components = self.last_quality_components
         reward = (
             self.reward_config["step_success"]
             + self.reward_config["quality_delta_scale"] * (quality - prev_quality)
@@ -549,6 +557,10 @@ class SFCEnvironment:
                 "resource_balance": self._resource_balance_score(),
                 "link_congestion": self._link_congestion_score(),
                 "business_balance": self._business_balance_score(),
+                "placement_resource": float(quality_components.get("placement_resource", 0.0)),
+                "placement_business": float(quality_components.get("placement_business", 0.0)),
+                "future_feasibility": float(quality_components.get("future_feasibility", 0.0)),
+                "used_link_congestion": float(quality_components.get("used_link_congestion", 0.0)),
             }
         )
         return next_state, reward, done, info
@@ -569,15 +581,163 @@ class SFCEnvironment:
         dep_ratio = len(self.satisfied_dependency_keys) / max(1, len(self.dependencies))
         delay_score = 1.0 - min(1.0, self.accumulated_dependency_delay / max(sla["latency_requirement_ms"], 1e-6))
         rel_score = min(1.0, self.min_dependency_reliability / max(sla["reliability_requirement"], 1e-6))
+        placement_resource = self._placement_resource_score()
+        placement_business = self._placement_business_score()
+        future_feasibility = self._future_feasibility_score()
+        used_link_congestion = self._used_link_congestion_score()
+        used_link_good = 1.0 - used_link_congestion
+        global_resource = self._resource_balance_score()
         score = (
-            0.20 * dep_ratio
-            + 0.22 * self._resource_balance_score()
-            + 0.18 * self._business_balance_score()
-            + 0.18 * (1.0 - self._link_congestion_score())
-            + 0.14 * delay_score
-            + 0.08 * rel_score
+            0.18 * dep_ratio
+            + 0.22 * placement_resource
+            + 0.16 * future_feasibility
+            + 0.14 * placement_business
+            + 0.14 * used_link_good
+            + 0.10 * delay_score
+            + 0.04 * rel_score
+            + 0.02 * global_resource
+        )
+        self.last_quality_components = {
+            "dependency_ratio": float(dep_ratio),
+            "delay_score": float(delay_score),
+            "reliability_score": float(rel_score),
+            "placement_resource": float(placement_resource),
+            "placement_business": float(placement_business),
+            "future_feasibility": float(future_feasibility),
+            "used_link_congestion": float(used_link_congestion),
+            "resource_balance": float(global_resource),
+        }
+        return self._clamp01(score)
+
+    def _deployed_node_records(self):
+        records = []
+        seen = set()
+        for item in self.deployed_nfs:
+            node_id = item.get("node")
+            if node_id in seen or node_id not in self.topology.nodes:
+                continue
+            seen.add(node_id)
+            records.append((node_id, self.topology.nodes[node_id]))
+        return records
+
+    @staticmethod
+    def _node_resource_utils(node: Dict) -> List[float]:
+        values = []
+        for avail_key, total_key in [
+            ("cpu_available", "cpu_total"),
+            ("mem_available", "mem_total"),
+            ("disk_available", "disk_total"),
+        ]:
+            total = max(float(node.get(total_key, 0.0)), 1e-6)
+            values.append(SFCEnvironment._clamp01(1.0 - float(node.get(avail_key, 0.0)) / total))
+        return values
+
+    def _projected_resource_pressure(self, node: Dict, nf: Dict) -> float:
+        projected = []
+        for avail_key, total_key, req_key in [
+            ("cpu_available", "cpu_total", "cpu_required"),
+            ("mem_available", "mem_total", "mem_required"),
+            ("disk_available", "disk_total", "disk_required_gb"),
+        ]:
+            total = max(float(node.get(total_key, 0.0)), 1e-6)
+            util = 1.0 - (float(node.get(avail_key, 0.0)) - float(nf.get(req_key, 0.0))) / total
+            projected.append(self._clamp01(util))
+        return float(max(projected))
+
+    def _placement_resource_score(self) -> float:
+        records = self._deployed_node_records()
+        if not records:
+            return 0.65
+        max_utils = []
+        mean_utils = []
+        colocations = []
+        for _, node in records:
+            utils = self._node_resource_utils(node)
+            max_utils.append(max(utils))
+            mean_utils.append(float(np.mean(utils)))
+            colocations.append(max(0, int(node.get("deployed_core_nf_count", 0)) - 1))
+        mean_pressure = float(np.mean(max_utils))
+        peak_pressure = float(max(max_utils))
+        spread = float(np.std(max_utils)) if len(max_utils) > 1 else 0.0
+        colocation_penalty = min(1.0, float(sum(colocations)) / max(1.0, len(self.core_nfs)))
+        score = (
+            1.0
+            - 1.05 * mean_pressure
+            - 0.35 * peak_pressure
+            - 0.35 * spread
+            - 0.18 * colocation_penalty
+            + 0.12 * (1.0 - float(np.mean(mean_utils)))
         )
         return self._clamp01(score)
+
+    def _placement_business_score(self) -> float:
+        records = self._deployed_node_records()
+        if not records:
+            return 0.70
+        max_loads = []
+        avg_loads = []
+        for _, node in records:
+            load = node.get("core_business_load", {})
+            values = [float(load.get(dim, node.get(dim, 0.0))) for dim in BUSINESS_DIMENSIONS]
+            max_loads.append(max(values))
+            avg_loads.append(float(np.mean(values)))
+        mean_load = float(np.mean(max_loads))
+        peak_load = float(max(max_loads))
+        spread = float(np.std(max_loads)) if len(max_loads) > 1 else 0.0
+        score = 1.0 - 0.95 * mean_load - 0.35 * peak_load - 0.35 * spread + 0.08 * (1.0 - float(np.mean(avg_loads)))
+        return self._clamp01(score)
+
+    def _future_feasibility_score(self) -> float:
+        nodes = self._sampled_nodes(limit=512)
+        if not nodes or not self.core_nfs:
+            return 0.0
+        per_nf_scores = []
+        for nf in self.core_nfs:
+            feasible = 0
+            projected_pressures = []
+            business_pressures = []
+            for _, node in nodes:
+                if (
+                    float(node.get("cpu_available", 0.0)) + 1e-9 < float(nf.get("cpu_required", 0.0))
+                    or float(node.get("mem_available", 0.0)) + 1e-9 < float(nf.get("mem_required", 0.0))
+                    or float(node.get("disk_available", 0.0)) + 1e-9 < float(nf.get("disk_required_gb", 0.0))
+                ):
+                    continue
+                projected_business = self._project_node_business_load(node, nf)
+                business_pressure = max(projected_business.values()) if projected_business else 0.0
+                if business_pressure > 0.92:
+                    continue
+                feasible += 1
+                projected_pressures.append(self._projected_resource_pressure(node, nf))
+                business_pressures.append(business_pressure)
+            feasible_ratio = feasible / max(1, len(nodes))
+            if feasible == 0:
+                per_nf_scores.append(0.0)
+                continue
+            resource_headroom = 1.0 - float(np.mean(projected_pressures))
+            business_headroom = 1.0 - float(np.mean(business_pressures))
+            per_nf_scores.append(
+                self._clamp01(0.45 * feasible_ratio + 0.35 * resource_headroom + 0.20 * business_headroom)
+            )
+        return self._clamp01(0.70 * float(np.mean(per_nf_scores)) + 0.30 * float(min(per_nf_scores)))
+
+    def _used_link_congestion_score(self) -> float:
+        ratios = []
+        seen = set()
+        for path in self.used_dependency_paths:
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                if (u, v) in seen or not self.topology.has_edge(u, v):
+                    continue
+                seen.add((u, v))
+                edge = self.topology[u][v]
+                total = float(edge.get("bandwidth_gbps", 0.0))
+                if total <= 1e-9:
+                    continue
+                ratios.append(1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total)
+        if not ratios:
+            return 0.0
+        return self._clamp01(float(np.percentile(ratios, 90)))
 
     def _resource_balance_score(self) -> float:
         utils = []

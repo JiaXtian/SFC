@@ -187,6 +187,13 @@ class HeuristicPruner:
                     1.0 - (float(node.get("disk_available", 0.0)) - disk_req) / disk_total,
                 ]
             )
+            projected_resource_peak = max(
+                [
+                    1.0 - (float(node.get("cpu_available", 0.0)) - cpu_req) / cpu_total,
+                    1.0 - (float(node.get("mem_available", 0.0)) - mem_req) / mem_total,
+                    1.0 - (float(node.get("disk_available", 0.0)) - disk_req) / disk_total,
+                ]
+            )
             load = node.get("core_business_load", {})
             projected_business_max = max(
                 float(load.get(dim, node.get(dim, 0.0))) + float(business.get(dim, 0.0))
@@ -195,13 +202,26 @@ class HeuristicPruner:
             co_location = float(node.get("deployed_core_nf_count", 0))
             upf_hotspot_penalty = 5.0 * max(0.0, projected_business_max - 0.55) if nf_type == "upf" else 0.0
             fast_score = (
-                22.0 * max(0.0, projected_business_max - 0.72)
-                + 10.0 * max(0.0, projected_resource_util - 0.72)
+                5.0 * projected_business_max
+                + 4.0 * projected_resource_peak
+                + 2.0 * projected_resource_util
+                + 22.0 * max(0.0, projected_business_max - 0.72)
+                + 10.0 * max(0.0, projected_resource_peak - 0.72)
                 + 2.0 * co_location
                 + upf_hotspot_penalty
                 - 0.25 * float(G.out_degree(node_id))
             )
-            fast_candidates.append((node_id, float(fast_score), projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty))
+            fast_candidates.append(
+                (
+                    node_id,
+                    float(fast_score),
+                    projected_resource_util,
+                    projected_resource_peak,
+                    projected_business_max,
+                    co_location,
+                    upf_hotspot_penalty,
+                )
+            )
 
         if not fast_candidates:
             return []
@@ -212,7 +232,15 @@ class HeuristicPruner:
         candidates = []
         prefilter_limit = min(len(fast_candidates), self._prefilter_limit(len(G), top_m))
         best_fast = heapq.nsmallest(prefilter_limit, fast_candidates, key=lambda item: item[1])
-        for node_id, _fast_score, projected_resource_util, projected_business_max, co_location, upf_hotspot_penalty in best_fast:
+        for (
+            node_id,
+            _fast_score,
+            projected_resource_util,
+            projected_resource_peak,
+            projected_business_max,
+            co_location,
+            upf_hotspot_penalty,
+        ) in best_fast:
             dep_score = self._score_dependency_paths(G, node_id, nf_type, deployed_by_type, dependencies, int(max_dependency_hops))
             if dep_score is None:
                 continue
@@ -223,8 +251,11 @@ class HeuristicPruner:
             score = (
                 dep_delay
                 + 1.7 * dep_hops
+                + 6.0 * projected_business_max
+                + 4.0 * projected_resource_peak
+                + 2.0 * projected_resource_util
                 + 18.0 * max(0.0, projected_business_max - 0.78)
-                + 7.0 * max(0.0, projected_resource_util - 0.78)
+                + 7.0 * max(0.0, projected_resource_peak - 0.78)
                 + 6.0 * bottleneck_pressure
                 + 2.0 * co_location
                 + upf_hotspot_penalty
@@ -471,18 +502,41 @@ def _training_quality_score(metrics, prefix=""):
     )
     dep = float(metrics.get(f"{prefix}dependency_satisfaction_rate", metrics.get("dependency_satisfaction_rate", 0.0)))
     quality = 100.0 * float(metrics.get(f"{prefix}avg_quality_score", metrics.get("avg_quality_score", 0.0)))
-    resource = 100.0 * float(metrics.get(f"{prefix}resource_balance_score", metrics.get("resource_balance_score", 0.0)))
-    business = 100.0 * float(metrics.get(f"{prefix}business_balance_score", metrics.get("business_balance_score", 0.0)))
-    link_good = 100.0 * (1.0 - float(metrics.get(f"{prefix}link_congestion_score", metrics.get("link_congestion_score", 0.0))))
+    resource = 100.0 * float(
+        metrics.get(
+            f"{prefix}placement_resource_score",
+            metrics.get(f"{prefix}resource_balance_score", metrics.get("resource_balance_score", 0.0)),
+        )
+    )
+    business = 100.0 * float(
+        metrics.get(
+            f"{prefix}placement_business_score",
+            metrics.get(f"{prefix}business_balance_score", metrics.get("business_balance_score", 0.0)),
+        )
+    )
+    future = 100.0 * float(
+        metrics.get(
+            f"{prefix}future_feasibility_score",
+            metrics.get("future_feasibility_score", 0.0),
+        )
+    )
+    link_metric = float(
+        metrics.get(
+            f"{prefix}used_link_congestion_score",
+            metrics.get(f"{prefix}link_congestion_score", metrics.get("link_congestion_score", 0.0)),
+        )
+    )
+    link_good = 100.0 * (1.0 - link_metric)
     alg_latency = float(metrics.get(f"{prefix}avg_algorithm_latency_ms", metrics.get("avg_algorithm_latency_ms", 0.0)))
     speed = 100.0 * max(0.0, 1.0 - min(1.0, alg_latency / 500.0))
     return (
         0.24 * success
         + 0.18 * full_sla
         + 0.10 * dep
-        + 0.22 * quality
+        + 0.18 * quality
         + 0.10 * resource
-        + 0.08 * business
+        + 0.07 * future
+        + 0.05 * business
         + 0.05 * link_good
         + 0.03 * speed
     )
@@ -586,7 +640,7 @@ def main():
         fixed_eval_data = _select_scale_coverage(fixed_eval_data, max(1, min(len(fixed_eval_data), args.eval_data_files)))
     print(
         f"固定验证集: {len(fixed_eval_data)} 组 × 每组 {args.eval_requests_per_file} 请求 "
-        "(用于稳定评估reward/quality趋势)"
+        "(连续部署口径，用于稳定评估reward/quality趋势)"
     )
 
     os.makedirs("models/checkpoints", exist_ok=True)
@@ -658,7 +712,7 @@ def main():
             fixed_eval_data,
             heuristic,
             max_requests_per_file=args.eval_requests_per_file,
-            shared_resources=False,
+            shared_resources=True,
         )
         epoch_metrics.update(eval_metrics)
         best_eval_quality = max(best_eval_quality, float(eval_metrics.get("eval_avg_quality_score", 0.0)))
@@ -681,6 +735,8 @@ def main():
             f"EvalReward={epoch_metrics.get('eval_avg_reward', 0.0):.2f} | "
             f"EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f} "
             f"(Best={epoch_metrics.get('eval_quality_best_so_far', 0.0):.3f}) | "
+            f"PlaceRes={epoch_metrics.get('eval_placement_resource_score', 0.0):.3f} | "
+            f"Future={epoch_metrics.get('eval_future_feasibility_score', 0.0):.3f} | "
             f"EvalActorHit={epoch_metrics.get('eval_actor_hit_rate', 0.0):.1f}% | "
             f"EvalFallback={epoch_metrics.get('eval_fallback_count', 0)} | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "

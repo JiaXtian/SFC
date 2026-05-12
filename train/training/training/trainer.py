@@ -33,8 +33,8 @@ class SFCTrainer:
         history_window=0,
         backend_align_context=True,
         max_probe_candidates=5,
-        max_decision_ms=460.0,
-        teacher_probe_candidates=12,
+        max_decision_ms=420.0,
+        teacher_probe_candidates=10,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -422,6 +422,10 @@ class SFCTrainer:
                 "resource_balance": float(info_obj.get("resource_balance", 0.0)),
                 "link_congestion": float(info_obj.get("link_congestion", 0.0)),
                 "business_balance": float(info_obj.get("business_balance", 0.0)),
+                "placement_resource": float(info_obj.get("placement_resource", 0.0)),
+                "placement_business": float(info_obj.get("placement_business", 0.0)),
+                "future_feasibility": float(info_obj.get("future_feasibility", 0.0)),
+                "used_link_congestion": float(info_obj.get("used_link_congestion", 0.0)),
                 "max_dependency_delay": float(info_obj.get("max_dependency_delay", 0.0)),
                 "actor_hit_rate": 100.0 * actor_hit_count / max(1, len(trajectories)),
                 "fallback_count": int(fallback_count),
@@ -519,7 +523,8 @@ class SFCTrainer:
                     if execution_mode == "actor":
                         break
             if not probe_candidates:
-                fallback_limit = min(max_probe + 8, len(probe_order))
+                extra_fallback = 4 if execution_mode == "actor" else 8
+                fallback_limit = min(max_probe + extra_fallback, len(probe_order))
                 for probe_idx in probe_order[max_probe:fallback_limit]:
                     if (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
                         break
@@ -622,6 +627,10 @@ class SFCTrainer:
         resource_balance_scores = []
         link_congestion_scores = []
         business_balance_scores = []
+        placement_resource_scores = []
+        placement_business_scores = []
+        future_feasibility_scores = []
+        used_link_congestion_scores = []
         actor_hit_rates = []
         fallback_counts = []
         reliability_scale, strict_reliability_prob = self._resolve_reliability_curriculum(
@@ -668,6 +677,10 @@ class SFCTrainer:
                 resource_balance_scores.append(float(episode_result.get("resource_balance", 0.0)))
                 link_congestion_scores.append(float(episode_result.get("link_congestion", 0.0)))
                 business_balance_scores.append(float(episode_result.get("business_balance", 0.0)))
+                placement_resource_scores.append(float(episode_result.get("placement_resource", 0.0)))
+                placement_business_scores.append(float(episode_result.get("placement_business", 0.0)))
+                future_feasibility_scores.append(float(episode_result.get("future_feasibility", 0.0)))
+                used_link_congestion_scores.append(float(episode_result.get("used_link_congestion", 0.0)))
                 actor_hit_rates.append(float(episode_result.get("actor_hit_rate", 0.0)))
                 fallback_counts.append(int(episode_result.get("fallback_count", 0)))
 
@@ -709,6 +722,10 @@ class SFCTrainer:
         avg_resource_balance = float(np.mean(resource_balance_scores)) if resource_balance_scores else 0.0
         avg_link_congestion = float(np.mean(link_congestion_scores)) if link_congestion_scores else 0.0
         avg_business_balance = float(np.mean(business_balance_scores)) if business_balance_scores else 0.0
+        avg_placement_resource = float(np.mean(placement_resource_scores)) if placement_resource_scores else 0.0
+        avg_placement_business = float(np.mean(placement_business_scores)) if placement_business_scores else 0.0
+        avg_future_feasibility = float(np.mean(future_feasibility_scores)) if future_feasibility_scores else 0.0
+        avg_used_link_congestion = float(np.mean(used_link_congestion_scores)) if used_link_congestion_scores else 0.0
 
         metrics = {
             "epoch": epoch,
@@ -722,6 +739,10 @@ class SFCTrainer:
             "resource_balance_score": avg_resource_balance,
             "link_congestion_score": avg_link_congestion,
             "business_balance_score": avg_business_balance,
+            "placement_resource_score": avg_placement_resource,
+            "placement_business_score": avg_placement_business,
+            "future_feasibility_score": avg_future_feasibility,
+            "used_link_congestion_score": avg_used_link_congestion,
             "random_baseline_win_rate": 0.0,
             "avg_episode_delay_ms": avg_ep_delay,
             "avg_algorithm_latency_ms": avg_alg_delay,
@@ -774,6 +795,10 @@ class SFCTrainer:
         resource_balance_scores = []
         link_congestion_scores = []
         business_balance_scores = []
+        placement_resource_scores = []
+        placement_business_scores = []
+        future_feasibility_scores = []
+        used_link_congestion_scores = []
         actor_hit_rates = []
         fallback_counts = []
         failure_reason_counts = {}
@@ -812,6 +837,10 @@ class SFCTrainer:
                 resource_balance_scores.append(float(result.get("resource_balance", 0.0)))
                 link_congestion_scores.append(float(result.get("link_congestion", 0.0)))
                 business_balance_scores.append(float(result.get("business_balance", 0.0)))
+                placement_resource_scores.append(float(result.get("placement_resource", 0.0)))
+                placement_business_scores.append(float(result.get("placement_business", 0.0)))
+                future_feasibility_scores.append(float(result.get("future_feasibility", 0.0)))
+                used_link_congestion_scores.append(float(result.get("used_link_congestion", 0.0)))
                 actor_hit_rates.append(float(result.get("actor_hit_rate", 0.0)))
                 fallback_counts.append(int(result.get("fallback_count", 0)))
                 if result["success"]:
@@ -834,6 +863,10 @@ class SFCTrainer:
             "eval_resource_balance_score": float(np.mean(resource_balance_scores)) if resource_balance_scores else 0.0,
             "eval_link_congestion_score": float(np.mean(link_congestion_scores)) if link_congestion_scores else 0.0,
             "eval_business_balance_score": float(np.mean(business_balance_scores)) if business_balance_scores else 0.0,
+            "eval_placement_resource_score": float(np.mean(placement_resource_scores)) if placement_resource_scores else 0.0,
+            "eval_placement_business_score": float(np.mean(placement_business_scores)) if placement_business_scores else 0.0,
+            "eval_future_feasibility_score": float(np.mean(future_feasibility_scores)) if future_feasibility_scores else 0.0,
+            "eval_used_link_congestion_score": float(np.mean(used_link_congestion_scores)) if used_link_congestion_scores else 0.0,
             "eval_avg_episode_delay_ms": float(np.mean(episode_delays)) if episode_delays else 0.0,
             "eval_avg_algorithm_latency_ms": float(np.mean(decision_lat_means)) if decision_lat_means else 0.0,
             "eval_p95_algorithm_latency_ms": float(np.percentile(decision_lat_p95s, 95)) if decision_lat_p95s else 0.0,

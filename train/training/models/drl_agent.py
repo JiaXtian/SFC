@@ -174,10 +174,15 @@ class DRLAgent:
         next_states_tensor = torch.stack(next_states)
         dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
+        del next_states_tensor
         values = self.critic(states_tensor)
-        with torch.no_grad():
-            next_values = self.critic(next_states_tensor)
-            targets = rewards_tensor + self.gamma * next_values * (1 - dones_tensor)
+        returns = []
+        running_return = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        for reward, done in zip(reversed(rewards_tensor), reversed(dones_tensor)):
+            running_return = reward + self.gamma * running_return * (1.0 - done)
+            returns.append(running_return)
+        returns.reverse()
+        targets = torch.stack(returns).detach()
 
         advantages = targets - values
         if advantages.numel() > 1:
