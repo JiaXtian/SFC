@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
+import { clearSfcIdentityRegistry } from '@/utils/sfcLabel'
 
 function toNumber(v: any, fallback = 0) {
   const n = Number(v)
@@ -19,6 +20,8 @@ function normalizeDeployment(raw: any): Deployment {
   return {
     deployment_id: deploymentId,
     backend_deployment_id: backendId,
+    core_network_id: raw?.core_network_id ? String(raw.core_network_id) : undefined,
+    core_network_label: raw?.core_network_label ? String(raw.core_network_label) : undefined,
     request_id: String(raw?.request_id ?? ''),
     sfc_name: String(raw?.sfc_name ?? raw?.request_id ?? deploymentId),
     candidate_index: toNumber(raw?.candidate_index ?? 0, 0),
@@ -119,6 +122,7 @@ export function useBootstrapRuntime() {
       }
 
       if (deploymentsRes.status === 'fulfilled' && Array.isArray(deploymentsRes.value)) {
+        if (deploymentsRes.value.length === 0) clearSfcIdentityRegistry()
         const deployments = deploymentsRes.value.map(normalizeDeployment)
         setDeployments(deployments)
       }

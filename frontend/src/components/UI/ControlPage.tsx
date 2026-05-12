@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { SlidersHorizontal, Users, LogOut, Satellite, ShieldAlert, RadioTower } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import SatelliteNodeControlPage from './SatelliteNodeControlPage'
@@ -51,9 +51,14 @@ export default function ControlPage() {
   const role = user?.role === 'admin' ? 'admin' : 'user'
   const canManage = role === 'admin'
   const [tab, setTab] = useState<Tab>('satellite')
+  const [validationMounted, setValidationMounted] = useState(false)
 
   const visibleTabs: Tab[] = canManage ? ['satellite', 'strategy', 'validation', 'fault', 'users'] : ['satellite']
   const activeTab = visibleTabs.includes(tab) ? tab : 'satellite'
+
+  useEffect(() => {
+    if (activeTab === 'validation') setValidationMounted(true)
+  }, [activeTab])
 
   return (
     <div
@@ -167,7 +172,11 @@ export default function ControlPage() {
         <div className="h-[calc(100%-104px)] overflow-hidden">
           {activeTab === 'satellite' && <SatelliteNodeControlPage role={role} />}
           {activeTab === 'strategy' && <StrategyDeployBody canManage={canManage} />}
-          {activeTab === 'validation' && <UERANSIMValidationPage />}
+          {canManage && validationMounted && (
+            <div className={activeTab === 'validation' ? 'h-full' : 'hidden'}>
+              <UERANSIMValidationPage active={activeTab === 'validation'} />
+            </div>
+          )}
           {activeTab === 'fault' && <FaultControlBody />}
           {activeTab === 'users' && <UserManagementPage />}
         </div>

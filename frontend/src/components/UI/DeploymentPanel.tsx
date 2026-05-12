@@ -225,24 +225,21 @@ export default function DeploymentPanel() {
                   <div className="mt-2">
                     <div className="text-[11px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
                     <div className="space-y-1">
-                      {dep.per_vnf?.map((v, i) => (
-                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10px]"
+                      {dep.per_vnf?.map((v, i) => {
+                        const nfType = String((v as any).nf_type ?? (v as any).core_nf ?? v.vnf ?? '-').toUpperCase()
+                        return (
+                        <div key={i} className="grid grid-cols-[minmax(56px,0.7fr)_minmax(0,1.15fr)_auto] items-center gap-2 px-2 py-1.5 rounded-lg text-[10px]"
                           style={{ background: 'rgba(15,23,42,0.28)', border: '1px solid rgba(100,130,155,0.2)' }}>
-                          <div className="flex items-center gap-2">
-                            <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[8px] font-bold"
-                              style={{ background: 'rgba(0,255,136,0.2)', color: '#00ff88' }}>{i+1}</span>
-                            <span className="font-medium text-gray-300">{(v as any).core_nf ?? v.vnf}</span>
-                            <span className="text-[9px] text-cyan-300">{(v as any).nf_type ?? '-'}</span>
-                            <span className="text-gray-700">→</span>
-                            <span className="font-mono text-green-400">{v.node}</span>
-                          </div>
-                          <div className="flex gap-2 text-[9px] text-gray-500">
+                          <div className="font-semibold text-cyan-200 truncate">{nfType}</div>
+                          <div className="font-mono text-green-400 truncate">→ {v.node}</div>
+                          <div className="flex gap-2 text-[9px] text-gray-400 justify-end whitespace-nowrap">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>
                           </div>
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </div>
 

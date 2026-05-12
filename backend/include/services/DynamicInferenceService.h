@@ -32,6 +32,10 @@ public:
         double initial_inference_time_ms = -1.0
     );
     bool stop_session(const std::string& session_id);
+    std::vector<std::string> stop_sessions_for_deployment(
+        const std::string& deployment_id,
+        const std::string& request_id = ""
+    );
     nlohmann::json list_sessions() const;
     nlohmann::json get_session_status(const std::string& session_id) const;
     nlohmann::json force_recompute(const std::string& session_id, const std::string& trigger = "manual");
@@ -82,12 +86,6 @@ private:
         const std::unordered_set<std::string>& down_nodes
     ) const;
     std::optional<DeploymentCandidate> try_partial_node_redeploy(
-        const SessionState& session,
-        const Topology& planning_topology,
-        const std::unordered_set<std::string>& down_nodes,
-        std::string* detail
-    );
-    std::optional<DeploymentCandidate> try_fast_full_redeploy(
         const SessionState& session,
         const Topology& planning_topology,
         const std::unordered_set<std::string>& down_nodes,

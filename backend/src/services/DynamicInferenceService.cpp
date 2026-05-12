@@ -155,6 +155,50 @@ double coordinate_distance_km(const Coordinates& a, const Coordinates& b) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+std::unordered_set<std::string> collect_repair_neighborhood(
+    const Topology& topology,
+    const std::unordered_set<std::string>& anchors,
+    const std::unordered_set<std::string>& down_nodes,
+    int max_hops
+) {
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+    for (const auto& sat : topology.nodes) {
+        if (down_nodes.find(sat.id) == down_nodes.end() && !node_is_down(sat)) {
+            adjacency[sat.id] = {};
+        }
+    }
+    for (const auto& link : topology.links) {
+        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+        if (down_nodes.find(link.source) != down_nodes.end() || down_nodes.find(link.target) != down_nodes.end()) continue;
+        if (to_lower(link.status) == "down") continue;
+        if (link.bandwidth_available_gbps <= 0.0) continue;
+        if (adjacency.find(link.source) == adjacency.end() || adjacency.find(link.target) == adjacency.end()) continue;
+        adjacency[link.source].push_back(link.target);
+        adjacency[link.target].push_back(link.source);
+    }
+
+    std::queue<std::pair<std::string, int>> q;
+    std::unordered_set<std::string> visited;
+    for (const auto& anchor : anchors) {
+        if (adjacency.find(anchor) == adjacency.end()) continue;
+        if (visited.insert(anchor).second) q.push({anchor, 0});
+    }
+
+    while (!q.empty()) {
+        const auto [node, depth] = q.front();
+        q.pop();
+        if (depth >= max_hops) continue;
+        const auto it = adjacency.find(node);
+        if (it == adjacency.end()) continue;
+        for (const auto& next : it->second) {
+            if (visited.find(next) != visited.end()) continue;
+            visited.insert(next);
+            q.push({next, depth + 1});
+        }
+    }
+    return visited;
+}
+
 std::vector<std::string> repair_shortest_path(
     const std::string& src,
     const std::string& dst,
@@ -634,6 +678,18 @@ std::optional<DeploymentCandidate> DynamicInferenceService::try_partial_node_red
         }
         return std::nullopt;
     }
+    auto dependency_degree = [&](size_t idx) {
+        if (idx >= per_vnf.size()) return 0;
+        const std::string nf = nf_key_from_pv(per_vnf[idx]);
+        int degree = 0;
+        for (const auto& dep : session.request.core_nf_dependencies) {
+            if (to_lower(dep.source) == nf || to_lower(dep.target) == nf) degree += 1;
+        }
+        return degree;
+    };
+    std::sort(affected.begin(), affected.end(), [&](size_t a, size_t b) {
+        return dependency_degree(a) > dependency_degree(b);
+    });
 
     std::unordered_map<std::string, const Satellite*> sat_by_id;
     std::unordered_map<std::string, double> cpu;
@@ -671,129 +727,98 @@ std::optional<DeploymentCandidate> DynamicInferenceService::try_partial_node_red
             healthy_deployed_nodes.insert(node);
         }
     }
-
-    for (const size_t idx : affected) {
-        if (idx >= session.request.vnfs.size()) continue;
-        const auto& vnf = session.request.vnfs[idx];
-        const std::string nf = nf_key_from_pv(repaired.per_vnf[idx]);
-        struct Choice { std::string node; double cost = std::numeric_limits<double>::infinity(); };
-        std::vector<Choice> choices;
-        choices.reserve(planning_topology.nodes.size());
-
-        auto collect_choices = [&](bool allow_existing_core_nodes) {
-            choices.clear();
-            for (const auto& sat : planning_topology.nodes) {
-                if (down_nodes.find(sat.id) != down_nodes.end() || node_is_down(sat)) continue;
-                const bool already_hosts_this_core = healthy_deployed_nodes.find(sat.id) != healthy_deployed_nodes.end();
-                const bool is_new_replacement_node = replacement_nodes.find(sat.id) != replacement_nodes.end();
-                if (already_hosts_this_core && !is_new_replacement_node && !allow_existing_core_nodes) continue;
-                if (cpu[sat.id] + 1e-9 < vnf.cpu || mem[sat.id] + 1e-9 < vnf.mem || disk[sat.id] + 1e-9 < vnf.disk) continue;
-
-                double locality_cost = 0.0;
-                int linked_neighbors = 0;
-                for (const auto& dep : session.request.core_nf_dependencies) {
-                    std::string other_nf;
-                    if (to_lower(dep.source) == nf) other_nf = to_lower(dep.target);
-                    else if (to_lower(dep.target) == nf) other_nf = to_lower(dep.source);
-                    else continue;
-                    const auto other_it = placed_nf.find(other_nf);
-                    if (other_it == placed_nf.end() || other_it->second.empty() || other_it->second == sat.id) continue;
-                    const auto neighbor_sat = sat_by_id.find(other_it->second);
-                    if (neighbor_sat == sat_by_id.end()) continue;
-                    locality_cost += coordinate_distance_km(sat.coordinates, neighbor_sat->second->coordinates) *
-                        std::max(0.1, dep.latency_weight);
-                    linked_neighbors += 1;
-                }
-                const double cpu_after = sat.cpu_total > 0 ? (cpu[sat.id] - vnf.cpu) / sat.cpu_total : 0.0;
-                const double mem_after = sat.mem_total > 0 ? (mem[sat.id] - vnf.mem) / sat.mem_total : 0.0;
-                const double disk_after = sat.disk_total > 0 ? (disk[sat.id] - vnf.disk) / sat.disk_total : 0.0;
-                const double resource_headroom = std::max(0.0, std::min(1.0, (cpu_after + mem_after + disk_after) / 3.0));
-                const double resource_cost = (1.0 - resource_headroom) * 900.0;
-                const double existing_core_penalty = already_hosts_this_core && !is_new_replacement_node ? 360.0 : 0.0;
-                const double replacement_reuse_bonus = is_new_replacement_node ? 180.0 : 0.0;
-                const double fresh_node_bonus = already_hosts_this_core ? 0.0 : 260.0;
-                choices.push_back({
-                    sat.id,
-                    locality_cost + resource_cost + existing_core_penalty - replacement_reuse_bonus - fresh_node_bonus - linked_neighbors * 65.0
-                });
-            }
-        };
-
-        collect_choices(false);
-        if (choices.empty()) {
-            collect_choices(true);
-        }
-        if (choices.empty()) {
-            if (detail) *detail = "partial_redeploy_no_target_for_" + nf;
-            return std::nullopt;
-        }
-        std::sort(choices.begin(), choices.end(), [](const Choice& a, const Choice& b) {
-            return a.cost < b.cost;
-        });
-        const std::string selected = choices.front().node;
-        repaired.per_vnf[idx].node = selected;
-        placed_nf[nf] = selected;
-        if (healthy_deployed_nodes.find(selected) == healthy_deployed_nodes.end()) {
-            replacement_nodes.insert(selected);
-        }
-        cpu[selected] -= vnf.cpu;
-        mem[selected] -= vnf.mem;
-        disk[selected] -= vnf.disk;
-    }
-
-    std::string reason;
-    if (!rebuild_candidate_paths_and_sla(&repaired, session.request, planning_topology, &reason)) {
-        if (detail) *detail = reason.empty() ? "partial_redeploy_validation_failed" : reason;
-        return std::nullopt;
-    }
-    if (detail) {
-        *detail = "partial_redeploy_success:affected_nfs=" + std::to_string(affected.size());
-    }
-    return repaired;
-}
-
-std::optional<DeploymentCandidate> DynamicInferenceService::try_fast_full_redeploy(
-    const SessionState& session,
-    const Topology& planning_topology,
-    const std::unordered_set<std::string>& down_nodes,
-    std::string* detail
-) {
-    if (session.request.vnfs.empty()) {
-        if (detail) *detail = "fast_full_redeploy_empty_request";
+    if (healthy_deployed_nodes.empty()) {
+        if (detail) *detail = "partial_redeploy_no_healthy_anchor_for_scope";
         return std::nullopt;
     }
 
-    std::unordered_map<std::string, const Satellite*> sat_by_id;
-    std::unordered_map<std::string, double> cpu;
-    std::unordered_map<std::string, double> mem;
-    std::unordered_map<std::string, double> disk;
+    constexpr int kLocalRepairHopLimit = 5;
+    constexpr int kMaxLocalRepairValidations = 36;
+    const auto nearby_nodes = collect_repair_neighborhood(
+        planning_topology,
+        healthy_deployed_nodes,
+        down_nodes,
+        kLocalRepairHopLimit
+    );
+    if (nearby_nodes.empty()) {
+        if (detail) *detail = "partial_redeploy_empty_5hop_scope";
+        return std::nullopt;
+    }
+
+    std::unordered_map<std::string, std::vector<std::pair<std::string, double>>> latency_adj;
     for (const auto& sat : planning_topology.nodes) {
-        if (down_nodes.find(sat.id) != down_nodes.end() || node_is_down(sat)) continue;
-        sat_by_id[sat.id] = &sat;
-        cpu[sat.id] = sat.cpu_available;
-        mem[sat.id] = sat.mem_available;
-        disk[sat.id] = sat.disk_available;
+        if (down_nodes.find(sat.id) == down_nodes.end() && !node_is_down(sat)) {
+            latency_adj[sat.id] = {};
+        }
     }
-    if (sat_by_id.empty()) {
-        if (detail) *detail = "fast_full_redeploy_no_active_satellite";
+    for (const auto& link : planning_topology.links) {
+        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+        if (down_nodes.find(link.source) != down_nodes.end() || down_nodes.find(link.target) != down_nodes.end()) continue;
+        if (to_lower(link.status) == "down") continue;
+        if (link.bandwidth_available_gbps <= 0.0) continue;
+        if (latency_adj.find(link.source) == latency_adj.end() || latency_adj.find(link.target) == latency_adj.end()) continue;
+        const double weight = std::max(0.001, link.latency_ms) * (to_lower(link.status) == "congested" ? 1.35 : 1.0);
+        latency_adj[link.source].push_back({link.target, weight});
+        latency_adj[link.target].push_back({link.source, weight});
+    }
+    std::unordered_map<std::string, double> latency_cache;
+    auto path_latency_ms = [&](const std::string& src, const std::string& dst) -> std::optional<double> {
+        if (src.empty() || dst.empty()) return std::nullopt;
+        if (src == dst) return 0.0;
+        const std::string key = src < dst ? src + ">" + dst : dst + ">" + src;
+        const auto cached = latency_cache.find(key);
+        if (cached != latency_cache.end()) return cached->second;
+        if (latency_adj.find(src) == latency_adj.end() || latency_adj.find(dst) == latency_adj.end()) return std::nullopt;
+
+        using Item = std::pair<double, std::string>;
+        std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+        std::unordered_map<std::string, double> dist;
+        dist[src] = 0.0;
+        pq.push({0.0, src});
+        while (!pq.empty()) {
+            const auto [d, u] = pq.top();
+            pq.pop();
+            if (d > dist[u] + 1e-9) continue;
+            if (u == dst) {
+                latency_cache[key] = d;
+                return d;
+            }
+            const auto adj_it = latency_adj.find(u);
+            if (adj_it == latency_adj.end()) continue;
+            for (const auto& edge : adj_it->second) {
+                const double nd = d + edge.second;
+                const auto it = dist.find(edge.first);
+                if (it == dist.end() || nd < it->second) {
+                    dist[edge.first] = nd;
+                    pq.push({nd, edge.first});
+                }
+            }
+        }
         return std::nullopt;
-    }
+    };
 
-    DeploymentCandidate candidate;
-    candidate.per_vnf.reserve(session.request.vnfs.size());
-    std::unordered_map<std::string, std::string> placed_nf;
-    std::unordered_set<std::string> used_nodes;
+    struct Choice { std::string node; double cost = std::numeric_limits<double>::infinity(); };
+    std::vector<DeploymentCandidate::PerVNF> working_per_vnf = repaired.per_vnf;
+    std::string last_reason;
+    int validation_attempts = 0;
 
-    for (size_t idx = 0; idx < session.request.vnfs.size(); ++idx) {
-        const auto& vnf = session.request.vnfs[idx];
-        const std::string nf = to_lower(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
-        struct Choice { std::string node; double cost = std::numeric_limits<double>::infinity(); };
+    auto make_choices = [&](size_t idx, bool allow_existing_core_nodes) {
         std::vector<Choice> choices;
-        choices.reserve(sat_by_id.size());
+        if (idx >= session.request.vnfs.size()) return choices;
+        const auto& vnf = session.request.vnfs[idx];
+        const std::string nf = nf_key_from_pv(working_per_vnf[idx]);
+        choices.reserve(nearby_nodes.size());
 
-        for (const auto& kv : sat_by_id) {
-            const auto& sat = *kv.second;
+        for (const auto& node_id : nearby_nodes) {
+            const auto sat_it = sat_by_id.find(node_id);
+            if (sat_it == sat_by_id.end()) continue;
+            const auto& sat = *sat_it->second;
+            if (down_nodes.find(sat.id) != down_nodes.end() || node_is_down(sat)) continue;
+            const bool already_hosts_this_core = healthy_deployed_nodes.find(sat.id) != healthy_deployed_nodes.end();
+            const bool is_new_replacement_node = replacement_nodes.find(sat.id) != replacement_nodes.end();
+            if (already_hosts_this_core && !is_new_replacement_node && !allow_existing_core_nodes) continue;
             if (cpu[sat.id] + 1e-9 < vnf.cpu || mem[sat.id] + 1e-9 < vnf.mem || disk[sat.id] + 1e-9 < vnf.disk) continue;
+
             double locality_cost = 0.0;
             int linked_neighbors = 0;
             for (const auto& dep : session.request.core_nf_dependencies) {
@@ -803,53 +828,132 @@ std::optional<DeploymentCandidate> DynamicInferenceService::try_fast_full_redepl
                 else continue;
                 const auto other_it = placed_nf.find(other_nf);
                 if (other_it == placed_nf.end() || other_it->second.empty() || other_it->second == sat.id) continue;
-                const auto other_sat = sat_by_id.find(other_it->second);
-                if (other_sat == sat_by_id.end()) continue;
-                locality_cost += coordinate_distance_km(sat.coordinates, other_sat->second->coordinates) *
-                    std::max(0.1, dep.latency_weight);
+                const auto neighbor_sat = sat_by_id.find(other_it->second);
+                if (neighbor_sat == sat_by_id.end()) continue;
+                const auto latency = path_latency_ms(sat.id, other_it->second);
+                locality_cost += latency.has_value()
+                    ? *latency * 120.0 * std::max(0.1, dep.latency_weight)
+                    : coordinate_distance_km(sat.coordinates, neighbor_sat->second->coordinates) *
+                        std::max(0.1, dep.latency_weight);
                 linked_neighbors += 1;
             }
+            if (linked_neighbors == 0) {
+                double nearest_anchor_latency = std::numeric_limits<double>::infinity();
+                double nearest_anchor_distance = std::numeric_limits<double>::infinity();
+                for (const auto& node : healthy_deployed_nodes) {
+                    const auto anchor_it = sat_by_id.find(node);
+                    if (anchor_it == sat_by_id.end()) continue;
+                    const auto latency = path_latency_ms(sat.id, node);
+                    if (latency.has_value()) nearest_anchor_latency = std::min(nearest_anchor_latency, *latency);
+                    nearest_anchor_distance = std::min(
+                        nearest_anchor_distance,
+                        coordinate_distance_km(sat.coordinates, anchor_it->second->coordinates)
+                    );
+                }
+                if (std::isfinite(nearest_anchor_latency)) {
+                    locality_cost += nearest_anchor_latency * 120.0;
+                } else if (std::isfinite(nearest_anchor_distance)) {
+                    locality_cost += nearest_anchor_distance * 0.35;
+                }
+            }
+
             const double cpu_after = sat.cpu_total > 0 ? (cpu[sat.id] - vnf.cpu) / sat.cpu_total : 0.0;
             const double mem_after = sat.mem_total > 0 ? (mem[sat.id] - vnf.mem) / sat.mem_total : 0.0;
             const double disk_after = sat.disk_total > 0 ? (disk[sat.id] - vnf.disk) / sat.disk_total : 0.0;
             const double resource_headroom = std::max(0.0, std::min(1.0, (cpu_after + mem_after + disk_after) / 3.0));
-            const double reuse_penalty = used_nodes.find(sat.id) == used_nodes.end() ? 0.0 : 28.0;
-            choices.push_back({sat.id, locality_cost + (1.0 - resource_headroom) * 860.0 + reuse_penalty - linked_neighbors * 70.0});
+            const double resource_cost = (1.0 - resource_headroom) * 900.0;
+            const double existing_core_penalty = already_hosts_this_core && !is_new_replacement_node ? 820.0 : 0.0;
+            const double replacement_reuse_bonus = is_new_replacement_node ? 220.0 : 0.0;
+            const double fresh_node_bonus = already_hosts_this_core ? 0.0 : 420.0;
+            choices.push_back({
+                sat.id,
+                locality_cost + resource_cost + existing_core_penalty - replacement_reuse_bonus - fresh_node_bonus - linked_neighbors * 75.0
+            });
         }
-        if (choices.empty()) {
-            if (detail) *detail = "fast_full_redeploy_no_target_for_" + nf;
-            return std::nullopt;
-        }
+
         std::sort(choices.begin(), choices.end(), [](const Choice& a, const Choice& b) {
             return a.cost < b.cost;
         });
-        const std::string selected = choices.front().node;
-        DeploymentCandidate::PerVNF pv;
-        pv.vnf = vnf.name;
-        pv.core_nf = vnf.name;
-        pv.nf_type = vnf.nf_type.empty() ? vnf.name : vnf.nf_type;
-        pv.nf_role = vnf.nf_role;
-        pv.node = selected;
-        pv.cpu_used = vnf.cpu;
-        pv.mem_used = vnf.mem;
-        pv.disk_used = vnf.disk;
-        candidate.per_vnf.push_back(std::move(pv));
-        placed_nf[nf] = selected;
-        used_nodes.insert(selected);
-        cpu[selected] -= vnf.cpu;
-        mem[selected] -= vnf.mem;
-        disk[selected] -= vnf.disk;
-    }
+        const size_t limit = affected.size() <= 2 ? 18 : 12;
+        if (choices.size() > limit) choices.resize(limit);
+        return choices;
+    };
 
-    std::string reason;
-    if (!rebuild_candidate_paths_and_sla(&candidate, session.request, planning_topology, &reason)) {
-        if (detail) *detail = reason.empty() ? "fast_full_redeploy_validation_failed" : reason;
+    std::function<bool(size_t)> dfs = [&](size_t pos) -> bool {
+        if (validation_attempts >= kMaxLocalRepairValidations) return false;
+        if (pos >= affected.size()) {
+            DeploymentCandidate candidate = session.last_candidate;
+            candidate.per_vnf = working_per_vnf;
+            candidate.reason.clear();
+            validation_attempts += 1;
+            std::string reason;
+            if (rebuild_candidate_paths_and_sla(&candidate, session.request, planning_topology, &reason)) {
+                repaired = std::move(candidate);
+                return true;
+            }
+            last_reason = reason.empty() ? "partial_redeploy_validation_failed" : reason;
+            return false;
+        }
+
+        const size_t idx = affected[pos];
+        if (idx >= session.request.vnfs.size()) return dfs(pos + 1);
+        const auto& vnf = session.request.vnfs[idx];
+        const std::string nf = nf_key_from_pv(working_per_vnf[idx]);
+        auto choices = make_choices(idx, false);
+        if (choices.empty()) {
+            choices = make_choices(idx, true);
+        }
+        if (choices.empty()) {
+            last_reason = "partial_redeploy_no_5hop_target_for_" + nf;
+            return false;
+        }
+
+        for (const auto& choice : choices) {
+            if (validation_attempts >= kMaxLocalRepairValidations) break;
+            const std::string old_node = working_per_vnf[idx].node;
+            const auto placed_it = placed_nf.find(nf);
+            const bool had_placed = placed_it != placed_nf.end();
+            const std::string old_placed = had_placed ? placed_it->second : "";
+            const bool inserted_replacement =
+                healthy_deployed_nodes.find(choice.node) == healthy_deployed_nodes.end() &&
+                replacement_nodes.insert(choice.node).second;
+
+            working_per_vnf[idx].node = choice.node;
+            placed_nf[nf] = choice.node;
+            cpu[choice.node] -= vnf.cpu;
+            mem[choice.node] -= vnf.mem;
+            disk[choice.node] -= vnf.disk;
+
+            const bool ok = dfs(pos + 1);
+
+            cpu[choice.node] += vnf.cpu;
+            mem[choice.node] += vnf.mem;
+            disk[choice.node] += vnf.disk;
+            working_per_vnf[idx].node = old_node;
+            if (had_placed) placed_nf[nf] = old_placed;
+            else placed_nf.erase(nf);
+            if (inserted_replacement) replacement_nodes.erase(choice.node);
+
+            if (ok) return true;
+        }
+        return false;
+    };
+
+    if (!dfs(0)) {
+        if (detail) {
+            *detail = last_reason.empty()
+                ? "partial_redeploy_5hop_search_exhausted"
+                : last_reason;
+        }
         return std::nullopt;
     }
     if (detail) {
-        *detail = "fast_full_redeploy_success:nfs=" + std::to_string(session.request.vnfs.size());
+        *detail = "partial_redeploy_success:affected_nfs=" + std::to_string(affected.size()) +
+            ",scope_hops=" + std::to_string(kLocalRepairHopLimit) +
+            ",scope_nodes=" + std::to_string(nearby_nodes.size()) +
+            ",validated=" + std::to_string(validation_attempts);
     }
-    return candidate;
+    return repaired;
 }
 
 std::string DynamicInferenceService::infer_required_recompute_trigger(
@@ -1060,20 +1164,17 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                 {"reason", partial_detail.empty() ? "partial_redeploy_unavailable" : partial_detail},
                 {"affected_services", 1}
             });
-            auto full = try_fast_full_redeploy(session, planning_topology, down_nodes, &partial_detail);
-            if (full.has_value()) {
-                decision_process = {
-                    {"algorithm", "fast_full_redeploy"},
-                    {"status", "success"},
-                    {"detail", partial_detail}
-                };
-                candidates.push_back(std::move(*full));
-            } else {
-                decision_process = {
-                    {"algorithm", "fast_full_redeploy"},
-                    {"status", "failed"},
-                    {"detail", partial_detail.empty() ? "fast_full_redeploy_unavailable" : partial_detail}
-                };
+            candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
+            if (!decision_process.is_object()) {
+                decision_process = nlohmann::json::object();
+            }
+            decision_process["recovery_algorithm"] = "model_full_redeploy";
+            decision_process["recovery_reason"] = multi_node_fault
+                ? "multi_deployed_satellite_fault"
+                : "partial_redeploy_unavailable";
+            decision_process["detail"] = partial_detail.empty() ? "escalated_to_model_full_redeploy" : partial_detail;
+            if (candidates.empty()) {
+                decision_process["status"] = "failed";
             }
         }
     } else {
@@ -1420,6 +1521,29 @@ nlohmann::json DynamicInferenceService::start_session(
     }
     session.auto_redeploy = auto_redeploy;
     session.active = true;
+
+    if (!initial_deployment_id.empty()) {
+        for (const auto& kv : sessions_) {
+            const auto& existing = kv.second;
+            if (!existing.active) continue;
+            if (existing.orchestration_deployment_id != initial_deployment_id) continue;
+            return {
+                {"session_id", existing.session_id},
+                {"active", true},
+                {"auto_redeploy", existing.auto_redeploy},
+                {"request_id", existing.request.request_id},
+                {"deduplicated", true},
+                {"initial_result", {
+                    {"session_id", existing.session_id},
+                    {"status", "stable"},
+                    {"topology_version", existing.last_topology_version},
+                    {"sim_time", existing.last_sim_time},
+                    {"inference_time_ms", existing.last_inference_time_ms}
+                }}
+            };
+        }
+    }
+
     sessions_[session.session_id] = session;
     sessions_[session.session_id].orchestration_deployment_id = initial_deployment_id;
 
@@ -1623,6 +1747,52 @@ bool DynamicInferenceService::stop_session(const std::string& session_id) {
     }
     it->second.active = false;
     return true;
+}
+
+std::vector<std::string> DynamicInferenceService::stop_sessions_for_deployment(
+    const std::string& deployment_id,
+    const std::string& request_id
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> released_ids;
+    bool released_any = false;
+
+    for (auto& kv : sessions_) {
+        auto& session = kv.second;
+        if (!session.active) continue;
+        const bool deployment_match =
+            !deployment_id.empty() &&
+            (session.orchestration_deployment_id == deployment_id ||
+             session.active_resource_deployment_id == deployment_id);
+        const bool request_match =
+            !request_id.empty() && session.request.request_id == request_id;
+        if (!deployment_match && !request_match) continue;
+
+        if (!session.active_resource_deployment_id.empty()) {
+            const std::string alloc_id = session.active_resource_deployment_id;
+            if (res_mgr_->release_resources(alloc_id)) {
+                released_ids.push_back(alloc_id);
+                released_any = true;
+            } else {
+                spdlog::debug(
+                    "Session {} failed to release allocation {} while stopping deployment {}",
+                    session.session_id,
+                    alloc_id,
+                    deployment_id
+                );
+            }
+            session.active_resource_deployment_id.clear();
+        }
+        session.active = false;
+        session.auto_redeploy = false;
+        session.pending_replanning = false;
+    }
+
+    if (released_any) {
+        auto updated_topology = res_mgr_->export_current_topology();
+        topo_mgr_->save_current_topology(updated_topology);
+    }
+    return released_ids;
 }
 
 nlohmann::json DynamicInferenceService::list_sessions() const {
