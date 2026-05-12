@@ -1562,6 +1562,17 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         if (name_it != binding_group_by_token.end()) return name_it->second;
         return std::nullopt;
     };
+    std::unordered_set<std::string> independent_nf_tokens;
+    for (const auto& token_raw : request.independent_core_nfs) {
+        const std::string token = normalize_nf_type(token_raw);
+        if (!token.empty()) independent_nf_tokens.insert(token);
+    }
+    auto is_independent_vnf = [&](const VNF& vnf) {
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        const std::string name = normalize_nf_type(vnf.name);
+        return independent_nf_tokens.find(nf_type) != independent_nf_tokens.end() ||
+               independent_nf_tokens.find(name) != independent_nf_tokens.end();
+    };
 
     std::string prev_node = request.source_node;
     bool has_prev_vnf = !prev_node.empty();
@@ -1573,6 +1584,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     int accumulated_hops = 0;
     double bottleneck_bandwidth = std::numeric_limits<double>::infinity();
     std::unordered_set<std::string> deployed_node_set;
+    std::unordered_set<std::string> exclusive_node_set;
     const DynamicTopologyFeatures topo_features = build_dynamic_topology_features(topology);
     spdlog::debug("Max latency: {}ms", request.constraints.max_latency_ms);
 
@@ -1599,6 +1611,19 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     for (size_t i = 0; i < request.vnfs.size(); ++i) {
         const auto& vnf = request.vnfs[i];
         const auto bound_group = binding_group_for_vnf(vnf);
+        const bool independent_nf = is_independent_vnf(vnf);
+        if (independent_nf && bound_group.has_value()) {
+            if (candidate_trace) {
+                nlohmann::json step_trace = {
+                    {"vnf_index", static_cast<int>(i)},
+                    {"vnf_name", vnf.name},
+                    {"status", "failed"},
+                    {"failure_reason", "independent_nf_cannot_be_in_binding_group"}
+                };
+                append_step_trace(step_trace);
+            }
+            return finalize_failure("Independent core NF cannot be part of a same-satellite binding group: " + vnf.name);
+        }
         const std::string bound_anchor =
             (bound_group.has_value() && *bound_group < binding_anchor_node.size())
                 ? binding_anchor_node[*bound_group]
@@ -1642,7 +1667,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         if (!bound_anchor.empty()) {
             candidates_set.clear();
             if (cache.node_index.find(bound_anchor) != cache.node_index.end() &&
-                residual_ok(bound_anchor, vnf)) {
+                residual_ok(bound_anchor, vnf) &&
+                exclusive_node_set.find(bound_anchor) == exclusive_node_set.end() &&
+                (!independent_nf || deployed_node_set.find(bound_anchor) == deployed_node_set.end())) {
                 candidates_set.push_back(bound_anchor);
             }
         } else {
@@ -1650,7 +1677,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 std::remove_if(
                     candidates_set.begin(),
                     candidates_set.end(),
-                    [&](const std::string& node_id) { return !residual_ok(node_id, vnf); }
+                    [&](const std::string& node_id) {
+                        if (!residual_ok(node_id, vnf)) return true;
+                        if (exclusive_node_set.find(node_id) != exclusive_node_set.end()) return true;
+                        if (independent_nf && deployed_node_set.find(node_id) != deployed_node_set.end()) return true;
+                        return false;
+                    }
                 ),
                 candidates_set.end()
             );
@@ -1724,7 +1756,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const auto cache_it = cache.node_index.find(prev_node);
             const auto embed_it = node_id_to_idx.find(prev_node);
             if (cache_it != cache.node_index.end() && embed_it != node_id_to_idx.end()) {
-                const bool resource_ok = residual_ok(prev_node, vnf);
+                const bool resource_ok =
+                    residual_ok(prev_node, vnf) &&
+                    exclusive_node_set.find(prev_node) == exclusive_node_set.end() &&
+                    (!independent_nf || deployed_node_set.find(prev_node) == deployed_node_set.end());
                 const bool already_present = std::find(candidate_node_ids.begin(), candidate_node_ids.end(), prev_node) != candidate_node_ids.end();
                 if (resource_ok && !already_present) {
                     candidate_node_ids.push_back(prev_node);
@@ -2127,6 +2162,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         candidate.per_vnf.push_back(pv);
         candidate.deployed_nodes.push_back(selected_node);
         deployed_node_set.insert(selected_node);
+        if (independent_nf) {
+            exclusive_node_set.insert(selected_node);
+        }
         reserve_residual(selected_node, vnf);
         if (bound_group.has_value() && *bound_group < binding_anchor_node.size() &&
             binding_anchor_node[*bound_group].empty()) {
@@ -2431,11 +2469,6 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     const double rel_score = final_rel_target > 0.0
         ? std::min(1.0, accumulated_reliability / final_rel_target)
         : 1.0;
-    const double dispersion_score = request.vnfs.empty()
-        ? 1.0
-        : std::min(1.0, static_cast<double>(candidate.deployed_nodes.size()) /
-                          static_cast<double>(request.vnfs.size()));
-
     double resource_score = 0.0;
     if (!candidate.deployed_nodes.empty()) {
         for (const auto& node_id : candidate.deployed_nodes) {
@@ -2456,27 +2489,23 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         request.score_weights.latency >= 0.0 &&
         request.score_weights.resource >= 0.0 &&
         request.score_weights.reliability >= 0.0 &&
-        request.score_weights.bandwidth >= 0.0 &&
-        request.score_weights.dispersion >= 0.0;
+        request.score_weights.bandwidth >= 0.0;
 
     if (custom_weights) {
         const double sum_w =
             request.score_weights.latency +
             request.score_weights.resource +
             request.score_weights.reliability +
-            request.score_weights.bandwidth +
-            request.score_weights.dispersion;
+            request.score_weights.bandwidth;
         const double norm = sum_w > 1e-9 ? sum_w : 1.0;
         const double w_lat = request.score_weights.latency / norm;
         const double w_res = request.score_weights.resource / norm;
         const double w_rel = request.score_weights.reliability / norm;
         const double w_bw = request.score_weights.bandwidth / norm;
-        const double w_disp = request.score_weights.dispersion / norm;
         candidate.score = w_lat * latency_score +
                           w_res * resource_score +
                           w_rel * rel_score +
-                          w_bw * bw_score +
-                          w_disp * dispersion_score;
+                          w_bw * bw_score;
     } else if (request.optimize == "resource") {
         candidate.score = 0.4 * resource_score + 0.25 * rel_score + 0.2 * latency_score + 0.15 * bw_score;
     } else if (request.optimize == "balanced") {

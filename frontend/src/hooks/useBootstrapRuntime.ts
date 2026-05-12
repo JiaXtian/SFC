@@ -41,7 +41,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_breakdown?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_breakdown?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_breakdown?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_breakdown?.dispersion ?? 0, 0),
         }
       : undefined,
     score_weights: raw?.score_weights && typeof raw.score_weights === 'object'
@@ -50,7 +49,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_weights?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_weights?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_weights?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_weights?.dispersion ?? 0, 0),
         }
       : undefined,
     score_constraints: raw?.score_constraints && typeof raw.score_constraints === 'object'

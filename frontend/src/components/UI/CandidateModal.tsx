@@ -132,22 +132,20 @@ export default function CandidateModal() {
     if (scoringConfig?.scoreWeights) return normalizeWeights(scoringConfig.scoreWeights)
 
     if (scoringConfig?.optimize === 'resource') {
-      return { latency: 0.2, resource: 0.4, reliability: 0.25, bandwidth: 0.15, dispersion: 0 }
+      return { latency: 0.2, resource: 0.4, reliability: 0.25, bandwidth: 0.15 }
     }
     if (scoringConfig?.optimize === 'balanced') {
-      return { latency: 0.25, resource: 0.25, reliability: 0.25, bandwidth: 0.25, dispersion: 0 }
+      return { latency: 0.25, resource: 0.25, reliability: 0.25, bandwidth: 0.25 }
     }
-    return { latency: 0.45, resource: 0.1, reliability: 0.25, bandwidth: 0.2, dispersion: 0 }
+    return { latency: 0.45, resource: 0.1, reliability: 0.25, bandwidth: 0.2 }
   }, [scoringConfig])
 
   const scoreBreakdown = useMemo(() => {
-    const vnfCount = scoringConfig?.vnfCount || cand.per_core_nf?.length || cand.per_vnf?.length || 1
     return computeScoreBreakdown({
       totalLatencyMs: Number(cand.total_latency_ms ?? 0),
       bottleneckBandwidthGbps: Number(cand.bottleneck_bandwidth_gbps ?? 0),
       estimatedReliability: Number(cand.estimated_reliability ?? 0),
       deployedNodeIds: cand.deployed_nodes ?? [],
-      vnfCount,
       constraints,
       weights: activeWeights,
       satellites,
@@ -214,6 +212,12 @@ export default function CandidateModal() {
         custom_nf_bindings: Array.isArray((requestPayload as any)?.custom_nf_bindings)
           ? (requestPayload as any).custom_nf_bindings
           : [],
+        independent_core_nfs: Array.isArray((requestPayload as any)?.independent_core_nfs)
+          ? (requestPayload as any).independent_core_nfs
+          : [],
+        custom_nf_independent: Array.isArray((requestPayload as any)?.custom_nf_independent)
+          ? (requestPayload as any).custom_nf_independent
+          : [],
         sfc_name: coreLabel,
         inference_latency_ms: Number(inferenceTime ?? 0),
         score_breakdown: {
@@ -221,14 +225,12 @@ export default function CandidateModal() {
           resource: scoreBreakdown.resourceScore,
           reliability: scoreBreakdown.reliabilityScore,
           bandwidth: scoreBreakdown.bandwidthScore,
-          dispersion: scoreBreakdown.dispersionScore,
         },
         score_weights: {
           latency: activeWeights.latency,
           resource: activeWeights.resource,
           reliability: activeWeights.reliability,
           bandwidth: activeWeights.bandwidth,
-          dispersion: activeWeights.dispersion,
         },
         score_constraints: constraints,
         strategy_mode: 'single_request',
@@ -330,14 +332,12 @@ export default function CandidateModal() {
           resource: scoreBreakdown.resourceScore,
           reliability: scoreBreakdown.reliabilityScore,
           bandwidth: scoreBreakdown.bandwidthScore,
-          dispersion: scoreBreakdown.dispersionScore,
         },
         score_weights: {
           latency: activeWeights.latency,
           resource: activeWeights.resource,
           reliability: activeWeights.reliability,
           bandwidth: activeWeights.bandwidth,
-          dispersion: activeWeights.dispersion,
         },
         score_constraints: constraints,
         deployed_nodes: cand.deployed_nodes ?? [],
@@ -493,10 +493,10 @@ export default function CandidateModal() {
                   <div>约束基准: 注册≤{constraints.registration_latency_ms ?? '-'}ms, PDU≤{constraints.pdu_session_latency_ms ?? '-'}ms, 带宽≥{constraints.min_bandwidth_gbps}Gbps, 可靠性≥{constraints.min_reliability.toFixed(3)}</div>
                   <div>
                     权重: latency {activeWeights.latency.toFixed(2)} / resource {activeWeights.resource.toFixed(2)} / reliability {activeWeights.reliability.toFixed(2)} /
-                    bandwidth {activeWeights.bandwidth.toFixed(2)} / dispersion {activeWeights.dispersion.toFixed(2)}
+                    bandwidth {activeWeights.bandwidth.toFixed(2)}
                   </div>
                   <div className="pt-1 text-slate-400">
-                    总分 = w_lat*时延得分 + w_res*资源得分 + w_rel*可靠性得分 + w_bw*带宽得分 + w_disp*分散度得分
+                    总分 = w_lat*时延得分 + w_res*资源得分 + w_rel*可靠性得分 + w_bw*带宽得分
                   </div>
                   <div className="text-slate-500">
                     时延/带宽/可靠性采用连续曲线评分，用于区分不同核心网候选策略质量。
@@ -511,7 +511,6 @@ export default function CandidateModal() {
                 { label: '资源得分', value: scoreBreakdown.resourceScore, color: '#34d399', detail: `基于部署节点剩余 CPU/MEM/DISK 均值` },
                 { label: '可靠性得分', value: scoreBreakdown.reliabilityScore, color: '#a78bfa', detail: `r=${((Number(cand.estimated_reliability ?? 0)) / Math.max(1e-9, constraints.min_reliability)).toFixed(3)}（低于阈值立方惩罚）` },
                 { label: '带宽得分', value: scoreBreakdown.bandwidthScore, color: '#fbbf24', detail: `r=${((Number(cand.bottleneck_bandwidth_gbps ?? 0)) / Math.max(1e-9, constraints.min_bandwidth_gbps)).toFixed(3)}（按连续增益/惩罚曲线）` },
-                { label: '分散度得分', value: scoreBreakdown.dispersionScore, color: '#fb7185', detail: `${cand.deployed_nodes?.length ?? 0} 节点 / ${scoringConfig?.vnfCount || cand.per_core_nf?.length || cand.per_vnf?.length || 1} 核心网网元` },
               ].map(s => (
                 <div key={s.label}>
                   <div className="flex justify-between text-[11px] mb-1">

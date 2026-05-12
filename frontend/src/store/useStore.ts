@@ -56,14 +56,12 @@ export interface Deployment {
     resource: number
     reliability: number
     bandwidth: number
-    dispersion: number
   }
   score_weights?: {
     latency: number
     resource: number
     reliability: number
     bandwidth: number
-    dispersion: number
   }
   score_constraints?: {
     max_latency_ms: number
@@ -136,9 +134,7 @@ export interface CandidateResult {
       resource: number
       reliability: number
       bandwidth: number
-      dispersion: number
     } | null
-    vnfCount: number
   }
   requestPayload?: any
   sessionConfig?: {

@@ -69,6 +69,7 @@ interface VNFConfig {
   bw_in: number
   bw_out: number
   disk?: number
+  independent?: boolean
 }
 
 const sfcTemplates = [
@@ -92,6 +93,7 @@ const normalizeNfType = (v: string) => String(v || '').trim().toLowerCase().repl
 const makeNfConfig = (type: VNFTemplateName, idx: number): VNFConfig => ({
   type,
   name: `${String(type).toUpperCase()}-${idx + 1}`,
+  independent: false,
   ...vnfTemplates[type],
 })
 
@@ -279,6 +281,11 @@ export default function SFCForm() {
     }
     if (mode === 'custom') {
       if (isAdmin && bindingGroups.length > 0) {
+        const independentMembers = new Set(
+          customSFC.vnfs
+            .map((vnf, idx) => (vnf.independent ? idx : -1))
+            .filter(idx => idx >= 0)
+        )
         const usedMembers = new Set<number>()
         for (const group of bindingGroups) {
           const uniqueMembers = Array.from(new Set(group.members))
@@ -287,6 +294,11 @@ export default function SFCForm() {
             return
           }
           for (const m of uniqueMembers) {
+            if (independentMembers.has(m)) {
+              const nfName = customSFC.vnfs[m]?.name || `#${m + 1}`
+              openSystemPopup('部署约束冲突', `网元 ${nfName} 已设置为独立部署，不能同时加入同星绑定组。`, 'warning')
+              return
+            }
             if (usedMembers.has(m)) {
               const nfName = customSFC.vnfs[m]?.name || `#${m + 1}`
               openSystemPopup('绑定组配置错误', `网元 ${nfName} 同时出现在多个绑定组，请只保留在一个组内。`, 'warning')
@@ -324,6 +336,13 @@ export default function SFCForm() {
               )
               .filter(group => group.length >= 2)
           : []
+      const independentNfPayload =
+        mode === 'custom'
+          ? fullCoreVnfs
+              .filter(v => !!v.independent)
+              .map(v => normalizeNfType(v.type || v.name || ''))
+              .filter(Boolean)
+          : []
       const coreNfs = fullCoreVnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
@@ -338,6 +357,7 @@ export default function SFCForm() {
           bw_in: v.bw_in,
           bw_out: v.bw_out,
           disk: Number.isFinite(v.disk) ? v.disk : v.mem * 2.0,
+          independent: !!v.independent,
         }
       })
       const payload = {
@@ -356,6 +376,8 @@ export default function SFCForm() {
         max_planning_attempts: sessionRealtimeConfig.max_planning_attempts,
         planning_time_budget_ms: sessionRealtimeConfig.planning_time_budget_ms,
         custom_nf_bindings: customBindingPayload,
+        independent_core_nfs: independentNfPayload,
+        custom_nf_independent: independentNfPayload,
         ...(enableCustomWeights
           ? {
               score_weights: {
@@ -376,13 +398,12 @@ export default function SFCForm() {
               resource: scoreWeights.resource,
               reliability: scoreWeights.reliability,
               bandwidth: scoreWeights.bandwidth,
-              dispersion: 0,
             }
           : optimizeMode === 'resource'
-            ? { latency: 0.2, resource: 0.4, reliability: 0.25, bandwidth: 0.15, dispersion: 0 }
+            ? { latency: 0.2, resource: 0.4, reliability: 0.25, bandwidth: 0.15 }
             : optimizeMode === 'balanced'
-              ? { latency: 0.25, resource: 0.25, reliability: 0.25, bandwidth: 0.25, dispersion: 0 }
-              : { latency: 0.45, resource: 0.1, reliability: 0.25, bandwidth: 0.2, dispersion: 0 }
+              ? { latency: 0.25, resource: 0.25, reliability: 0.25, bandwidth: 0.25 }
+              : { latency: 0.45, resource: 0.1, reliability: 0.25, bandwidth: 0.2 }
       )
       const scoredCandidates = [...(result.candidates || [])].map((c: any) => {
         const breakdown = computeScoreBreakdown({
@@ -390,7 +411,6 @@ export default function SFCForm() {
           bottleneckBandwidthGbps: Number(c.bottleneck_bandwidth_gbps ?? 0),
           estimatedReliability: Number(c.estimated_reliability ?? 0),
           deployedNodeIds: c.deployed_nodes ?? [],
-          vnfCount: payload.core_nfs.length,
           constraints: sfc.constraints,
           weights: activeWeights,
           satellites,
@@ -457,10 +477,8 @@ export default function SFCForm() {
                 resource: scoreWeights.resource,
                 reliability: scoreWeights.reliability,
                 bandwidth: scoreWeights.bandwidth,
-                dispersion: 0,
-              }
+            }
             : null,
-          vnfCount: payload.core_nfs.length,
         },
         requestPayload: payload,
         sessionConfig: {
@@ -705,6 +723,16 @@ export default function SFCForm() {
                       style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
                     />
                   </div>
+
+                  <label className="mb-2 flex items-center justify-between gap-2 rounded px-2 py-1.5 text-[10px] cursor-pointer" style={{ background: 'rgba(8,17,31,0.68)', border: '1px solid rgba(98,128,152,0.18)' }}>
+                    <span className="text-slate-300">独立部署，占用专属卫星</span>
+                    <input
+                      type="checkbox"
+                      checked={!!vnf.independent}
+                      onChange={e => updateVNFField(i, 'independent', e.target.checked)}
+                      className="accent-cyan-400"
+                    />
+                  </label>
 
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
                     {[

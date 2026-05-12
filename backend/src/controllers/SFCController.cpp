@@ -304,6 +304,24 @@ static std::vector<std::vector<std::string>> parse_custom_nf_bindings(const Json
     return groups;
 }
 
+static std::vector<std::string> parse_nf_token_list(const Json::Value& arr_json) {
+    std::vector<std::string> out;
+    if (!arr_json.isArray()) return out;
+    std::unordered_set<std::string> seen;
+    for (const auto& item : arr_json) {
+        std::string token;
+        if (item.isString()) {
+            token = normalize_nf_type(item.asString());
+        } else if (item.isObject()) {
+            token = normalize_nf_type(
+                item.get("core_nf_type", item.get("nf_type", item.get("core_nf", item.get("name", "")))).asString()
+            );
+        }
+        if (!token.empty() && seen.insert(token).second) out.push_back(token);
+    }
+    return out;
+}
+
 static std::optional<size_t> resolve_binding_member_index(
     const std::string& token,
     const std::unordered_map<std::string, size_t>& index_by_name,
@@ -324,6 +342,44 @@ static std::optional<size_t> resolve_binding_member_index(
     }
     if (err) *err = "unknown_nf_in_binding:" + token;
     return std::nullopt;
+}
+
+static bool validate_independent_nf_constraints(
+    const DeploymentCandidate& candidate,
+    const std::vector<std::string>& independent_tokens,
+    std::string* err
+) {
+    if (independent_tokens.empty()) return true;
+    std::unordered_set<std::string> independent_set;
+    for (const auto& token : independent_tokens) {
+        const std::string norm = normalize_nf_type(token);
+        if (!norm.empty()) independent_set.insert(norm);
+    }
+    if (independent_set.empty()) return true;
+
+    std::unordered_map<std::string, int> node_counts;
+    for (const auto& pv : candidate.per_vnf) {
+        if (!pv.node.empty()) node_counts[pv.node] += 1;
+    }
+    for (const auto& pv : candidate.per_vnf) {
+        const std::string core_nf = normalize_nf_type(pv.core_nf.empty() ? pv.vnf : pv.core_nf);
+        const std::string vnf = normalize_nf_type(pv.vnf);
+        const std::string nf_type = normalize_nf_type(pv.nf_type.empty() ? core_nf : pv.nf_type);
+        const bool isolated =
+            independent_set.find(core_nf) != independent_set.end() ||
+            independent_set.find(vnf) != independent_set.end() ||
+            independent_set.find(nf_type) != independent_set.end();
+        if (!isolated) continue;
+        if (pv.node.empty()) {
+            if (err) *err = "independent_nf_node_empty:" + core_nf;
+            return false;
+        }
+        if (node_counts[pv.node] > 1) {
+            if (err) *err = "independent_nf_node_shared:" + core_nf + "@" + pv.node;
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool apply_custom_nf_bindings(
@@ -854,9 +910,9 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
         request.score_weights.resource = sw.get("resource", -1.0).asDouble();
         request.score_weights.reliability = sw.get("reliability", -1.0).asDouble();
         request.score_weights.bandwidth = sw.get("bandwidth", -1.0).asDouble();
-        request.score_weights.dispersion = sw.get("dispersion", 0.0).asDouble();
     }
     request.custom_nf_bindings = parse_custom_nf_bindings(json.get("custom_nf_bindings", Json::arrayValue));
+    request.independent_core_nfs = parse_nf_token_list(json.get("independent_core_nfs", json.get("custom_nf_independent", Json::arrayValue)));
     
     if (json.isMember("constraints")) {
         const auto& constraints = json["constraints"];
@@ -1322,6 +1378,7 @@ void SFCController::deploy(
         }
 
         const auto custom_bindings = parse_custom_nf_bindings((*json).get("custom_nf_bindings", Json::arrayValue));
+        const auto independent_nfs = parse_nf_token_list((*json).get("independent_core_nfs", (*json).get("custom_nf_independent", Json::arrayValue)));
         if (!custom_bindings.empty()) {
             std::string binding_err;
             if (!apply_custom_nf_bindings(&candidate, custom_bindings, &binding_err)) {
@@ -1329,6 +1386,19 @@ void SFCController::deploy(
                 error["code"] = 400;
                 error["message"] = "Invalid custom_nf_bindings";
                 error["details"] = binding_err;
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+        }
+        if (!independent_nfs.empty()) {
+            std::string independent_err;
+            if (!validate_independent_nf_constraints(candidate, independent_nfs, &independent_err)) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "Invalid independent_core_nfs";
+                error["details"] = independent_err;
                 auto resp = HttpResponse::newHttpJsonResponse(error);
                 resp->setStatusCode(k400BadRequest);
                 callback(resp);
@@ -1485,6 +1555,11 @@ void SFCController::deploy(
             }
             dep_json["custom_nf_bindings"] = std::move(groups_json);
         }
+        if (!independent_nfs.empty()) {
+            nlohmann::json independent_json = nlohmann::json::array();
+            for (const auto& token : independent_nfs) independent_json.push_back(token);
+            dep_json["independent_core_nfs"] = std::move(independent_json);
+        }
 
         nlohmann::json links_json = nlohmann::json::array();
         for (const auto& ld : candidate.link_details) {
@@ -1558,6 +1633,7 @@ void SFCController::deploy(
             runtime_request.priority = "medium";
             runtime_request.optimize = "latency";
             runtime_request.vnfs = vnfs;
+            runtime_request.independent_core_nfs = independent_nfs;
             runtime_request.topk = 1;
             runtime_request.realtime_mode = true;
             runtime_request.max_planning_attempts = 20;

@@ -958,12 +958,12 @@ std::optional<DeploymentCandidate> DynamicInferenceService::try_partial_node_red
 
 std::string DynamicInferenceService::infer_required_recompute_trigger(
     const SessionState& session,
-    const TopologySnapshot&,
+    const TopologySnapshot& snapshot,
     const std::unordered_set<std::string>& down_nodes,
     const std::unordered_map<std::string, std::vector<std::string>>& adjacency,
     std::string* disconnected_from,
     std::string* disconnected_to
-) const {
+) {
     if (session.has_last_candidate) {
         for (const auto& node : session.last_candidate.deployed_nodes) {
             if (!node.empty() && down_nodes.find(node) != down_nodes.end()) {
@@ -997,6 +997,26 @@ std::string DynamicInferenceService::infer_required_recompute_trigger(
                 if (disconnected_from) *disconnected_from = src_it->second;
                 if (disconnected_to) *disconnected_to = dst_it->second;
                 return "anchor_path_disconnected";
+            }
+        }
+        Topology topology = snapshot.topology;
+        if (topology.nodes.empty()) topology = res_mgr_->export_current_topology();
+        if (topology.nodes.empty()) topology = topo_mgr_->get_current_topology();
+        if (!topology.nodes.empty()) {
+            topology = build_planning_topology_for_session(session, topology, down_nodes);
+            DeploymentCandidate current = session.last_candidate;
+            std::string sla_reason;
+            const bool current_ok = rebuild_candidate_paths_and_sla(&current, session.request, topology, &sla_reason);
+            if (!current_ok) {
+                const bool latency_violation =
+                    current.total_latency_ms > session.request.constraints.max_latency_ms ||
+                    current.registration_latency_ms > session.request.constraints.registration_latency_ms ||
+                    current.pdu_session_latency_ms > session.request.constraints.pdu_session_latency_ms;
+                if (latency_violation) {
+                    if (disconnected_from) *disconnected_from = "sla";
+                    if (disconnected_to) *disconnected_to = "latency";
+                    return "sla_latency_violation";
+                }
             }
         }
         return "";
@@ -1112,6 +1132,8 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     std::string partial_detail = "";
     if (trigger == "anchor_path_disconnected") {
         recovery_strategy = "local_reroute";
+    } else if (trigger == "sla_latency_violation") {
+        recovery_strategy = "full_redeploy_sla_latency_violation";
     }
     nlohmann::json decision_process;
     const auto t0 = std::chrono::high_resolution_clock::now();
@@ -1177,6 +1199,18 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                 decision_process["status"] = "failed";
             }
         }
+    } else if (trigger == "sla_latency_violation") {
+        decision_process = {
+            {"algorithm", "model_full_redeploy"},
+            {"status", "running"},
+            {"detail", "dynamic_latency_sla_violation"}
+        };
+        candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
+        if (!decision_process.is_object()) decision_process = nlohmann::json::object();
+        decision_process["recovery_algorithm"] = "model_full_redeploy";
+        decision_process["recovery_reason"] = "dynamic_latency_sla_violation";
+        decision_process["detail"] = "registration_or_pdu_latency_exceeded_during_dynamic_run";
+        if (candidates.empty()) decision_process["status"] = "failed";
     } else {
         candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
     }
