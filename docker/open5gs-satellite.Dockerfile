@@ -1,9 +1,9 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG UBUNTU_MIRROR=http://ports.ubuntu.com/ubuntu-ports
+ARG UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu
 ARG OPEN5GS_REPO=https://github.com/open5gs/open5gs.git
-ARG OPEN5GS_REF=main
+ARG OPEN5GS_REF=v2.7.7
 
 RUN set -eux; \
     cat > /etc/apt/sources.list <<EOF

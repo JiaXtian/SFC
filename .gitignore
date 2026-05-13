@@ -4,6 +4,8 @@ Thumbs.db
 .vscode/
 .idea/
 .run/
+.deps/
+.env.kylin
 data/
 docs/
 
@@ -27,6 +29,7 @@ ENV/
 # Node / frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+frontend/dist-control/
 
 # CMake / C++ build artifacts
 build/
