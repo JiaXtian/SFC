@@ -133,7 +133,6 @@ export function useAutoDynamics() {
   const resourceSyncRunningRef = useRef(false)
   const clockEpochMsRef = useRef<number>(Date.now())
   const inactiveSinceRef = useRef<number | null>(null)
-  const resumeJumpSecRef = useRef(0)
 
   useEffect(() => {
     const syncResources = async () => {
@@ -248,10 +247,14 @@ export function useAutoDynamics() {
         return
       }
       if (inactiveSinceRef.current != null) {
-        resumeJumpSecRef.current = Math.max(0, (ts - inactiveSinceRef.current) / 1000)
+        // The main earth view is paused while hidden or while the monitor page is active.
+        // On resume, continue from the current visual state instead of replaying the
+        // accumulated wall-clock gap; otherwise large constellations rebuild thousands
+        // of node/link transforms in a single burst.
         inactiveSinceRef.current = null
         lastTsRef.current = ts
-        posAccRef.current = Number.POSITIVE_INFINITY
+        posAccRef.current = 0
+        resAccRef.current = 0
       }
       const dtReal = Math.max(0, (ts - lastTsRef.current) / 1000)
       lastTsRef.current = ts
@@ -263,7 +266,7 @@ export function useAutoDynamics() {
       if (ad.enabled && ad.playing && s.satellites.length > 0) {
         const satCount = s.satellites.length
         const configuredHz = clamp(0.5, 5, Number(ad.position_update_hz ?? 4))
-        const maxHzByScale = satCount >= 8000 ? 3 : 5
+        const maxHzByScale = satCount >= 5000 ? 1.2 : (satCount >= 3000 ? 1.6 : (satCount >= 1200 ? 2.4 : 5))
         const posInterval = 1 / Math.min(configuredHz, maxHzByScale)
         posAccRef.current += dtReal
         resAccRef.current += dtReal
@@ -271,12 +274,8 @@ export function useAutoDynamics() {
         if (posAccRef.current >= posInterval) {
           // Avoid large visual jumps when main thread is briefly blocked by network/state updates.
           const stepRealCap = satCount >= 5000 ? 0.28 : (satCount >= 3000 ? 0.24 : 0.18)
-          const resumeJump = resumeJumpSecRef.current
-          resumeJumpSecRef.current = 0
-          const stepReal = resumeJump > 0
-            ? Math.min(resumeJump, 3600)
-            : Math.min(posAccRef.current, stepRealCap)
-          posAccRef.current = resumeJump > 0 ? 0 : Math.max(0, posAccRef.current - stepReal)
+          const stepReal = Math.min(posAccRef.current, stepRealCap)
+          posAccRef.current = Math.max(0, posAccRef.current - stepReal)
           const elapsedSec = ad.elapsed_sec + stepReal * Math.max(0.1, ad.time_scale)
 
           if (ad.elapsed_sec === 0) {
@@ -432,9 +431,7 @@ export function useAutoDynamics() {
             autoDynamics: {
               ...prev.autoDynamics,
               elapsed_sec: elapsedSec,
-              snap_visual_token: resumeJump > 0
-                ? Number(prev.autoDynamics.snap_visual_token ?? 0) + 1
-                : prev.autoDynamics.snap_visual_token,
+              snap_visual_token: prev.autoDynamics.snap_visual_token,
             },
           }))
         }

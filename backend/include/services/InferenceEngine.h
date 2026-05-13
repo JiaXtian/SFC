@@ -31,8 +31,8 @@ struct CandidateSearchTuning {
 
     double offline_default_time_budget_ms = 5200.0;
     double offline_min_time_budget_ms = 2200.0;
-    double realtime_default_time_budget_ms = 850.0;
-    double realtime_min_time_budget_ms = 380.0;
+    double realtime_default_time_budget_ms = 450.0;
+    double realtime_min_time_budget_ms = 100.0;
 
     double relax_disable_min_reliability = 0.55;
     double relax_min_reliability_floor = 0.45;

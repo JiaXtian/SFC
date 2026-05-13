@@ -82,6 +82,16 @@ export default function Satellites() {
     return { targetPositions, colours }
   }, [satellites, selectedSatellite, vnfHighlightSet])
 
+  const colourSignature = useMemo(() => {
+    const highlighted = Array.from(vnfHighlightSet).sort().join(',')
+    const faults = satellites
+      .filter((sat: any) => isNodeFault(sat))
+      .map((sat: any) => String(sat.id))
+      .sort()
+      .join(',')
+    return `${selectedSatellite?.id ?? ''}|${highlighted}|${faults}`
+  }, [satellites, selectedSatellite?.id, vnfHighlightSet])
+
   const sphereDetail = useMemo(() => {
     if (satellites.length >= 5000) return { r: 0.055, seg: 6 }
     if (satellites.length >= 3000) return { r: 0.06, seg: 8 }
@@ -92,18 +102,38 @@ export default function Satellites() {
     const current = currentPosMapRef.current
     const target = targetPosMapRef.current
     const liveIds = new Set<string>()
+    let positionChanged = target.size !== satellites.length
     satellites.forEach((sat, idx) => {
       liveIds.add(sat.id)
       const t = targetPositions[idx] ?? satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z)
+      const prevTarget = target.get(sat.id)
+      if (!prevTarget || prevTarget.distanceToSquared(t) > 1e-12) {
+        positionChanged = true
+      }
       target.set(sat.id, t.clone())
       if (!current.has(sat.id)) {
         current.set(sat.id, t.clone())
+        positionChanged = true
       }
     })
-    Array.from(current.keys()).forEach((id) => { if (!liveIds.has(id)) current.delete(id) })
-    Array.from(target.keys()).forEach((id) => { if (!liveIds.has(id)) target.delete(id) })
-    meshDirtyRef.current = true
+    Array.from(current.keys()).forEach((id) => {
+      if (!liveIds.has(id)) {
+        current.delete(id)
+        positionChanged = true
+      }
+    })
+    Array.from(target.keys()).forEach((id) => {
+      if (!liveIds.has(id)) {
+        target.delete(id)
+        positionChanged = true
+      }
+    })
+    if (positionChanged) meshDirtyRef.current = true
   }, [satellites, targetPositions])
+
+  useEffect(() => {
+    meshDirtyRef.current = true
+  }, [colourSignature])
 
   useEffect(() => {
     if (lastSnapTokenRef.current === snapVisualToken) return
@@ -125,7 +155,8 @@ export default function Satellites() {
   useFrame((_, delta) => {
     const mesh = instanceRef.current
     if (!mesh || satellites.length === 0 || !meshDirtyRef.current) return
-    const lerpAlpha = delta > 0.45 ? 1 : Math.min(1, Math.max(0.14, delta * 5.5))
+    const safeDelta = Math.min(Math.max(0, delta), satellites.length >= 3000 ? 0.04 : 0.06)
+    const lerpAlpha = Math.min(1, Math.max(satellites.length >= 3000 ? 0.08 : 0.12, safeDelta * 4.5))
     let keepAnimating = false
     const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {

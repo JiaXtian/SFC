@@ -48,10 +48,10 @@ def _distribute_counts(total_count, scales, weights_text):
 
 def augment_training_data(
     train_topologies=8,
-    train_groups_per_topology=3,
-    train_requests_per_group=80,
+    train_groups_per_topology=2,
+    train_requests_per_group=64,
     val_topologies=4,
-    val_requests_per_topology=80,
+    val_requests_per_topology=48,
     train_scales="300,800,2500,5000,6000",
     scale_distribution="2,2,2,1,1",
 ):
@@ -142,10 +142,10 @@ def augment_training_data(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_topologies", type=int, default=8)
-    parser.add_argument("--train_groups_per_topology", type=int, default=3)
-    parser.add_argument("--train_requests_per_group", type=int, default=80)
+    parser.add_argument("--train_groups_per_topology", type=int, default=2)
+    parser.add_argument("--train_requests_per_group", type=int, default=64)
     parser.add_argument("--val_topologies", type=int, default=4)
-    parser.add_argument("--val_requests_per_topology", type=int, default=80)
+    parser.add_argument("--val_requests_per_topology", type=int, default=48)
     parser.add_argument("--train_scales", type=str, default="300,800,2500,5000,6000")
     parser.add_argument("--scale_distribution", type=str, default="2,2,2,1,1")
     args = parser.parse_args()

@@ -139,6 +139,8 @@ export interface CandidateResult {
   requestPayload?: any
   sessionConfig?: {
     auto_redeploy: boolean
+    realtime_mode?: boolean
+    inference_profile?: 'fast' | 'balanced' | 'quality' | string
     max_planning_attempts: number
     planning_time_budget_ms: number
   }

@@ -269,9 +269,16 @@ export default function CandidateModal() {
           request_id: requestId,
           core_network_id: coreNetworkId,
           core_network_label: coreLabel,
-          realtime_mode: true,
-          max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 20),
+          realtime_mode: Boolean(sessionConfig?.realtime_mode ?? true),
+          inference_profile: String(sessionConfig?.inference_profile ?? 'fast'),
+          max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 1),
           planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
+          inference: {
+            profile: String(sessionConfig?.inference_profile ?? 'fast'),
+            realtime_mode: Boolean(sessionConfig?.realtime_mode ?? true),
+            max_planning_attempts: Number(sessionConfig?.max_planning_attempts ?? 1),
+            planning_time_budget_ms: Number(sessionConfig?.planning_time_budget_ms ?? 450),
+          },
           initial_candidate: cand,
         }
         if (!(sessionReq as any).vnfs && Array.isArray((sessionReq as any).core_nfs)) {

@@ -33,9 +33,9 @@ class SFCTrainer:
         history_window=0,
         backend_align_context=True,
         max_probe_candidates=5,
-        max_decision_ms=420.0,
-        teacher_probe_candidates=32,
-        teacher_rescue_candidates=48,
+        max_decision_ms=260.0,
+        teacher_probe_candidates=12,
+        teacher_rescue_candidates=20,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -604,25 +604,12 @@ class SFCTrainer:
             }
 
             if update_model and not done and next_state is not None and next_state.get("core_nf") is not None:
-                traj["next_node_embeddings"] = node_embeddings.detach()
+                # The current agent uses Monte-Carlo returns and detaches the
+                # next-state branch, so re-running expensive pruning for
+                # next_candidate_indices does not affect gradients.  Avoiding
+                # that second prune saves a large amount of shortest-path work.
                 traj["next_vnf_features"] = self._build_vnf_features(next_state["core_nf"]).to(self.device)
                 traj["next_context_features"] = self._build_context_features(next_state).to(self.device)
-                next_candidates = heuristic_pruner.prune(
-                    env.topology,
-                    next_state["core_nf"],
-                    deployed_by_type=next_state.get("deployed_by_type", {}),
-                    dependencies=next_state.get("dependencies", []),
-                    remaining_delay=float(next_state.get("remaining_delay", float("inf"))),
-                    current_nf_idx=int(next_state.get("current_nf_idx", 0)),
-                    total_core_nfs=int(next_state.get("total_core_nfs", 12)),
-                    accumulated_delay=float(next_state.get("accumulated_dependency_delay", 0.0)),
-                    reliability_requirement=float(next_state.get("reliability_requirement", 0.0)),
-                    accumulated_hops=int(next_state.get("accumulated_hops", 0)),
-                    max_dependency_hops=int(next_state.get("max_dependency_hops", 24)),
-                )
-                traj["next_candidate_indices"] = [
-                    node_index[c] for c in next_candidates if c in node_index
-                ]
 
             trajectories.append(traj)
 

@@ -643,6 +643,15 @@ struct TopologyIndexCache {
     std::unordered_map<std::string, SearchTree> constrained_tree_cache;
 };
 
+TopologyIndexCache& topology_cache_storage() {
+    static thread_local TopologyIndexCache cache;
+    return cache;
+}
+
+void invalidate_topology_cache() {
+    topology_cache_storage() = TopologyIndexCache{};
+}
+
 uint64_t hash_combine_u64(uint64_t h, uint64_t v) {
     return (h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2)));
 }
@@ -685,10 +694,17 @@ uint64_t topology_signature(const Topology& topology) {
 }
 
 TopologyIndexCache& get_topology_cache(const Topology& topology) {
-    static thread_local TopologyIndexCache cache;
+    auto& cache = topology_cache_storage();
 
     const void* nodes_ptr = topology.nodes.empty() ? nullptr : static_cast<const void*>(topology.nodes.data());
     const void* links_ptr = topology.links.empty() ? nullptr : static_cast<const void*>(topology.links.data());
+    if (cache.nodes_ptr == nodes_ptr &&
+        cache.links_ptr == links_ptr &&
+        cache.node_count == topology.nodes.size() &&
+        cache.link_count == topology.links.size() &&
+        cache.signature != 0) {
+        return cache;
+    }
     const uint64_t sig = topology_signature(topology);
 
     const bool rebuild =
@@ -1213,6 +1229,15 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     nlohmann::json* decision_trace
 ) {
     spdlog::info("Using GHA-DRL algorithm for SFC planning");
+    invalidate_topology_cache();
+    const auto search_start = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() -> double {
+        return static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - search_start
+            ).count()
+        ) / 1000.0;
+    };
     
     // 🔥 性能优化：检查拓扑是否为空
     if (topology.nodes.empty()) {
@@ -1232,21 +1257,11 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         };
     }
 
-    const auto [node_features, edge_index] = prepare_graph_inputs(topology);
-    const auto node_embeddings = run_gnn_encoder(node_features, edge_index, topology.nodes.size());
-    if (node_embeddings.empty()) {
-        spdlog::error("Failed to encode topology with GNN");
-        return {};
-    }
-
-    std::unordered_map<std::string, int64_t> node_id_to_idx;
-    node_id_to_idx.reserve(topology.nodes.size() * 2);
-    for (size_t i = 0; i < topology.nodes.size(); ++i) {
-        node_id_to_idx[topology.nodes[i].id] = static_cast<int64_t>(i);
-    }
-
     const bool realtime_mode = request.realtime_mode;
     const bool core_dependency_mode = !request.core_nf_dependencies.empty();
+    const std::string inference_profile = normalize_nf_type(request.inference_profile);
+    const bool quality_profile = inference_profile == "quality";
+    const bool balanced_profile = inference_profile == "balanced";
     const int req_topk = std::max(1, request.topk);
     const int min_return_topk_floor = realtime_mode
         ? candidate_tuning_.realtime_return_topk_floor
@@ -1290,7 +1305,10 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         hard_attempt_cap = min_attempt_floor;
     }
     if (core_dependency_mode) {
-        const int core_attempt_cap = realtime_mode ? 8 : 12;
+        const int core_attempt_cap =
+            quality_profile ? 12 :
+            balanced_profile ? 4 :
+            1;
         hard_attempt_cap = hard_attempt_cap > 0
             ? std::min(hard_attempt_cap, core_attempt_cap)
             : core_attempt_cap;
@@ -1308,21 +1326,43 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         planning_time_budget_ms = min_budget_floor;
     }
     if (core_dependency_mode) {
-        planning_time_budget_ms = planning_time_budget_ms > 0.0
-            ? std::min(planning_time_budget_ms, realtime_mode ? 320.0 : 430.0)
-            : (realtime_mode ? 320.0 : 430.0);
+        const double requested_budget = request.planning_time_budget_ms > 0.0 ? request.planning_time_budget_ms : 450.0;
+        const double profile_cap =
+            quality_profile ? 5000.0 :
+            balanced_profile ? 1500.0 :
+            450.0;
+        planning_time_budget_ms = std::min(requested_budget, profile_cap);
+        if (!quality_profile && !balanced_profile) {
+            planning_time_budget_ms = std::min(planning_time_budget_ms, 450.0);
+        }
+        planning_time_budget_ms = std::max(100.0, planning_time_budget_ms);
     }
-    const auto search_start = std::chrono::steady_clock::now();
-    auto elapsed_ms = [&]() -> double {
-        return static_cast<double>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - search_start
-            ).count()
-        ) / 1000.0;
-    };
     auto budget_exceeded = [&]() -> bool {
         return planning_time_budget_ms > 0.0 && elapsed_ms() >= planning_time_budget_ms;
     };
+    auto remaining_budget_ms = [&]() -> double {
+        if (planning_time_budget_ms <= 0.0) return 1e9;
+        return std::max(0.0, planning_time_budget_ms - elapsed_ms());
+    };
+
+    std::unordered_map<std::string, int64_t> node_id_to_idx;
+    node_id_to_idx.reserve(topology.nodes.size() * 2);
+    for (size_t i = 0; i < topology.nodes.size(); ++i) {
+        node_id_to_idx[topology.nodes[i].id] = static_cast<int64_t>(i);
+    }
+
+    std::vector<float> node_embeddings;
+    const auto [node_features, edge_index] = prepare_graph_inputs(topology);
+    if (budget_exceeded()) {
+        spdlog::warn(
+            "Inference budget exhausted during graph input preparation, continuing because model policy is mandatory"
+        );
+    }
+    node_embeddings = run_gnn_encoder(node_features, edge_index, topology.nodes.size());
+    if (node_embeddings.empty()) {
+        spdlog::error("Failed to encode topology with GNN");
+        return {};
+    }
 
     std::vector<DeploymentCandidate> feasible_candidates;
     feasible_candidates.reserve(std::max(1, target_feasible_count));
@@ -1350,6 +1390,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     for (size_t relax_idx = 0; relax_idx < relax_levels.size(); ++relax_idx) {
         const double relax_factor = relax_levels[relax_idx];
         SFCRequest planning_request = request;
+        planning_request.planning_time_budget_ms = std::max(80.0, remaining_budget_ms());
         planning_request.constraints.min_reliability = std::max(
             candidate_tuning_.relax_min_reliability_floor,
             std::min(request.constraints.min_reliability, request.constraints.min_reliability * relax_factor)
@@ -1382,7 +1423,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             level_attempts = std::min(level_attempts, remaining_attempts);
         }
         for (int k = 0; k < level_attempts; ++k) {
-            if (budget_exceeded()) {
+            if (budget_exceeded() && attempts_done > 0) {
                 stop_search = true;
                 break;
             }
@@ -1393,7 +1434,8 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             attempts_done += 1;
             const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
-            const bool disable_actor_policy = attempts_done > actor_attempt_cap;
+            const bool disable_actor_policy = false;
+            planning_request.planning_time_budget_ms = std::max(40.0, remaining_budget_ms());
             DeploymentCandidate candidate = generate_single_deployment(
                 planning_request,
                 topology,
@@ -1442,14 +1484,19 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         }
     }
 
-    if (!stop_search && static_cast<int>(feasible_candidates.size()) < target_feasible_count) {
+    if ((!stop_search || (core_dependency_mode && feasible_candidates.empty() && fallback_candidates.empty())) &&
+        static_cast<int>(feasible_candidates.size()) < target_feasible_count) {
+        const bool emergency_availability_rescue =
+            core_dependency_mode && feasible_candidates.empty() && fallback_candidates.empty();
         int extra_attempts = std::max(
             target_feasible_count * candidate_tuning_.extra_attempt_per_target,
             candidate_tuning_.extra_attempt_base
         );
         const int seed_base = static_cast<int>(relax_levels.size()) * 1000;
         if (hard_attempt_cap > 0) {
-            extra_attempts = std::min(extra_attempts, std::max(0, hard_attempt_cap - attempts_done));
+            extra_attempts = emergency_availability_rescue
+                ? std::max(1, std::min(extra_attempts, 1))
+                : std::min(extra_attempts, std::max(0, hard_attempt_cap - attempts_done));
         }
         spdlog::warn(
             "Feasible candidates still below target ({} < {}), running diversification fallback",
@@ -1457,14 +1504,16 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             target_feasible_count
         );
         for (int extra = 0; extra < extra_attempts; ++extra) {
-            if (budget_exceeded()) break;
-            if (hard_attempt_cap > 0 && attempts_done >= hard_attempt_cap) break;
+            if (budget_exceeded() && !emergency_availability_rescue) break;
+            if (hard_attempt_cap > 0 && attempts_done >= hard_attempt_cap && !emergency_availability_rescue) break;
             attempts_done += 1;
             const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
-            const bool disable_actor_policy = attempts_done > actor_attempt_cap;
+            const bool disable_actor_policy = false;
+            SFCRequest extra_request = request;
+            extra_request.planning_time_budget_ms = std::max(40.0, remaining_budget_ms());
             DeploymentCandidate candidate = generate_single_deployment(
-                request,
+                extra_request,
                 topology,
                 seed_base + extra,
                 node_embeddings,
@@ -1523,6 +1572,8 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         (*decision_trace)["planning_time_budget_ms"] = planning_time_budget_ms;
         (*decision_trace)["planning_elapsed_ms"] = elapsed_ms();
         (*decision_trace)["stopped_by_budget"] = budget_exceeded();
+        (*decision_trace)["inference_profile"] = inference_profile.empty() ? "fast" : inference_profile;
+        (*decision_trace)["model_policy_required"] = true;
         (*decision_trace)["candidate_tuning_config_path"] = candidate_tuning_config_path_;
         (*decision_trace)["effective_request_topk"] = req_topk;
         (*decision_trace)["effective_return_topk"] = effective_return_topk;
@@ -1562,6 +1613,23 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     nlohmann::json* candidate_trace,
     bool disable_actor_policy
 ) {
+    const auto deployment_start = std::chrono::steady_clock::now();
+    const double local_budget_ms = request.planning_time_budget_ms > 0.0
+        ? std::max(40.0, request.planning_time_budget_ms)
+        : (request.realtime_mode ? 450.0 : 5000.0);
+    auto deployment_elapsed_ms = [&]() -> double {
+        return static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - deployment_start
+            ).count()
+        ) / 1000.0;
+    };
+    auto deployment_budget_exceeded = [&]() -> bool {
+        return local_budget_ms > 0.0 && deployment_elapsed_ms() >= local_budget_ms;
+    };
+    const bool strict_latency_budget = request.realtime_mode || local_budget_ms <= 500.0;
+    const bool guarantee_core_candidate = !request.core_nf_dependencies.empty();
+
     DeploymentCandidate candidate;
     candidate.score = 0.9 - seed * 0.1;
     const bool trace_enabled = candidate_trace != nullptr;
@@ -1895,13 +1963,151 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         return plan;
     };
 
+    auto quick_rank_core_nodes = [&](const std::vector<std::string>& candidates, const VNF& vnf, int limit) {
+        std::vector<std::pair<std::string, double>> quick_rank;
+        quick_rank.reserve(candidates.size());
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+
+        struct QuickDependencyAnchor {
+            const std::vector<double>* distances = nullptr;
+            double latency_weight = 1.0;
+        };
+        std::vector<QuickDependencyAnchor> quick_anchors;
+        quick_anchors.reserve(request.core_nf_dependencies.size());
+        if (!request.core_nf_dependencies.empty()) {
+            std::unordered_set<size_t> seen_anchor_indices;
+            seen_anchor_indices.reserve(request.core_nf_dependencies.size() * 2);
+            for (const auto& dep : request.core_nf_dependencies) {
+                const std::string src_nf = normalize_nf_type(dep.source);
+                const std::string dst_nf = normalize_nf_type(dep.target);
+                std::string anchor_node;
+                if (src_nf == nf_type) {
+                    const auto anchor_it = deployed_nf_node_by_type.find(dst_nf);
+                    if (anchor_it == deployed_nf_node_by_type.end()) continue;
+                    anchor_node = anchor_it->second;
+                } else if (dst_nf == nf_type) {
+                    const auto anchor_it = deployed_nf_node_by_type.find(src_nf);
+                    if (anchor_it == deployed_nf_node_by_type.end()) continue;
+                    anchor_node = anchor_it->second;
+                } else {
+                    continue;
+                }
+                const auto anchor_idx_it = cache.node_index.find(anchor_node);
+                if (anchor_idx_it == cache.node_index.end()) continue;
+                const size_t anchor_idx = anchor_idx_it->second;
+                if (!seen_anchor_indices.insert(anchor_idx).second) continue;
+                quick_anchors.push_back({
+                    &get_shortest_distances_from(topology, anchor_idx),
+                    std::max(0.1, dep.latency_weight)
+                });
+            }
+        }
+
+        for (const auto& node_id : candidates) {
+            const auto it = cache.node_index.find(node_id);
+            if (it == cache.node_index.end() || !residual_ok(node_id, vnf)) continue;
+            const auto& node = topology.nodes[it->second];
+            const double cpu_total = std::max(1e-6, node.cpu_total);
+            const double mem_total = std::max(1e-6, node.mem_total);
+            const double disk_total = std::max(1e-6, node.disk_total);
+            const double cpu_util_after = clamp01(1.0 - (residual_cpu[node_id] - vnf.cpu) / cpu_total);
+            const double mem_util_after = clamp01(1.0 - (residual_mem[node_id] - vnf.mem) / mem_total);
+            const double disk_util_after = clamp01(1.0 - (residual_disk[node_id] - vnf.disk) / disk_total);
+            const double resource_peak = std::max({cpu_util_after, mem_util_after, disk_util_after});
+            const double resource_mean = (cpu_util_after + mem_util_after + disk_util_after) / 3.0;
+            const double business_peak = projected_business_max(node_id, vnf);
+            const double co_location = static_cast<double>(std::max(0, local_deploy_count[node_id]));
+            const double degree_bonus = 0.05 * static_cast<double>(
+                std::min<int>(64, static_cast<int>(cache.adjacency[it->second].size()))
+            );
+            double approx_dependency_latency = 0.0;
+            int approx_dependency_count = 0;
+            for (const auto& anchor : quick_anchors) {
+                if (!anchor.distances) continue;
+                const auto& dist = *anchor.distances;
+                const double d = it->second < dist.size() ? dist[it->second] : std::numeric_limits<double>::infinity();
+                approx_dependency_latency +=
+                    (std::isfinite(d) ? d : request.constraints.max_latency_ms * 4.0) *
+                    anchor.latency_weight;
+                approx_dependency_count += 1;
+            }
+            const double upf_hotspot = nf_type == "upf" ? 8.0 * std::max(0.0, business_peak - 0.55) : 0.0;
+            const double quick_score =
+                0.92 * approx_dependency_latency +
+                5.0 * business_peak +
+                4.0 * resource_peak +
+                2.0 * resource_mean +
+                16.0 * std::max(0.0, business_peak - 0.72) +
+                8.0 * std::max(0.0, resource_peak - 0.72) +
+                2.0 * co_location +
+                0.8 * static_cast<double>(approx_dependency_count) +
+                upf_hotspot -
+                degree_bonus;
+            quick_rank.emplace_back(node_id, quick_score);
+        }
+
+        if (limit > 0 && static_cast<int>(quick_rank.size()) > limit) {
+            const auto keep = quick_rank.begin() + limit;
+            std::nth_element(quick_rank.begin(), keep, quick_rank.end(), [](const auto& a, const auto& b) {
+                if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
+                return a.first < b.first;
+            });
+            quick_rank.resize(static_cast<size_t>(limit));
+        }
+        std::sort(quick_rank.begin(), quick_rank.end(), [](const auto& a, const auto& b) {
+            if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
+            return a.first < b.first;
+        });
+        return quick_rank;
+    };
+
     auto rank_dependency_nodes = [&](const std::vector<std::string>& candidates, const VNF& vnf, int hop_cap) {
         std::vector<std::pair<std::string, double>> ranked;
         ranked.reserve(candidates.size());
         const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
         const double latency_budget = std::max(1e-6, request.constraints.max_latency_ms);
 
-        for (const auto& node_id : candidates) {
+        const int rank_eval_cap = strict_latency_budget
+            ? std::min<int>(static_cast<int>(candidates.size()), 320)
+            : static_cast<int>(candidates.size());
+        const int quick_limit = strict_latency_budget
+            ? std::min<int>(static_cast<int>(candidates.size()), std::max(96, kRealtimeActorCandidatePool * 4))
+            : static_cast<int>(candidates.size());
+        if (strict_latency_budget && deployment_elapsed_ms() > local_budget_ms * 0.55) {
+            return quick_rank_core_nodes(candidates, vnf, quick_limit);
+        }
+
+        std::vector<std::string> eval_nodes;
+        eval_nodes.reserve(static_cast<size_t>(rank_eval_cap));
+        if (strict_latency_budget && static_cast<int>(candidates.size()) > rank_eval_cap) {
+            auto quick_rank = quick_rank_core_nodes(candidates, vnf, 0);
+            const size_t keep = std::min<size_t>(static_cast<size_t>(rank_eval_cap), quick_rank.size());
+            if (quick_rank.size() > keep) {
+                std::nth_element(
+                    quick_rank.begin(),
+                    quick_rank.begin() + static_cast<std::ptrdiff_t>(keep),
+                    quick_rank.end(),
+                    [](const auto& a, const auto& b) {
+                        if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
+                        return a.first < b.first;
+                    }
+                );
+                quick_rank.resize(keep);
+            }
+            std::sort(quick_rank.begin(), quick_rank.end(), [](const auto& a, const auto& b) {
+                if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
+                return a.first < b.first;
+            });
+            for (const auto& item : quick_rank) {
+                eval_nodes.push_back(item.first);
+            }
+        } else {
+            eval_nodes.assign(candidates.begin(), candidates.end());
+        }
+
+        for (int eval_idx = 0; eval_idx < static_cast<int>(eval_nodes.size()); ++eval_idx) {
+            if (strict_latency_budget && deployment_elapsed_ms() > local_budget_ms * 0.70) break;
+            const auto& node_id = eval_nodes[static_cast<size_t>(eval_idx)];
             const auto it = cache.node_index.find(node_id);
             if (it == cache.node_index.end() || !residual_ok(node_id, vnf)) continue;
             const auto& node = topology.nodes[it->second];
@@ -1944,11 +2150,17 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
             return a.first < b.first;
         });
+        if (ranked.empty() && strict_latency_budget) {
+            return quick_rank_core_nodes(candidates, vnf, quick_limit);
+        }
         return ranked;
     };
 
     // 迭代放置每个VNF
     for (size_t i = 0; i < request.vnfs.size(); ++i) {
+        if (deployment_budget_exceeded() && !guarantee_core_candidate) {
+            return finalize_failure("Planning time budget exhausted before placing core NF");
+        }
         const auto& vnf = request.vnfs[i];
         const std::string current_nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
         const auto [open_dep_count, critical_dep_count] = dependency_counts_for_current(vnf);
@@ -2053,6 +2265,18 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             ranked_nodes = rank_dependency_nodes(candidates_set, vnf, 0);
             if (trace_enabled) {
                 step_trace["dependency_rank_relaxed_hop_cap"] = true;
+            }
+        }
+        if (dependency_graph_mode && ranked_nodes.empty() && guarantee_core_candidate) {
+            ranked_nodes = quick_rank_core_nodes(
+                candidates_set,
+                vnf,
+                strict_latency_budget
+                    ? std::min<int>(static_cast<int>(candidates_set.size()), std::max(96, kRealtimeActorCandidatePool * 4))
+                    : static_cast<int>(candidates_set.size())
+            );
+            if (trace_enabled) {
+                step_trace["dependency_rank_availability_rescue"] = true;
             }
         }
         if (trace_enabled) {
@@ -2273,10 +2497,6 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     reject_counters[dep_plan.reason.empty() ? "dependency_path_infeasible" : dep_plan.reason] += 1;
                     continue;
                 }
-                if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
-                    reject_counters["dependency_latency_constraint"] += 1;
-                    continue;
-                }
                 const double node_rel =
                     deployed_node_set.find(node_id) == deployed_node_set.end()
                         ? estimate_node_reliability(node_id, topology)
@@ -2289,6 +2509,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     backup_path_reliability = dep_plan.reliability * node_rel;
                     backup_path_bottleneck = dep_plan.bottleneck_gbps;
                     has_backup_choice = true;
+                }
+                if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
+                    reject_counters["dependency_latency_constraint"] += 1;
+                    continue;
                 }
                 if (feasible_rank++ < desired_feasible_rank) {
                     continue;
@@ -2406,8 +2630,14 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
 
         if (!found_feasible_node) {
             // 覆盖所有已排序候选，降低“存在可行节点但被扫描上限截断”导致的漏解概率。
-            const int fallback_scan_limit = static_cast<int>(ranked_nodes.size());
+            const int fallback_scan_limit = strict_latency_budget
+                ? std::min<int>(static_cast<int>(ranked_nodes.size()), actor_top_k + 48)
+                : static_cast<int>(ranked_nodes.size());
             for (int rank_idx = actor_top_k; rank_idx < fallback_scan_limit; ++rank_idx) {
+                if (deployment_budget_exceeded() && !guarantee_core_candidate) {
+                    reject_counters["fallback_budget_exhausted"] += 1;
+                    break;
+                }
                 const auto& node_id = ranked_nodes[rank_idx].first;
                 if (!residual_ok(node_id, vnf)) {
                     reject_counters["fallback_residual_resource_violation"] += 1;
@@ -2417,10 +2647,6 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     LocalDependencyPlan dep_plan = materialize_dependency_plan(vnf, node_id, dependency_hop_cap);
                     if (!dep_plan.feasible) {
                         reject_counters[dep_plan.reason.empty() ? "fallback_dependency_path_infeasible" : "fallback_" + dep_plan.reason] += 1;
-                        continue;
-                    }
-                    if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
-                        reject_counters["fallback_dependency_latency_constraint"] += 1;
                         continue;
                     }
                     const double node_rel =
@@ -2435,6 +2661,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                         backup_path_reliability = dep_plan.reliability * node_rel;
                         backup_path_bottleneck = dep_plan.bottleneck_gbps;
                         has_backup_choice = true;
+                    }
+                    if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
+                        reject_counters["fallback_dependency_latency_constraint"] += 1;
+                        continue;
                     }
                     if (feasible_rank++ < desired_feasible_rank) {
                         continue;
@@ -2592,7 +2822,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         if (accumulated_latency > request.constraints.max_latency_ms) {
             spdlog::error("Latency exceeded: {:.2f} > {:.2f}", 
                          accumulated_latency, request.constraints.max_latency_ms);
-            return finalize_failure("Latency constraint violated");
+            if (!guarantee_core_candidate) {
+                return finalize_failure("Latency constraint violated");
+            }
+            if (candidate.reason.empty()) {
+                candidate.reason = "Latency constraint violated";
+            }
         }
         
         // 添加部署信息
@@ -2680,7 +2915,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         );
     }
     if (accumulated_latency + final_metrics.latency_ms > request.constraints.max_latency_ms) {
-        return finalize_failure("Final path latency exceeds SLA");
+        if (!guarantee_core_candidate) {
+            return finalize_failure("Final path latency exceeds SLA");
+        }
+        if (candidate.reason.empty()) {
+            candidate.reason = "Final path latency exceeds SLA";
+        }
     }
 
     for (const auto& ld : final_links) {
@@ -3016,6 +3256,19 @@ std::vector<std::string> InferenceEngine::filter_candidate_nodes(
 ) {
     std::vector<std::string> candidates;
     auto& cache = get_topology_cache(topology);
+    if (!request.core_nf_dependencies.empty()) {
+        candidates.reserve(topology.nodes.size());
+        for (const auto& node : topology.nodes) {
+            if (node.cpu_available + 1e-9 < vnf.cpu ||
+                node.mem_available + 1e-9 < vnf.mem ||
+                node.disk_available + 1e-9 < vnf.disk) {
+                continue;
+            }
+            candidates.push_back(node.id);
+        }
+        return candidates;
+    }
+
     const double required_bw = std::max(request.constraints.min_bandwidth_gbps, std::max(vnf.bw_in, vnf.bw_out));
     const int hop_cap = compute_hop_cap(request.vnfs.size() - current_vnf_idx, accumulated_hops);
     const std::vector<double>* prev_distances = nullptr;

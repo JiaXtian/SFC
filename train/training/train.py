@@ -157,36 +157,97 @@ class HeuristicPruner:
         path.reverse()
         return path, float(latency.get(target, 0.0)), max(0, len(path) - 1)
 
-    def _score_dependency_paths(self, G, node, nf_type, deployed_by_type, dependencies, max_hops):
+    @classmethod
+    def _constrained_tree(cls, graph, source, bw_req: float, max_hops: int):
+        if source not in graph:
+            return {}
+        dist = {source: 0.0}
+        latency = {source: 0.0}
+        hops = {source: 0}
+        bottleneck_pressure = {source: 0.0}
+        pq = [(0.0, source)]
+        while pq:
+            cur_cost, u = heapq.heappop(pq)
+            if cur_cost > dist.get(u, float("inf")) + 1e-9:
+                continue
+            for v, edge in graph[u].items():
+                if int(edge.get("link_status", 1)) != 1:
+                    continue
+                available_bw = float(edge.get("bandwidth_available_gbps", 0.0))
+                if available_bw + 1e-9 < bw_req:
+                    continue
+                next_hops = hops[u] + 1
+                if max_hops > 0 and next_hops > max_hops:
+                    continue
+                next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
+                next_cost = next_latency + cls.HOP_PENALTY_MS * next_hops
+                if next_cost + 1e-9 >= dist.get(v, float("inf")):
+                    continue
+                total_bw = max(float(edge.get("bandwidth_gbps", 0.0)), 1e-6)
+                pressure = 1.0 - available_bw / total_bw
+                dist[v] = next_cost
+                latency[v] = next_latency
+                hops[v] = next_hops
+                bottleneck_pressure[v] = max(float(bottleneck_pressure.get(u, 0.0)), float(pressure))
+                heapq.heappush(pq, (next_cost, v))
+        return {
+            node_id: (float(latency[node_id]), int(hops[node_id]), float(bottleneck_pressure.get(node_id, 0.0)))
+            for node_id in dist
+        }
+
+    def _score_dependency_paths(
+        self,
+        G,
+        node,
+        nf_type,
+        deployed_by_type,
+        dependencies,
+        max_hops,
+        tree_cache=None,
+        reverse_graph=None,
+    ):
         total_delay = 0.0
         total_hops = 0
         checked = 0
         worst_bottleneck_pressure = 0.0
+        tree_cache = tree_cache if tree_cache is not None else {}
+        reverse_graph = reverse_graph if reverse_graph is not None else G.reverse(copy=False)
         for dep in dependencies:
             src_type = str(dep.get("source", "")).lower()
             dst_type = str(dep.get("target", "")).lower()
+            bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
             if src_type == nf_type and dst_type in deployed_by_type:
-                src_node = node
-                dst_node = deployed_by_type[dst_type]["node"]
+                anchor_node = deployed_by_type[dst_type]["node"]
+                graph_for_tree = reverse_graph
+                direction = "rev"
             elif dst_type == nf_type and src_type in deployed_by_type:
-                src_node = deployed_by_type[src_type]["node"]
-                dst_node = node
+                anchor_node = deployed_by_type[src_type]["node"]
+                graph_for_tree = G
+                direction = "fwd"
             else:
                 continue
-            bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
-            path, delay, hops = self._dijkstra_constrained(G, src_node, dst_node, bw_req, max_hops)
-            if not path and int(max_hops) > 0:
-                path, delay, hops = self._dijkstra_constrained(G, src_node, dst_node, bw_req, 0)
-            if not path:
+
+            hop_cap = int(max_hops)
+            key = (direction, anchor_node, round(float(bw_req), 6), hop_cap)
+            tree = tree_cache.get(key)
+            if tree is None:
+                tree = self._constrained_tree(graph_for_tree, anchor_node, bw_req, hop_cap)
+                tree_cache[key] = tree
+            metrics = tree.get(node)
+            if metrics is None and hop_cap > 0:
+                relaxed_key = (direction, anchor_node, round(float(bw_req), 6), 0)
+                tree = tree_cache.get(relaxed_key)
+                if tree is None:
+                    tree = self._constrained_tree(graph_for_tree, anchor_node, bw_req, 0)
+                    tree_cache[relaxed_key] = tree
+                metrics = tree.get(node)
+            if metrics is None:
                 return None
+            delay, hops, bottleneck_pressure = metrics
             checked += 1
             total_delay += delay * float(dep.get("latency_weight", 1.0))
             total_hops += hops
-            for i in range(len(path) - 1):
-                edge = G[path[i]][path[i + 1]]
-                total_bw = max(float(edge.get("bandwidth_gbps", 0.0)), 1e-6)
-                pressure = 1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total_bw
-                worst_bottleneck_pressure = max(worst_bottleneck_pressure, pressure)
+            worst_bottleneck_pressure = max(worst_bottleneck_pressure, bottleneck_pressure)
         return total_delay, total_hops, checked, worst_bottleneck_pressure
 
     def prune(
@@ -295,6 +356,8 @@ class HeuristicPruner:
                 continue
             merged_fast.append(item)
             seen_nodes.add(item[0])
+        tree_cache = {}
+        reverse_graph = G.reverse(copy=False)
         for (
             node_id,
             _fast_score,
@@ -304,7 +367,16 @@ class HeuristicPruner:
             co_location,
             upf_hotspot_penalty,
         ) in merged_fast:
-            dep_score = self._score_dependency_paths(G, node_id, nf_type, deployed_by_type, dependencies, int(max_dependency_hops))
+            dep_score = self._score_dependency_paths(
+                G,
+                node_id,
+                nf_type,
+                deployed_by_type,
+                dependencies,
+                int(max_dependency_hops),
+                tree_cache=tree_cache,
+                reverse_graph=reverse_graph,
+            )
             if dep_score is None:
                 continue
             dep_delay, dep_hops, dep_checked, bottleneck_pressure = dep_score
@@ -608,13 +680,13 @@ def _training_quality_score(metrics, prefix=""):
 def main():
     os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
+    parser.add_argument("--epochs", type=int, default=60, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
-    parser.add_argument("--heuristic_top_m", type=int, default=80, help="候选剪枝上限")
-    parser.add_argument("--max_requests_per_file", type=int, default=15)
+    parser.add_argument("--heuristic_top_m", type=int, default=64, help="候选剪枝上限")
+    parser.add_argument("--max_requests_per_file", type=int, default=12)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
-    parser.add_argument("--max_data_files", type=int, default=20, help="每个epoch最多使用的训练文件数，0表示全部")
-    parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
+    parser.add_argument("--max_data_files", type=int, default=12, help="每个epoch最多使用的训练文件数，0表示全部")
+    parser.add_argument("--warmup_epochs", type=int, default=5, help="热身轮次，使用更小数据子集加速前期收敛")
     parser.add_argument("--time_budget_hours", type=float, default=0.0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--min_epochs", type=int, default=0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--rel_curr_start_epoch", type=int, default=1, help="可靠性课程学习起始epoch")
@@ -624,13 +696,13 @@ def main():
     parser.add_argument("--rel_curr_strict_ramp_ratio", type=float, default=0.2, help="严格可靠性从0到1的渐进区间比例")
     parser.add_argument("--shared_resources_prob_min", type=float, default=0.60, help="训练早期共享资源模式概率")
     parser.add_argument("--shared_resources_prob_max", type=float, default=0.90, help="训练后期共享资源模式概率")
-    parser.add_argument("--continuous_group_len_min", type=int, default=6, help="训练早期每个拓扑连续累加部署的请求数")
-    parser.add_argument("--continuous_group_len_max", type=int, default=15, help="训练后期每个拓扑连续累加部署的请求数")
-    parser.add_argument("--eval_continuous_group_len", type=int, default=15, help="验证时每个拓扑连续累加部署的请求数")
+    parser.add_argument("--continuous_group_len_min", type=int, default=5, help="训练早期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--continuous_group_len_max", type=int, default=12, help="训练后期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--eval_continuous_group_len", type=int, default=12, help="验证时每个拓扑连续累加部署的请求数")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
-    parser.add_argument("--eval_data_files", type=int, default=12, help="每轮固定验证使用的文件数")
-    parser.add_argument("--eval_requests_per_file", type=int, default=12, help="每个验证文件使用的请求数")
+    parser.add_argument("--eval_data_files", type=int, default=6, help="每轮固定验证使用的文件数")
+    parser.add_argument("--eval_requests_per_file", type=int, default=8, help="每个验证文件使用的请求数")
     parser.add_argument("--no_save_checkpoints", action="store_true", help="调试/smoke test时不写入正式checkpoint")
     parser.add_argument("--init_model_checkpoint", type=str, default="", help="初始化Actor/Critic权重路径")
     parser.add_argument("--init_gnn_checkpoint", type=str, default="", help="初始化GNN权重路径")

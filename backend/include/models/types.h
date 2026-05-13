@@ -397,6 +397,7 @@ struct SFCRequest {
     bool realtime_mode = false;
     int max_planning_attempts = 0;
     double planning_time_budget_ms = 0.0;
+    std::string inference_profile = "fast";  // fast, balanced, quality
     struct {
         double latency = -1.0;
         double resource = -1.0;

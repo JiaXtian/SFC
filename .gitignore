@@ -8,6 +8,7 @@ Thumbs.db
 .env.kylin
 data/
 docs/
+sfc-kylin-images.tar
 
 # Python
 __pycache__/

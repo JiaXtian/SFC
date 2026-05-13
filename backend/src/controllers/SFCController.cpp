@@ -903,11 +903,13 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.realtime_mode = json.get("realtime_mode", false).asBool();
     request.max_planning_attempts = json.get("max_planning_attempts", 0).asInt();
     request.planning_time_budget_ms = json.get("planning_time_budget_ms", 0.0).asDouble();
+    request.inference_profile = json.get("inference_profile", "fast").asString();
     if (json.isMember("inference")) {
         const auto& inference = json["inference"];
         request.realtime_mode = inference.get("realtime_mode", request.realtime_mode).asBool();
         request.max_planning_attempts = inference.get("max_planning_attempts", request.max_planning_attempts).asInt();
         request.planning_time_budget_ms = inference.get("planning_time_budget_ms", request.planning_time_budget_ms).asDouble();
+        request.inference_profile = inference.get("profile", request.inference_profile).asString();
     }
 
     if (json.isMember("score_weights")) {
@@ -992,6 +994,16 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.topk = std::max(1, std::min(5, request.topk));
     request.core_business_load.normalize_inplace();
     complete_open5gs_core_request(&request);
+    request.inference_profile = normalize_nf_type(request.inference_profile);
+    if (request.inference_profile != "balanced" && request.inference_profile != "quality") {
+        request.inference_profile = "fast";
+    }
+    if (!request.core_nf_dependencies.empty() && request.planning_time_budget_ms <= 0.0) {
+        request.realtime_mode = true;
+        request.planning_time_budget_ms = 450.0;
+        request.max_planning_attempts = request.max_planning_attempts > 0 ? request.max_planning_attempts : 1;
+        request.inference_profile = "fast";
+    }
     request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
     request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
@@ -1642,7 +1654,8 @@ void SFCController::deploy(
             runtime_request.independent_core_nfs = independent_nfs;
             runtime_request.topk = 1;
             runtime_request.realtime_mode = true;
-            runtime_request.max_planning_attempts = 20;
+            runtime_request.inference_profile = "fast";
+            runtime_request.max_planning_attempts = 1;
             runtime_request.planning_time_budget_ms = 450.0;
             runtime_request.source_node = dep_json.value("source_node", std::string(""));
             runtime_request.destination_node = dep_json.value("destination_node", std::string(""));
