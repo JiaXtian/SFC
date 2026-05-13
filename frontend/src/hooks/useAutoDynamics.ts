@@ -95,40 +95,13 @@ function buildDynamicLinkPlan(sats: any[], prevLinks: any[]) {
     if (out.length > 0 && !hasOrbitLayout) return out
   }
 
-  // Complete the local ISL plan from orbit metadata when backend/imported links
-  // omit adjacent-plane wraparound links.
-  const byPlane = new Map<number, any[]>()
-  sats.forEach((sat) => {
-    const plane = Number(sat?.orbital_params?.plane ?? 0)
-    if (!byPlane.has(plane)) byPlane.set(plane, [])
-    byPlane.get(plane)!.push(sat)
-  })
-  byPlane.forEach((arr) => {
-    arr.sort((a, b) => {
-      const pa = Number(a?.orbital_params?.position_in_plane ?? 0)
-      const pb = Number(b?.orbital_params?.position_in_plane ?? 0)
-      return pa - pb
-    })
-  })
-  const planeIds = Array.from(byPlane.keys()).sort((a, b) => a - b)
-
-  byPlane.forEach((arr) => {
-    const n = arr.length
-    if (n < 2) return
-    for (let i = 0; i < n; i++) {
-      add(String(arr[i]?.id ?? ''), String(arr[(i + 1) % n]?.id ?? ''), 'intra_orbit')
-    }
-  })
-
-  for (let p = 0; p < planeIds.length; p++) {
-    const aPlane = byPlane.get(planeIds[p]) ?? []
-    const bPlane = byPlane.get(planeIds[(p + 1) % planeIds.length]) ?? []
-    const n = Math.min(aPlane.length, bPlane.length)
-    for (let i = 0; i < n; i++) {
-      add(String(aPlane[i]?.id ?? ''), String(bPlane[i]?.id ?? ''), 'inter_orbit')
-    }
-  }
   return out
+}
+
+function persistentFaultTag(tag: any) {
+  const t = String(tag ?? '').trim()
+  if (!t || t === 'line_of_sight_loss' || t === 'topology_inconsistent') return ''
+  return t
 }
 
 function remapSelectedLink(selectedLink: any, links: any[]) {
@@ -385,17 +358,18 @@ export function useAutoDynamics() {
             const prev = prevByPair.get(pairKey(src, dst))
             if (!a || !b) {
               const fallbackBw = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
-            return {
-              source: src,
-              target: dst,
-              link_type: linkType,
-              bandwidth_gbps: fallbackBw,
-              bandwidth_available_gbps: 0,
-              reliability: Number(prev?.reliability ?? 0.8),
-              fault_tag: String(prev?.fault_tag ?? 'topology_inconsistent'),
-              __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
-              __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
-              __dynamic_up: false,
+              const faultTag = persistentFaultTag(prev?.fault_tag)
+              return {
+                source: src,
+                target: dst,
+                link_type: linkType,
+                bandwidth_gbps: fallbackBw,
+                bandwidth_available_gbps: 0,
+                reliability: Number(prev?.reliability ?? 0.8),
+                fault_tag: faultTag,
+                __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
+                __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
+                __dynamic_up: false,
                 status: 'down' as LinkStatus,
                 latency_ms: Number(prev?.latency_ms ?? 0),
               }
@@ -418,6 +392,9 @@ export function useAutoDynamics() {
             const endpointDown =
               satStatusById.get(src) === 'down' ||
               satStatusById.get(dst) === 'down'
+            const faultTag = nextStatus === 'down' && resourceStatus === 'down'
+              ? (persistentFaultTag(prev?.fault_tag) || (endpointDown ? 'endpoint_node_fault' : ''))
+              : ''
 
             const bwTotal = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
             const bwAvailPrev = Number(prev?.bandwidth_available_gbps ?? bwTotal)
@@ -433,9 +410,7 @@ export function useAutoDynamics() {
               bandwidth_gbps: bwTotal,
               bandwidth_available_gbps: bwAvail,
               reliability,
-              fault_tag: nextStatus === 'down'
-                ? String(prev?.fault_tag ?? (endpointDown ? 'endpoint_node_fault' : 'line_of_sight_loss'))
-                : '',
+              fault_tag: faultTag,
               __resource_status_seed: seededResourceStatus,
               __resource_status: resourceStatus,
               __dynamic_up: up,

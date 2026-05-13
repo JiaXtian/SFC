@@ -24,6 +24,14 @@ function isNodeFault(sat: any): boolean {
   return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
 }
 
+function isRenderableLinkFault(tag: any): boolean {
+  const faultTag = String(tag ?? '').trim()
+  return faultTag.length > 0 &&
+    faultTag !== 'endpoint_node_fault' &&
+    faultTag !== 'line_of_sight_loss' &&
+    faultTag !== 'topology_inconsistent'
+}
+
 function toXYZ(x: number, y: number, z: number): [number, number, number] {
   return [x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U]
 }
@@ -134,10 +142,8 @@ export default function Links() {
       const key = `${link.source}|${link.target}`
       const isSelected = selectedKey.has(key)
       const status = String(link?.status ?? 'active')
-      const faultTag = String(link?.fault_tag ?? '').trim()
-      const hasFaultTag = faultTag.length > 0
-      const showAsFaultLink = hasFaultTag && faultTag !== 'endpoint_node_fault'
-      if (status === 'down' && !hasFaultTag) continue
+      const showAsFaultLink = isRenderableLinkFault(link?.fault_tag)
+      if (status === 'down' && !showAsFaultLink) continue
       if (!display.showLinks && !isSelected) continue
 
       if (isSelected) selected.push(link)
@@ -431,8 +437,7 @@ export default function Links() {
 
       {selectedLines.map(item => {
         const linkType = String((item.link as any)?.link_type ?? 'inter_orbit')
-        const faultTag = String((item.link as any)?.fault_tag ?? '').trim()
-        const hasFaultTag = faultTag.length > 0 && faultTag !== 'endpoint_node_fault'
+        const hasFaultTag = isRenderableLinkFault((item.link as any)?.fault_tag)
         const selectedCore = hasFaultTag
           ? '#fde047'
           : (linkType === 'intra_orbit' ? '#6ee7b7' : '#c4b5fd')
