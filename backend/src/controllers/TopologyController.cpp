@@ -192,8 +192,24 @@ void TopologyController::generateTopology(
             }
         }
 
-        const bool has_nodes = json->isMember("nodes") && (*json)["nodes"].isArray() && (*json)["nodes"].size() > 0;
-        const bool has_links = json->isMember("links") && (*json)["links"].isArray() && (*json)["links"].size() > 0;
+        const Json::Value* topology_json = nullptr;
+        if (json->isMember("topology") && (*json)["topology"].isObject()) {
+            topology_json = &(*json)["topology"];
+        }
+        const Json::Value* nodes_json = nullptr;
+        const Json::Value* links_json = nullptr;
+        if (topology_json && topology_json->isMember("nodes") && (*topology_json)["nodes"].isArray()) {
+            nodes_json = &(*topology_json)["nodes"];
+        } else if (json->isMember("nodes") && (*json)["nodes"].isArray()) {
+            nodes_json = &(*json)["nodes"];
+        }
+        if (topology_json && topology_json->isMember("links") && (*topology_json)["links"].isArray()) {
+            links_json = &(*topology_json)["links"];
+        } else if (json->isMember("links") && (*json)["links"].isArray()) {
+            links_json = &(*json)["links"];
+        }
+        const bool has_nodes = nodes_json && nodes_json->size() > 0;
+        const bool has_links = links_json && links_json->size() > 0;
         if (constellation_template.empty()) {
             constellation_template = has_nodes ? "imported_topology" : "starlink_v1";
         }
@@ -201,7 +217,7 @@ void TopologyController::generateTopology(
         if (has_nodes) {
             Json::Value validation_errors(Json::arrayValue);
             int idx = 0;
-            for (const auto& n : (*json)["nodes"]) {
+            for (const auto& n : *nodes_json) {
                 const std::string node_id = n.get("id", "").asString();
                 if (!n.isMember("orbital_params") || !n["orbital_params"].isObject()) {
                     validation_errors.append("node#" + std::to_string(idx + 1) + " missing orbital_params");
@@ -297,7 +313,7 @@ void TopologyController::generateTopology(
             }
 
             int max_plane_idx = 0;
-            for (const auto& n : (*json)["nodes"]) {
+            for (const auto& n : *nodes_json) {
                 Satellite sat;
                 sat.id = n.get("id", "").asString();
                 sat.type = n.get("type", "satellite").asString();
@@ -353,7 +369,7 @@ void TopologyController::generateTopology(
             }
 
             if (has_links) {
-                for (const auto& l : (*json)["links"]) {
+                for (const auto& l : *links_json) {
                     Link link;
                     link.source = l.get("source", "").asString();
                     link.target = l.get("target", "").asString();

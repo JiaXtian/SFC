@@ -169,12 +169,6 @@ docker exec sfc-mysql mysql -uroot -proot123456 -e "SHOW REPLICA STATUS\G; SHOW 
 - 现已在 `dev.sh` 启动链路中自动执行：
   - 过期业务事件清理（`event_log` / `runtime_events`）。
   - 若启用了 binlog，则执行过期策略收紧与旧 binlog 清理。
-- 你也可以手动执行一次紧凑清理：
-
-```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy
-./scripts/compact_mysql_storage.sh
-```
 
 - 可通过环境变量调整（示例）：
 
@@ -193,17 +187,3 @@ SFC_DB_RUNTIME_EVENT_RETENTION_DAYS=7 \
 - 训练与推理说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/算法训练与推理说明.md`
 - 后端说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/backend/README.md`
 - Open5GS 真实部署与麒麟迁移：`/Users/t1an/Desktop/project/SFC/sfc_deploy/docs/open5gs-real-deployment.md`
-
-## 10. Open5GS 真实部署辅助脚本
-- 多架构镜像构建：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/build_open5gs_multiarch.sh`
-- 手动 UERANSIM 冒烟验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_smoke.sh`
-- 重调度恢复验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_reschedule_recovery.sh`
-
-UERANSIM 脚本默认启用严格验证（不仅注册成功，还要求 UE 分配到 `uesimtun0` IPv4）。
-
-可选参数示例：
-```bash
-STRICT_UE_IP_ALLOC=1 STRICT_TUN_DEVICE=1 STRICT_PDU_SESSION=1 \
-UE_IP_WAIT_SEC=40 \
-./scripts/verify_ueransim_smoke.sh
-```

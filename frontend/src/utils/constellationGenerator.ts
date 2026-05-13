@@ -597,45 +597,47 @@ export function prepareTopologyForBackend(
       inclination_deg: tpl.inclination_deg,
       timestamp: new Date().toISOString() // 后端字段名是 timestamp
     },
-    // 注意：后端 Topology 结构体的 to_json 返回的是 { metadata: ..., topology: { nodes: ..., links: ... } }
-    // 但后端接收 generate 接口时，通常直接解析 nodes 和 links
-    nodes: satellites.map(s => ({
-      id: s.id,
-      type: "satellite",
-      orbital_params: s.orbital_params,
-      coordinates: s.coordinates,
-      cpu_total: s.cpu_total,
-      cpu_available: s.cpu_available,
-      mem_total: s.mem_total,
-      mem_available: s.mem_available,
-      disk_total: s.disk_total,
-      disk_available: s.disk_available,
-      core_network_load: Number(s.core_network_load ?? 0.5),
-      core_business_load: s.core_business_load ?? {
-        signaling_load: Number(s.core_network_load ?? 0.5),
-        session_load: Number(s.core_network_load ?? 0.5),
-        user_plane_load: Number(s.core_network_load ?? 0.5),
-        mobility_load: Number(s.core_network_load ?? 0.5),
-        policy_load: Number(s.core_network_load ?? 0.5),
-        auth_load: Number(s.core_network_load ?? 0.5),
-      },
-      node_reliability: Number(s.node_reliability ?? 0.985),
-      status: s.status ?? 'active',
-      fault_tag: s.fault_tag ?? '',
-      vnfs: [],
-      core_nfs: []
-    })),
-    links: links.map(l => ({
-      source: l.source,
-      target: l.target,
-      link_type: l.link_type,
-      status: l.status ?? 'active',
-      fault_tag: l.fault_tag ?? '',
-      reliability: l.reliability ?? 0.999,
-      latency_ms: l.latency_ms,
-      bandwidth_gbps: l.bandwidth_gbps,
-      bandwidth_available_gbps: l.bandwidth_available_gbps
-    }))
+    topology: {
+      nodes: satellites.map(s => ({
+        id: s.id,
+        type: "satellite",
+        orbital_params: s.orbital_params,
+        coordinates: s.coordinates,
+        cpu_total: s.cpu_total,
+        cpu_available: s.cpu_available,
+        mem_total: s.mem_total,
+        mem_available: s.mem_available,
+        disk_total: s.disk_total,
+        disk_available: s.disk_available,
+        core_network_load: Number(s.core_network_load ?? 0.5),
+        core_business_load: s.core_business_load ?? {
+          signaling_load: Number(s.core_network_load ?? 0.5),
+          session_load: Number(s.core_network_load ?? 0.5),
+          user_plane_load: Number(s.core_network_load ?? 0.5),
+          mobility_load: Number(s.core_network_load ?? 0.5),
+          policy_load: Number(s.core_network_load ?? 0.5),
+          auth_load: Number(s.core_network_load ?? 0.5),
+        },
+        node_reliability: Number(s.node_reliability ?? 0.985),
+        status: s.status ?? 'active',
+        fault_tag: s.fault_tag ?? '',
+        vnfs: [],
+        core_nfs: []
+      })),
+      links: links.map(l => ({
+        source: l.source,
+        target: l.target,
+        link_type: l.link_type,
+        status: l.status ?? 'active',
+        fault_tag: l.fault_tag ?? '',
+        link_status: (l.status ?? 'active') === 'down' ? 0 : 1,
+        reliability: l.reliability ?? 0.999,
+        link_reliability: l.reliability ?? 0.999,
+        latency_ms: l.latency_ms,
+        bandwidth_gbps: l.bandwidth_gbps,
+        bandwidth_available_gbps: l.bandwidth_available_gbps
+      }))
+    }
   }
 }
 
