@@ -21,10 +21,27 @@ namespace {
 
 double clamp01(double x);
 bool link_is_down(const Link& link);
-constexpr size_t kBaseNodeFeatureDim = 8;
-constexpr size_t kBaseVnfFeatureDim = 8;
-constexpr size_t kBaseContextFeatureDim = 48;
+std::string normalize_nf_type(const std::string& raw);
+constexpr size_t kBaseNodeFeatureDim = 18;
+constexpr size_t kBaseVnfFeatureDim = 24;
+constexpr size_t kBaseContextFeatureDim = 32;
 constexpr size_t kDefaultNodeEmbeddingDim = 192;
+
+const std::vector<std::string>& open5gs_nf_order() {
+    static const std::vector<std::string> nf_order = {
+        "nrf", "scp", "sepp", "amf", "smf", "upf",
+        "ausf", "udm", "udr", "pcf", "nssf", "bsf",
+    };
+    return nf_order;
+}
+
+int open5gs_nf_index(const std::string& nf_type_raw) {
+    const std::string nf_type = normalize_nf_type(nf_type_raw);
+    const auto& order = open5gs_nf_order();
+    const auto it = std::find(order.begin(), order.end(), nf_type);
+    if (it == order.end()) return -1;
+    return static_cast<int>(std::distance(order.begin(), it));
+}
 
 std::optional<size_t> parse_expected_dim_from_error(
     const std::string& err,
@@ -112,65 +129,27 @@ std::vector<float> build_vnf_features(const VNF& vnf, size_t vnf_feature_dim) {
     const double bw_required = std::max(vnf.bw_in, vnf.bw_out);
     const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
     const bool is_user_plane = (nf_type == "upf");
-    const bool is_control_plane = !is_user_plane;
     const double stateful = vnf.stateful ? 1.0 : 0.0;
-    const double processing_weight = std::max(0.3, std::min(3.0, vnf.processing_weight));
-    const std::vector<float> base = {
-        static_cast<float>(vnf.cpu),
-        static_cast<float>(vnf.mem),
-        static_cast<float>(bw_required),
-        static_cast<float>(vnf.disk),
-        static_cast<float>(is_user_plane ? 1.0 : 0.0),
-        static_cast<float>(is_control_plane ? 1.0 : 0.0),
-        static_cast<float>(stateful),
-        static_cast<float>(processing_weight),
-    };
+    std::vector<float> base;
+    base.reserve(kBaseVnfFeatureDim);
+    base.assign(open5gs_nf_order().size(), 0.0f);
+    const int nf_idx = open5gs_nf_index(nf_type);
+    if (nf_idx >= 0 && static_cast<size_t>(nf_idx) < base.size()) {
+        base[static_cast<size_t>(nf_idx)] = 1.0f;
+    }
+    base.push_back(static_cast<float>(vnf.cpu / 8.0));
+    base.push_back(static_cast<float>(vnf.mem / 16.0));
+    base.push_back(static_cast<float>(vnf.disk / 64.0));
+    base.push_back(static_cast<float>(bw_required / 4.0));
+    base.push_back(static_cast<float>(is_user_plane ? 1.0 : 0.0));
+    base.push_back(static_cast<float>(stateful));
+    base.push_back(static_cast<float>(vnf.business_load_demand.signaling_load));
+    base.push_back(static_cast<float>(vnf.business_load_demand.session_load));
+    base.push_back(static_cast<float>(vnf.business_load_demand.user_plane_load));
+    base.push_back(static_cast<float>(vnf.business_load_demand.mobility_load));
+    base.push_back(static_cast<float>(vnf.business_load_demand.policy_load));
+    base.push_back(static_cast<float>(vnf.business_load_demand.auth_load));
     return fit_feature_dim(base, vnf_feature_dim);
-}
-
-std::vector<float> build_context_features(
-    const SFCRequest& request,
-    size_t current_vnf_idx,
-    double remaining_delay,
-    double accumulated_delay,
-    double accumulated_reliability,
-    double active_node_ratio,
-    double active_link_ratio,
-    double avg_latency_ms,
-    double avg_bandwidth_utilization,
-    size_t context_feature_dim
-) {
-    std::vector<float> ctx(kBaseContextFeatureDim, 0.0f);
-    const double total_vnfs = std::max<size_t>(1, request.vnfs.size());
-    const double reliability_req = request.constraints.min_reliability;
-    const double bandwidth_demand = request.constraints.min_bandwidth_gbps;
-    const double request_business_index = 0.0;
-
-    ctx[0] = static_cast<float>(remaining_delay / 300.0);
-    ctx[1] = static_cast<float>(static_cast<double>(current_vnf_idx) / total_vnfs);
-    // Deprecated: request-level core_network_load removed, keep slot for model compatibility.
-    ctx[2] = static_cast<float>(request_business_index);
-    ctx[3] = static_cast<float>(bandwidth_demand / 10.0);
-    ctx[4] = static_cast<float>(reliability_req);
-    ctx[5] = static_cast<float>(accumulated_reliability);
-    // Deprecated: priority_weight/load_level removed, keep zero placeholders for compatibility.
-    ctx[6] = 0.0f;
-    ctx[7] = 0.0f;
-    ctx[8] = static_cast<float>(accumulated_delay / 300.0);
-    ctx[9] = static_cast<float>(accumulated_reliability - reliability_req);
-    ctx[10] = static_cast<float>(std::max(0, request.topology_version) / 10000.0);
-    ctx[11] = static_cast<float>(request.sim_time.empty() ? 0.0 : 1.0);
-    ctx[12] = static_cast<float>(clamp01(active_node_ratio));
-    ctx[13] = static_cast<float>(clamp01(active_link_ratio));
-    ctx[14] = static_cast<float>(std::max(0.0, avg_latency_ms) / 80.0);
-    ctx[15] = static_cast<float>(clamp01(avg_bandwidth_utilization));
-    ctx[16] = 0.0f;
-    ctx[17] = 0.0f;
-    ctx[18] = 0.0f;
-    ctx[19] = 0.0f;
-    ctx[20] = 0.0f;
-    ctx[21] = 0.0f;
-    return fit_feature_dim(ctx, context_feature_dim);
 }
 
 struct DynamicTopologyFeatures {
@@ -178,7 +157,78 @@ struct DynamicTopologyFeatures {
     double active_link_ratio = 1.0;
     double avg_latency_ms = 0.0;
     double avg_bandwidth_utilization = 0.0;
+    double cpu_utilization = 0.0;
+    double mem_utilization = 0.0;
+    double disk_utilization = 0.0;
+    double avg_resource_utilization = 0.0;
+    double max_business_load = 0.0;
+    double avg_business_load = 0.0;
 };
+
+std::vector<float> build_context_features(
+    const SFCRequest& request,
+    const VNF& current_vnf,
+    size_t current_vnf_idx,
+    size_t deployed_count,
+    int satisfied_dependencies,
+    int total_dependencies,
+    int open_dependencies_for_current,
+    int critical_open_dependencies_for_current,
+    double remaining_delay,
+    double accumulated_delay,
+    double accumulated_reliability,
+    int accumulated_hops,
+    const DynamicTopologyFeatures& topo_features,
+    size_t context_feature_dim
+) {
+    std::vector<float> ctx(kBaseContextFeatureDim, 0.0f);
+    const double total_vnfs = std::max<size_t>(1, request.vnfs.size());
+    const double reliability_req = request.constraints.min_reliability;
+    const double latency_target = std::max(1e-6, request.constraints.max_latency_ms);
+    const int dep_total = std::max(1, total_dependencies);
+    const int dep_done = std::max(0, satisfied_dependencies);
+    const std::string current_nf_type = normalize_nf_type(
+        current_vnf.nf_type.empty() ? current_vnf.name : current_vnf.nf_type
+    );
+    const double current_business_mean = (
+        current_vnf.business_load_demand.signaling_load +
+        current_vnf.business_load_demand.session_load +
+        current_vnf.business_load_demand.user_plane_load +
+        current_vnf.business_load_demand.mobility_load +
+        current_vnf.business_load_demand.policy_load +
+        current_vnf.business_load_demand.auth_load
+    ) / 6.0;
+
+    ctx[0] = static_cast<float>(static_cast<double>(current_vnf_idx) / total_vnfs);
+    ctx[1] = static_cast<float>(std::max(0.0, total_vnfs - static_cast<double>(current_vnf_idx)) / total_vnfs);
+    ctx[2] = static_cast<float>(static_cast<double>(deployed_count) / total_vnfs);
+    ctx[3] = static_cast<float>(static_cast<double>(dep_done) / static_cast<double>(dep_total));
+    ctx[4] = static_cast<float>(accumulated_delay / latency_target);
+    ctx[5] = static_cast<float>(accumulated_delay / latency_target);
+    ctx[6] = static_cast<float>((dep_done > 0 ? accumulated_delay / dep_done : 0.0) / latency_target);
+    ctx[7] = static_cast<float>(accumulated_reliability);
+    ctx[8] = static_cast<float>(static_cast<double>(accumulated_hops) / 80.0);
+    ctx[9] = static_cast<float>(topo_features.avg_resource_utilization);
+    ctx[10] = static_cast<float>(topo_features.cpu_utilization);
+    ctx[11] = static_cast<float>(topo_features.mem_utilization);
+    ctx[12] = static_cast<float>(topo_features.disk_utilization);
+    ctx[13] = static_cast<float>(topo_features.avg_bandwidth_utilization);
+    ctx[14] = static_cast<float>(topo_features.max_business_load);
+    ctx[15] = static_cast<float>(topo_features.avg_business_load);
+    ctx[16] = static_cast<float>(request.core_business_load.signaling_load);
+    ctx[17] = static_cast<float>(request.core_business_load.session_load);
+    ctx[18] = static_cast<float>(request.core_business_load.user_plane_load);
+    ctx[19] = static_cast<float>(request.core_business_load.mobility_load);
+    ctx[20] = static_cast<float>(request.core_business_load.policy_load);
+    ctx[21] = static_cast<float>(request.core_business_load.auth_load);
+    ctx[22] = static_cast<float>(static_cast<double>(open_dependencies_for_current) / 6.0);
+    ctx[23] = static_cast<float>(static_cast<double>(critical_open_dependencies_for_current) / 6.0);
+    ctx[24] = static_cast<float>(current_nf_type == "upf" ? 1.0 : 0.0);
+    ctx[25] = static_cast<float>(current_business_mean);
+    ctx[26] = static_cast<float>(remaining_delay / latency_target);
+    ctx[27] = static_cast<float>(reliability_req);
+    return fit_feature_dim(ctx, context_feature_dim);
+}
 
 DynamicTopologyFeatures build_dynamic_topology_features(const Topology& topology) {
     DynamicTopologyFeatures f{};
@@ -186,10 +236,40 @@ DynamicTopologyFeatures build_dynamic_topology_features(const Topology& topology
     const double link_total = static_cast<double>(std::max<size_t>(1, topology.links.size()));
 
     int active_nodes = 0;
+    double cpu_total = 0.0;
+    double cpu_used = 0.0;
+    double mem_total = 0.0;
+    double mem_used = 0.0;
+    double disk_total = 0.0;
+    double disk_used = 0.0;
+    double business_sum = 0.0;
+    double business_max = 0.0;
     for (const auto& n : topology.nodes) {
         if (n.status != "down") active_nodes += 1;
+        cpu_total += std::max(0.0, n.cpu_total);
+        cpu_used += std::max(0.0, n.cpu_total - n.cpu_available);
+        mem_total += std::max(0.0, n.mem_total);
+        mem_used += std::max(0.0, n.mem_total - n.mem_available);
+        disk_total += std::max(0.0, n.disk_total);
+        disk_used += std::max(0.0, n.disk_total - n.disk_available);
+        const double node_business_max = std::max({
+            n.core_business_load.signaling_load,
+            n.core_business_load.session_load,
+            n.core_business_load.user_plane_load,
+            n.core_business_load.mobility_load,
+            n.core_business_load.policy_load,
+            n.core_business_load.auth_load,
+        });
+        business_sum += node_business_max;
+        business_max = std::max(business_max, node_business_max);
     }
     f.active_node_ratio = static_cast<double>(active_nodes) / node_total;
+    f.cpu_utilization = cpu_total > 1e-9 ? cpu_used / cpu_total : 0.0;
+    f.mem_utilization = mem_total > 1e-9 ? mem_used / mem_total : 0.0;
+    f.disk_utilization = disk_total > 1e-9 ? disk_used / disk_total : 0.0;
+    f.avg_resource_utilization = (f.cpu_utilization + f.mem_utilization + f.disk_utilization) / 3.0;
+    f.max_business_load = business_max;
+    f.avg_business_load = business_sum / node_total;
 
     int active_links = 0;
     double latency_sum = 0.0;
@@ -592,19 +672,14 @@ uint64_t topology_signature(const Topology& topology) {
         h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(last.coordinates.y)));
     }
     h = hash_combine_u64(h, static_cast<uint64_t>(std::max(0, topology.metadata.topology_version)));
-    if (!topology.links.empty()) {
-        const auto& first = topology.links.front();
-        const auto& mid = topology.links[topology.links.size() / 2];
-        const auto& last = topology.links.back();
-        for (const auto* link : {&first, &mid, &last}) {
-            h = hash_combine_u64(h, hash_string_u64(link->source));
-            h = hash_combine_u64(h, hash_string_u64(link->target));
-            h = hash_combine_u64(h, hash_string_u64(link->link_type));
-            h = hash_combine_u64(h, hash_string_u64(link->status));
-            h = hash_combine_u64(h, hash_string_u64(link->fault_tag));
-            h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(link->latency_ms * 1000.0)));
-            h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(link->bandwidth_available_gbps * 1000.0)));
-        }
+    for (const auto& link : topology.links) {
+        h = hash_combine_u64(h, hash_string_u64(link.source));
+        h = hash_combine_u64(h, hash_string_u64(link.target));
+        h = hash_combine_u64(h, hash_string_u64(link.status));
+        h = hash_combine_u64(h, hash_string_u64(link.fault_tag));
+        h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(std::max(0.0, link.latency_ms) * 1000.0)));
+        h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(std::max(0.0, link.bandwidth_available_gbps) * 1000.0)));
+        h = hash_combine_u64(h, static_cast<uint64_t>(std::llround(std::max(0.0, link.reliability) * 1000000.0)));
     }
     return h;
 }
@@ -1234,8 +1309,8 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     }
     if (core_dependency_mode) {
         planning_time_budget_ms = planning_time_budget_ms > 0.0
-            ? std::min(planning_time_budget_ms, realtime_mode ? 360.0 : 450.0)
-            : (realtime_mode ? 360.0 : 450.0);
+            ? std::min(planning_time_budget_ms, realtime_mode ? 320.0 : 430.0)
+            : (realtime_mode ? 320.0 : 430.0);
     }
     const auto search_start = std::chrono::steady_clock::now();
     auto elapsed_ms = [&]() -> double {
@@ -1526,23 +1601,54 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     std::unordered_map<std::string, double> residual_cpu;
     std::unordered_map<std::string, double> residual_mem;
     std::unordered_map<std::string, double> residual_disk;
+    std::unordered_map<std::string, CoreBusinessLoad> residual_business;
+    std::unordered_map<std::string, int> local_deploy_count;
     residual_cpu.reserve(topology.nodes.size() * 2);
     residual_mem.reserve(topology.nodes.size() * 2);
     residual_disk.reserve(topology.nodes.size() * 2);
+    residual_business.reserve(topology.nodes.size() * 2);
+    local_deploy_count.reserve(topology.nodes.size() * 2);
     for (const auto& node : topology.nodes) {
         residual_cpu[node.id] = node.cpu_available;
         residual_mem[node.id] = node.mem_available;
         residual_disk[node.id] = node.disk_available;
+        residual_business[node.id] = node.core_business_load;
+        local_deploy_count[node.id] = static_cast<int>(node.vnfs.size());
     }
     auto residual_ok = [&](const std::string& node_id, const VNF& vnf) {
         return residual_cpu[node_id] + 1e-9 >= vnf.cpu &&
                residual_mem[node_id] + 1e-9 >= vnf.mem &&
                residual_disk[node_id] + 1e-9 >= vnf.disk;
     };
+    auto projected_business_max = [&](const std::string& node_id, const VNF& vnf) {
+        auto load = residual_business[node_id];
+        load.signaling_load = clamp01(load.signaling_load + vnf.business_load_demand.signaling_load);
+        load.session_load = clamp01(load.session_load + vnf.business_load_demand.session_load);
+        load.user_plane_load = clamp01(load.user_plane_load + vnf.business_load_demand.user_plane_load);
+        load.mobility_load = clamp01(load.mobility_load + vnf.business_load_demand.mobility_load);
+        load.policy_load = clamp01(load.policy_load + vnf.business_load_demand.policy_load);
+        load.auth_load = clamp01(load.auth_load + vnf.business_load_demand.auth_load);
+        return std::max({
+            load.signaling_load,
+            load.session_load,
+            load.user_plane_load,
+            load.mobility_load,
+            load.policy_load,
+            load.auth_load,
+        });
+    };
     auto reserve_residual = [&](const std::string& node_id, const VNF& vnf) {
         residual_cpu[node_id] -= vnf.cpu;
         residual_mem[node_id] -= vnf.mem;
         residual_disk[node_id] -= vnf.disk;
+        auto& load = residual_business[node_id];
+        load.signaling_load = clamp01(load.signaling_load + vnf.business_load_demand.signaling_load);
+        load.session_load = clamp01(load.session_load + vnf.business_load_demand.session_load);
+        load.user_plane_load = clamp01(load.user_plane_load + vnf.business_load_demand.user_plane_load);
+        load.mobility_load = clamp01(load.mobility_load + vnf.business_load_demand.mobility_load);
+        load.policy_load = clamp01(load.policy_load + vnf.business_load_demand.policy_load);
+        load.auth_load = clamp01(load.auth_load + vnf.business_load_demand.auth_load);
+        local_deploy_count[node_id] += 1;
     };
 
     std::unordered_map<std::string, size_t> binding_group_by_token;
@@ -1585,6 +1691,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
     double bottleneck_bandwidth = std::numeric_limits<double>::infinity();
     std::unordered_set<std::string> deployed_node_set;
     std::unordered_set<std::string> exclusive_node_set;
+    std::unordered_map<std::string, std::string> deployed_nf_node_by_type;
+    std::unordered_set<std::string> satisfied_dependency_keys;
     const DynamicTopologyFeatures topo_features = build_dynamic_topology_features(topology);
     spdlog::debug("Max latency: {}ms", request.constraints.max_latency_ms);
 
@@ -1607,9 +1715,243 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         return candidate;
     };
 
+    auto dependency_key = [](const CoreNFDependency& dep) {
+        return normalize_nf_type(dep.source) + "->" + normalize_nf_type(dep.target);
+    };
+
+    struct LocalDependencyPlan {
+        bool feasible = true;
+        std::string reason;
+        std::vector<DeploymentCandidate::LinkDetail> links;
+        double weighted_latency_ms = 0.0;
+        double max_latency_ms = 0.0;
+        double reliability = 1.0;
+        double bottleneck_gbps = std::numeric_limits<double>::infinity();
+        int hops = 0;
+        int checked = 0;
+        std::vector<std::string> keys;
+    };
+
+    auto dependency_counts_for_current = [&](const VNF& vnf) {
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        int open = 0;
+        int critical = 0;
+        for (const auto& dep : request.core_nf_dependencies) {
+            const std::string src = normalize_nf_type(dep.source);
+            const std::string dst = normalize_nf_type(dep.target);
+            bool touches = false;
+            std::string other;
+            if (src == nf_type) {
+                touches = true;
+                other = dst;
+            } else if (dst == nf_type) {
+                touches = true;
+                other = src;
+            }
+            if (!touches || deployed_nf_node_by_type.find(other) == deployed_nf_node_by_type.end()) {
+                continue;
+            }
+            open += 1;
+            if (dep.criticality >= 0.85) critical += 1;
+        }
+        return std::pair<int, int>{open, critical};
+    };
+
+    auto estimate_dependency_plan = [&](const VNF& vnf, const std::string& node_id, int hop_cap) {
+        LocalDependencyPlan plan;
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        const auto node_it = cache.node_index.find(node_id);
+        if (node_it == cache.node_index.end()) {
+            plan.feasible = false;
+            plan.reason = "candidate node not indexed";
+            return plan;
+        }
+        const size_t node_idx = node_it->second;
+
+        for (const auto& dep : request.core_nf_dependencies) {
+            const std::string src_nf = normalize_nf_type(dep.source);
+            const std::string dst_nf = normalize_nf_type(dep.target);
+            std::string anchor_node;
+            if (src_nf == nf_type) {
+                const auto it = deployed_nf_node_by_type.find(dst_nf);
+                if (it == deployed_nf_node_by_type.end()) continue;
+                anchor_node = it->second;
+            } else if (dst_nf == nf_type) {
+                const auto it = deployed_nf_node_by_type.find(src_nf);
+                if (it == deployed_nf_node_by_type.end()) continue;
+                anchor_node = it->second;
+            } else {
+                continue;
+            }
+
+            const std::string key = dependency_key(dep);
+            if (satisfied_dependency_keys.find(key) != satisfied_dependency_keys.end()) {
+                continue;
+            }
+            const double required_bw = std::max(0.01, dep.bandwidth_required_gbps);
+            double latency = 0.0;
+            double reliability = 1.0;
+            int hops = 0;
+            if (anchor_node != node_id) {
+                const auto anchor_it = cache.node_index.find(anchor_node);
+                if (anchor_it == cache.node_index.end()) {
+                    plan.feasible = false;
+                    plan.reason = "dependency anchor not indexed";
+                    return plan;
+                }
+                const auto& tree = get_constrained_tree(topology, anchor_node, required_bw, hop_cap);
+                if (node_idx >= tree.latency.size() ||
+                    !std::isfinite(tree.latency[node_idx]) ||
+                    tree.hops[node_idx] == std::numeric_limits<int>::max()) {
+                    plan.feasible = false;
+                    plan.reason = "dependency path unreachable";
+                    return plan;
+                }
+                latency = tree.latency[node_idx];
+                hops = tree.hops[node_idx];
+                reliability = soften_path_reliability(tree.reliability[node_idx], hops);
+            }
+
+            plan.weighted_latency_ms += latency * std::max(0.1, dep.latency_weight);
+            plan.max_latency_ms = std::max(plan.max_latency_ms, latency);
+            plan.reliability = std::min(
+                plan.reliability,
+                std::pow(std::max(1e-9, reliability), std::max(0.1, dep.reliability_weight))
+            );
+            plan.hops += hops;
+            plan.checked += 1;
+            plan.keys.push_back(key);
+        }
+        return plan;
+    };
+
+    auto materialize_dependency_plan = [&](const VNF& vnf, const std::string& node_id, int hop_cap) {
+        LocalDependencyPlan plan;
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+
+        for (const auto& dep : request.core_nf_dependencies) {
+            const std::string src_nf = normalize_nf_type(dep.source);
+            const std::string dst_nf = normalize_nf_type(dep.target);
+            std::string src_node;
+            std::string dst_node;
+            if (src_nf == nf_type) {
+                const auto it = deployed_nf_node_by_type.find(dst_nf);
+                if (it == deployed_nf_node_by_type.end()) continue;
+                src_node = node_id;
+                dst_node = it->second;
+            } else if (dst_nf == nf_type) {
+                const auto it = deployed_nf_node_by_type.find(src_nf);
+                if (it == deployed_nf_node_by_type.end()) continue;
+                src_node = it->second;
+                dst_node = node_id;
+            } else {
+                continue;
+            }
+
+            const std::string key = dependency_key(dep);
+            if (satisfied_dependency_keys.find(key) != satisfied_dependency_keys.end()) {
+                continue;
+            }
+            const double required_bw = std::max(0.01, dep.bandwidth_required_gbps);
+            std::vector<std::string> path = {src_node};
+            if (src_node != dst_node) {
+                path = find_shortest_path(src_node, dst_node, topology, required_bw, hop_cap, false);
+                if ((path.empty() || path.size() < 2) && hop_cap > 0) {
+                    path = find_shortest_path(src_node, dst_node, topology, required_bw, 0, false);
+                }
+                if (path.empty() || path.size() < 2) {
+                    path = find_shortest_path(src_node, dst_node, topology, 0.0, 0, false);
+                }
+                if (path.empty() || path.size() < 2) {
+                    plan.feasible = false;
+                    plan.reason = "dependency path unreachable";
+                    return plan;
+                }
+            }
+
+            auto links = generate_path_links(path, topology, required_bw);
+            for (auto& ld : links) {
+                ld.dependency_source_nf = src_nf;
+                ld.dependency_target_nf = dst_nf;
+            }
+            const PathMetrics metrics = evaluate_path_links(links, required_bw);
+            if (!metrics.feasible) {
+                plan.feasible = false;
+                plan.reason = "dependency path violates bandwidth/status";
+                return plan;
+            }
+            plan.weighted_latency_ms += metrics.latency_ms * std::max(0.1, dep.latency_weight);
+            plan.max_latency_ms = std::max(plan.max_latency_ms, metrics.latency_ms);
+            plan.reliability = std::min(
+                plan.reliability,
+                std::pow(std::max(1e-9, metrics.reliability), std::max(0.1, dep.reliability_weight))
+            );
+            plan.hops += metrics.hops;
+            plan.bottleneck_gbps = std::min(plan.bottleneck_gbps, metrics.bottleneck_bandwidth_gbps);
+            plan.checked += 1;
+            plan.keys.push_back(key);
+            plan.links.insert(plan.links.end(), links.begin(), links.end());
+        }
+        return plan;
+    };
+
+    auto rank_dependency_nodes = [&](const std::vector<std::string>& candidates, const VNF& vnf, int hop_cap) {
+        std::vector<std::pair<std::string, double>> ranked;
+        ranked.reserve(candidates.size());
+        const std::string nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        const double latency_budget = std::max(1e-6, request.constraints.max_latency_ms);
+
+        for (const auto& node_id : candidates) {
+            const auto it = cache.node_index.find(node_id);
+            if (it == cache.node_index.end() || !residual_ok(node_id, vnf)) continue;
+            const auto& node = topology.nodes[it->second];
+            const double cpu_total = std::max(1e-6, node.cpu_total);
+            const double mem_total = std::max(1e-6, node.mem_total);
+            const double disk_total = std::max(1e-6, node.disk_total);
+            const double cpu_util_after = clamp01(1.0 - (residual_cpu[node_id] - vnf.cpu) / cpu_total);
+            const double mem_util_after = clamp01(1.0 - (residual_mem[node_id] - vnf.mem) / mem_total);
+            const double disk_util_after = clamp01(1.0 - (residual_disk[node_id] - vnf.disk) / disk_total);
+            const double resource_peak = std::max({cpu_util_after, mem_util_after, disk_util_after});
+            const double resource_mean = (cpu_util_after + mem_util_after + disk_util_after) / 3.0;
+            const double business_peak = projected_business_max(node_id, vnf);
+            const double colocation = static_cast<double>(std::max(0, local_deploy_count[node_id]));
+
+            LocalDependencyPlan dep_plan = estimate_dependency_plan(vnf, node_id, hop_cap);
+            if (!dep_plan.feasible && hop_cap > 0) {
+                dep_plan = estimate_dependency_plan(vnf, node_id, 0);
+            }
+            if (!dep_plan.feasible) continue;
+            if (accumulated_latency + dep_plan.weighted_latency_ms > latency_budget * 1.04 + 1e-9) {
+                continue;
+            }
+            const double dependency_bonus = -2.0 * static_cast<double>(dep_plan.checked);
+            const double upf_hotspot = nf_type == "upf" ? 10.0 * std::max(0.0, business_peak - 0.55) : 0.0;
+            const double score =
+                dep_plan.weighted_latency_ms +
+                1.55 * static_cast<double>(dep_plan.hops) +
+                5.5 * business_peak +
+                4.4 * resource_peak +
+                2.0 * resource_mean +
+                18.0 * std::max(0.0, business_peak - 0.72) +
+                9.0 * std::max(0.0, resource_peak - 0.72) +
+                2.2 * colocation +
+                upf_hotspot +
+                dependency_bonus;
+            ranked.emplace_back(node_id, score);
+        }
+
+        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+            if (std::abs(a.second - b.second) > 1e-9) return a.second < b.second;
+            return a.first < b.first;
+        });
+        return ranked;
+    };
+
     // 迭代放置每个VNF
     for (size_t i = 0; i < request.vnfs.size(); ++i) {
         const auto& vnf = request.vnfs[i];
+        const std::string current_nf_type = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        const auto [open_dep_count, critical_dep_count] = dependency_counts_for_current(vnf);
         const auto bound_group = binding_group_for_vnf(vnf);
         const bool independent_nf = is_independent_vnf(vnf);
         if (independent_nf && bound_group.has_value()) {
@@ -1641,7 +1983,9 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 {"binding_anchor_node", bound_anchor},
                 {"remaining_latency_before", remaining_latency},
                 {"accumulated_latency_before", accumulated_latency},
-                {"accumulated_reliability_before", accumulated_reliability}
+                {"accumulated_reliability_before", accumulated_reliability},
+                {"open_dependencies_for_current", open_dep_count},
+                {"critical_open_dependencies_for_current", critical_dep_count}
             };
         }
         const double required_bandwidth_gbps = std::max(
@@ -1701,7 +2045,16 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             return finalize_failure("No feasible node for core NF: " + vnf.name);
         }
 
-        auto ranked_nodes = rank_nodes_by_cost(candidates_set, vnf, rank_prev_node, topology);
+        const int dependency_hop_cap = request.realtime_mode ? 14 : 18;
+        auto ranked_nodes = dependency_graph_mode
+            ? rank_dependency_nodes(candidates_set, vnf, dependency_hop_cap)
+            : rank_nodes_by_cost(candidates_set, vnf, rank_prev_node, topology);
+        if (dependency_graph_mode && ranked_nodes.empty() && dependency_hop_cap > 0) {
+            ranked_nodes = rank_dependency_nodes(candidates_set, vnf, 0);
+            if (trace_enabled) {
+                step_trace["dependency_rank_relaxed_hop_cap"] = true;
+            }
+        }
         if (trace_enabled) {
             nlohmann::json ranked_top = nlohmann::json::array();
             for (size_t ridx = 0; ridx < std::min<size_t>(10, ranked_nodes.size()); ++ridx) {
@@ -1711,6 +2064,20 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                 });
             }
             step_trace["ranked_candidates_top"] = ranked_top;
+        }
+        if (ranked_nodes.empty()) {
+            if (candidate_trace) {
+                step_trace["status"] = "failed";
+                step_trace["failure_reason"] = dependency_graph_mode
+                    ? "no_dependency_feasible_candidate"
+                    : "no_ranked_candidate";
+                append_step_trace(step_trace);
+            }
+            return finalize_failure(
+                dependency_graph_mode
+                    ? "No dependency-feasible node for core NF: " + vnf.name
+                    : "No ranked node for core NF: " + vnf.name
+            );
         }
         const int search_target = request.realtime_mode
             ? std::max(1, std::min(4, request.topk))
@@ -1779,14 +2146,18 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         auto vnf_features = build_vnf_features(vnf, vnf_feature_dim_);
         auto context_features = build_context_features(
             request,
+            vnf,
             i,
+            candidate.per_vnf.size(),
+            static_cast<int>(satisfied_dependency_keys.size()),
+            static_cast<int>(request.core_nf_dependencies.size()),
+            open_dep_count,
+            critical_dep_count,
             remaining_latency,
             accumulated_latency,
             accumulated_reliability,
-            topo_features.active_node_ratio,
-            topo_features.active_link_ratio,
-            topo_features.avg_latency_ms,
-            topo_features.avg_bandwidth_utilization,
+            accumulated_hops,
+            topo_features,
             context_feature_dim_
         );
 
@@ -1885,6 +2256,8 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         bool has_backup_choice = false;
         std::string backup_node;
         std::vector<DeploymentCandidate::LinkDetail> backup_path_links;
+        std::vector<std::string> backup_dependency_keys;
+        std::vector<std::string> selected_dependency_keys;
         double backup_path_latency = 0.0;
         double backup_path_reliability = 1.0;
         double backup_path_bottleneck = std::numeric_limits<double>::infinity();
@@ -1893,6 +2266,42 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             if (!residual_ok(node_id, vnf)) {
                 reject_counters["residual_resource_violation"] += 1;
                 continue;
+            }
+            if (dependency_graph_mode) {
+                LocalDependencyPlan dep_plan = materialize_dependency_plan(vnf, node_id, dependency_hop_cap);
+                if (!dep_plan.feasible) {
+                    reject_counters[dep_plan.reason.empty() ? "dependency_path_infeasible" : dep_plan.reason] += 1;
+                    continue;
+                }
+                if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
+                    reject_counters["dependency_latency_constraint"] += 1;
+                    continue;
+                }
+                const double node_rel =
+                    deployed_node_set.find(node_id) == deployed_node_set.end()
+                        ? estimate_node_reliability(node_id, topology)
+                        : 1.0;
+                if (!has_backup_choice) {
+                    backup_node = node_id;
+                    backup_path_links = dep_plan.links;
+                    backup_dependency_keys = dep_plan.keys;
+                    backup_path_latency = dep_plan.weighted_latency_ms;
+                    backup_path_reliability = dep_plan.reliability * node_rel;
+                    backup_path_bottleneck = dep_plan.bottleneck_gbps;
+                    has_backup_choice = true;
+                }
+                if (feasible_rank++ < desired_feasible_rank) {
+                    continue;
+                }
+
+                selected_node = node_id;
+                selected_path_links = std::move(dep_plan.links);
+                selected_dependency_keys = std::move(dep_plan.keys);
+                selected_path_latency = dep_plan.weighted_latency_ms;
+                selected_path_reliability = dep_plan.reliability * node_rel;
+                selected_path_bottleneck = dep_plan.bottleneck_gbps;
+                found_feasible_node = true;
+                break;
             }
             std::vector<std::string> path = {node_id};
             int effective_hop_cap = hop_cap;
@@ -2004,6 +2413,42 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
                     reject_counters["fallback_residual_resource_violation"] += 1;
                     continue;
                 }
+                if (dependency_graph_mode) {
+                    LocalDependencyPlan dep_plan = materialize_dependency_plan(vnf, node_id, dependency_hop_cap);
+                    if (!dep_plan.feasible) {
+                        reject_counters[dep_plan.reason.empty() ? "fallback_dependency_path_infeasible" : "fallback_" + dep_plan.reason] += 1;
+                        continue;
+                    }
+                    if (accumulated_latency + dep_plan.weighted_latency_ms > request.constraints.max_latency_ms) {
+                        reject_counters["fallback_dependency_latency_constraint"] += 1;
+                        continue;
+                    }
+                    const double node_rel =
+                        deployed_node_set.find(node_id) == deployed_node_set.end()
+                            ? estimate_node_reliability(node_id, topology)
+                            : 1.0;
+                    if (!has_backup_choice) {
+                        backup_node = node_id;
+                        backup_path_links = dep_plan.links;
+                        backup_dependency_keys = dep_plan.keys;
+                        backup_path_latency = dep_plan.weighted_latency_ms;
+                        backup_path_reliability = dep_plan.reliability * node_rel;
+                        backup_path_bottleneck = dep_plan.bottleneck_gbps;
+                        has_backup_choice = true;
+                    }
+                    if (feasible_rank++ < desired_feasible_rank) {
+                        continue;
+                    }
+
+                    selected_node = node_id;
+                    selected_path_links = std::move(dep_plan.links);
+                    selected_dependency_keys = std::move(dep_plan.keys);
+                    selected_path_latency = dep_plan.weighted_latency_ms;
+                    selected_path_reliability = dep_plan.reliability * node_rel;
+                    selected_path_bottleneck = dep_plan.bottleneck_gbps;
+                    found_feasible_node = true;
+                    break;
+                }
                 std::vector<std::string> path = {node_id};
                 int effective_hop_cap = hop_cap;
                 if (!dependency_graph_mode && has_prev_vnf && prev_node != node_id) {
@@ -2110,6 +2555,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         if (!found_feasible_node && has_backup_choice) {
             selected_node = backup_node;
             selected_path_links = std::move(backup_path_links);
+            selected_dependency_keys = std::move(backup_dependency_keys);
             selected_path_latency = backup_path_latency;
             selected_path_reliability = backup_path_reliability;
             selected_path_bottleneck = backup_path_bottleneck;
@@ -2138,7 +2584,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         accumulated_reliability *= selected_path_reliability;
         accumulated_hops += static_cast<int>(selected_path_links.size());
         bottleneck_bandwidth = std::min(bottleneck_bandwidth, selected_path_bottleneck);
-        if (accumulated_hops > kHardTotalHopLimit) {
+        if (!dependency_graph_mode && accumulated_hops > kHardTotalHopLimit) {
             return finalize_failure("Hop budget exceeded during core NF placement");
         }
         
@@ -2166,6 +2612,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             exclusive_node_set.insert(selected_node);
         }
         reserve_residual(selected_node, vnf);
+        deployed_nf_node_by_type[current_nf_type] = selected_node;
+        for (const auto& key : selected_dependency_keys) {
+            satisfied_dependency_keys.insert(key);
+        }
         if (bound_group.has_value() && *bound_group < binding_anchor_node.size() &&
             binding_anchor_node[*bound_group].empty()) {
             binding_anchor_node[*bound_group] = selected_node;
@@ -2179,6 +2629,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             step_trace["selected_path_latency_ms"] = selected_path_latency;
             step_trace["selected_path_reliability"] = selected_path_reliability;
             step_trace["selected_path_bottleneck_gbps"] = selected_path_bottleneck;
+            step_trace["selected_dependency_count"] = static_cast<int>(selected_dependency_keys.size());
             step_trace["reject_counters"] = reject_counters;
             append_step_trace(step_trace);
         }
@@ -2882,6 +3333,9 @@ InferenceEngine::prepare_graph_inputs(const Topology& topology) {
         }
         latency_sum[src_idx] += link.latency_ms / 50.0;
     }
+    const int max_degree = out_count.empty()
+        ? 1
+        : std::max(1, *std::max_element(out_count.begin(), out_count.end()));
 
     for (size_t i = 0; i < topology.nodes.size(); ++i) {
         const auto& node = topology.nodes[i];
@@ -2901,16 +3355,27 @@ InferenceEngine::prepare_graph_inputs(const Topology& topology) {
             bw_ratio = bw_sum[i] / out_count[i];
             latency_norm = latency_sum[i] / out_count[i];
         }
+        const int deployed_core_nf_count = static_cast<int>(node.vnfs.size());
 
         const std::vector<float> base = {
             static_cast<float>(cpu_ratio),
             static_cast<float>(mem_ratio),
             static_cast<float>(disk_ratio),
-            0.0f,
+            static_cast<float>(std::min(4.0, std::max(0.0, node.cpu_available / 64.0))),
+            static_cast<float>(std::min(4.0, std::max(0.0, node.mem_available / 128.0))),
+            static_cast<float>(std::min(4.0, std::max(0.0, node.disk_available / 1024.0))),
             static_cast<float>(clamp01(node.node_reliability)),
+            static_cast<float>(static_cast<double>(out_count[i]) / static_cast<double>(max_degree)),
             static_cast<float>(active_ratio),
             static_cast<float>(bw_ratio),
             static_cast<float>(std::min(5.0, std::max(0.0, latency_norm))),
+            static_cast<float>(clamp01(node.core_business_load.signaling_load)),
+            static_cast<float>(clamp01(node.core_business_load.session_load)),
+            static_cast<float>(clamp01(node.core_business_load.user_plane_load)),
+            static_cast<float>(clamp01(node.core_business_load.mobility_load)),
+            static_cast<float>(clamp01(node.core_business_load.policy_load)),
+            static_cast<float>(clamp01(node.core_business_load.auth_load)),
+            static_cast<float>(std::min(1.0, static_cast<double>(deployed_core_nf_count) / 12.0)),
         };
         const auto fitted = fit_feature_dim(base, node_feature_dim_);
         node_features.insert(node_features.end(), fitted.begin(), fitted.end());

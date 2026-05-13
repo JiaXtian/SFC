@@ -175,6 +175,8 @@ class HeuristicPruner:
                 continue
             bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
             path, delay, hops = self._dijkstra_constrained(G, src_node, dst_node, bw_req, max_hops)
+            if not path and int(max_hops) > 0:
+                path, delay, hops = self._dijkstra_constrained(G, src_node, dst_node, bw_req, 0)
             if not path:
                 return None
             checked += 1
@@ -200,7 +202,7 @@ class HeuristicPruner:
         accumulated_delay=0.0,
         reliability_requirement=0.0,
         accumulated_hops=0,
-        max_dependency_hops=16,
+        max_dependency_hops=24,
         **_kwargs,
     ):
         del current_nf_idx, total_core_nfs, accumulated_delay, reliability_requirement, accumulated_hops
@@ -611,7 +613,7 @@ def main():
     parser.add_argument("--heuristic_top_m", type=int, default=80, help="候选剪枝上限")
     parser.add_argument("--max_requests_per_file", type=int, default=15)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
-    parser.add_argument("--max_data_files", type=int, default=16, help="每个epoch最多使用的训练文件数，0表示全部")
+    parser.add_argument("--max_data_files", type=int, default=20, help="每个epoch最多使用的训练文件数，0表示全部")
     parser.add_argument("--warmup_epochs", type=int, default=6, help="热身轮次，使用更小数据子集加速前期收敛")
     parser.add_argument("--time_budget_hours", type=float, default=0.0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--min_epochs", type=int, default=0, help="保留兼容参数；当前训练不按时间预算早停")
@@ -627,8 +629,8 @@ def main():
     parser.add_argument("--eval_continuous_group_len", type=int, default=15, help="验证时每个拓扑连续累加部署的请求数")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
-    parser.add_argument("--eval_data_files", type=int, default=10, help="每轮固定验证使用的文件数")
-    parser.add_argument("--eval_requests_per_file", type=int, default=8, help="每个验证文件使用的请求数")
+    parser.add_argument("--eval_data_files", type=int, default=12, help="每轮固定验证使用的文件数")
+    parser.add_argument("--eval_requests_per_file", type=int, default=12, help="每个验证文件使用的请求数")
     parser.add_argument("--no_save_checkpoints", action="store_true", help="调试/smoke test时不写入正式checkpoint")
     parser.add_argument("--init_model_checkpoint", type=str, default="", help="初始化Actor/Critic权重路径")
     parser.add_argument("--init_gnn_checkpoint", type=str, default="", help="初始化GNN权重路径")
@@ -730,6 +732,11 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_progress = epoch / max(1, args.epochs)
+        # Early epochs should strongly imitate the robust heuristic teacher so
+        # the actor stops random probing quickly; later epochs lower imitation
+        # and entropy so policy-gradient quality differences can refine choices.
+        agent.imitation_coef = 0.42 - 0.18 * train_progress
+        agent.entropy_coef = max(0.002, 0.012 - 0.010 * train_progress)
         current_shared_resources_prob = (
             args.shared_resources_prob_min
             + (args.shared_resources_prob_max - args.shared_resources_prob_min) * train_progress
@@ -790,6 +797,8 @@ def main():
             continuous_group_len=args.eval_continuous_group_len,
         )
         epoch_metrics.update(eval_metrics)
+        epoch_metrics["imitation_coef"] = float(agent.imitation_coef)
+        epoch_metrics["entropy_coef"] = float(agent.entropy_coef)
         best_eval_quality = max(best_eval_quality, float(eval_metrics.get("eval_avg_quality_score", 0.0)))
         best_eval_reward = max(best_eval_reward, float(eval_metrics.get("eval_avg_reward", 0.0)))
         epoch_metrics["eval_quality_best_so_far"] = best_eval_quality

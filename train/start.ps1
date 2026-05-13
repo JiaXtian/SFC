@@ -5,7 +5,7 @@
 # Examples:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 --skip-train --skip-export --skip-build
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 --device cpu --epochs 40
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 --device cpu --epochs 80
 
 $ErrorActionPreference = "Stop"
 
@@ -21,15 +21,15 @@ $SKIP_INFER = 0
 
 $DEVICE = "auto"
 
-$EPOCHS = 40
-$MAX_REQUESTS_PER_FILE = 10
-$MAX_DATA_FILES = 16
+$EPOCHS = 80
+$MAX_REQUESTS_PER_FILE = 15
+$MAX_DATA_FILES = 20
 $WARMUP_EPOCHS = 6
 $TIME_BUDGET_HOURS = 0.0
 $MIN_EPOCHS = 0
 $HEURISTIC_TOP_M = 80
-$EVAL_DATA_FILES = 10
-$EVAL_REQUESTS_PER_FILE = 8
+$EVAL_DATA_FILES = 12
+$EVAL_REQUESTS_PER_FILE = 12
 
 $REL_CURR_START_EPOCH = 1
 $REL_CURR_END_EPOCH = 32

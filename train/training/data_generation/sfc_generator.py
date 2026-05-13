@@ -150,7 +150,7 @@ def build_sfc_requests_payload(
                 "latency_requirement_ms": round(latency_budget, 3),
                 "bandwidth_demand_gbps": round(request_bw, 4),
                 "reliability_requirement": round(reliability_requirement, 5),
-                "max_dependency_hops": 16,
+                "max_dependency_hops": 24,
                 "max_total_dependency_delay_ms": round(latency_budget, 3),
             },
         }

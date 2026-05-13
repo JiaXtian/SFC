@@ -888,6 +888,12 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.topology_version = json.get("topology_version", -1).asInt();
     request.sim_time = json.get("sim_time", "").asString();
     request.core_business_load = CoreBusinessLoad{};
+    request.core_business_load.signaling_load = 0.5;
+    request.core_business_load.session_load = 0.5;
+    request.core_business_load.user_plane_load = 0.5;
+    request.core_business_load.mobility_load = 0.5;
+    request.core_business_load.policy_load = 0.5;
+    request.core_business_load.auth_load = 0.5;
     if (json.isMember("core_business_load")) {
         request.core_business_load = parse_core_business_load_object(
             json["core_business_load"],

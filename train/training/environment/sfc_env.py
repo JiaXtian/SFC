@@ -213,7 +213,7 @@ class SFCEnvironment:
         return {
             "latency_requirement_ms": float(sla.get("latency_requirement_ms", self.request.get("max_latency_ms", 120.0))),
             "reliability_requirement": float(sla.get("reliability_requirement", self.request.get("reliability_requirement", 0.82))),
-            "max_dependency_hops": int(sla.get("max_dependency_hops", self.request.get("max_dependency_hops", 16))),
+            "max_dependency_hops": int(sla.get("max_dependency_hops", self.request.get("max_dependency_hops", 24))),
         }
 
     def _build_state(self) -> Dict:
@@ -279,6 +279,10 @@ class SFCEnvironment:
             path, delay, rel, hops, bottleneck = self._find_constrained_path(
                 src_node, dst_node, bw_req=bw_req, max_hops=sla["max_dependency_hops"]
             )
+            if not path and sla["max_dependency_hops"] > 0:
+                path, delay, rel, hops, bottleneck = self._find_constrained_path(
+                    src_node, dst_node, bw_req=bw_req, max_hops=0
+                )
             if not path:
                 return []
             paths.append(

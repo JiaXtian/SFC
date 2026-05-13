@@ -458,7 +458,7 @@ class SFCTrainer:
                 accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
                 reliability_requirement=float(state.get("reliability_requirement", 0.0)),
                 accumulated_hops=int(state.get("accumulated_hops", 0)),
-                max_dependency_hops=int(state.get("max_dependency_hops", 16)),
+                max_dependency_hops=int(state.get("max_dependency_hops", 24)),
             )
 
             if not candidates:
@@ -474,7 +474,7 @@ class SFCTrainer:
                     accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
                     reliability_requirement=float(state.get("reliability_requirement", 0.0)),
                     accumulated_hops=int(state.get("accumulated_hops", 0)),
-                    max_dependency_hops=max(24, int(state.get("max_dependency_hops", 16))),
+                    max_dependency_hops=max(32, int(state.get("max_dependency_hops", 24))),
                 )
                 if not candidates:
                     failure_reason = "no_candidates"
@@ -551,7 +551,7 @@ class SFCTrainer:
                     accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
                     reliability_requirement=float(state.get("reliability_requirement", 0.0)),
                     accumulated_hops=int(state.get("accumulated_hops", 0)),
-                    max_dependency_hops=max(24, int(state.get("max_dependency_hops", 16))),
+                    max_dependency_hops=max(32, int(state.get("max_dependency_hops", 24))),
                 )
                 rescue_seen = set()
                 for node_id in rescue_candidates[: self.teacher_rescue_candidates]:
@@ -618,7 +618,7 @@ class SFCTrainer:
                     accumulated_delay=float(next_state.get("accumulated_dependency_delay", 0.0)),
                     reliability_requirement=float(next_state.get("reliability_requirement", 0.0)),
                     accumulated_hops=int(next_state.get("accumulated_hops", 0)),
-                    max_dependency_hops=int(next_state.get("max_dependency_hops", 16)),
+                    max_dependency_hops=int(next_state.get("max_dependency_hops", 24)),
                 )
                 traj["next_candidate_indices"] = [
                     node_index[c] for c in next_candidates if c in node_index

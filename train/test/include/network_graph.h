@@ -41,7 +41,7 @@ struct Node {
     std::string id;
     std::string type;
     NodeResources resources;
-    float core_network_load = 0.5f;
+    float core_network_load = 0.0f;
     CoreBusinessLoad core_business_load;
     float node_reliability = 0.98f;
     int deployed_core_nf_count = 0;

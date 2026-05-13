@@ -9,12 +9,12 @@ using json = nlohmann::json;
 namespace sfc {
 
 struct CoreBusinessLoad {
-    double signaling_load = 0.5;     // 信令交互负载
-    double session_load = 0.5;       // 会话建立/维护负载
-    double user_plane_load = 0.5;    // 用户面吞吐负载
-    double mobility_load = 0.5;      // 移动性/切换负载
-    double policy_load = 0.5;        // 策略与QoS控制负载
-    double auth_load = 0.5;          // 鉴权与安全负载
+    double signaling_load = 0.0;     // 信令交互负载
+    double session_load = 0.0;       // 会话建立/维护负载
+    double user_plane_load = 0.0;    // 用户面吞吐负载
+    double mobility_load = 0.0;      // 移动性/切换负载
+    double policy_load = 0.0;        // 策略与QoS控制负载
+    double auth_load = 0.0;          // 鉴权与安全负载
 
     static double clamp01(double x) {
         if (x < 0.0) return 0.0;
@@ -160,7 +160,7 @@ struct Satellite {
     double mem_available;
     double disk_total;
     double disk_available;
-    double core_network_load = 0.5;
+    double core_network_load = 0.0;
     CoreBusinessLoad core_business_load;
     double node_reliability = 0.98;
     std::string status = "active";  // active, down

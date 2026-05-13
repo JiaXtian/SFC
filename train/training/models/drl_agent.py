@@ -77,8 +77,8 @@ class DRLAgent:
         actor_lr=1e-4,
         critic_lr=3e-4,
         gamma=0.99,
-        entropy_coef=0.01,
-        imitation_coef=0.20,
+        entropy_coef=0.008,
+        imitation_coef=0.35,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         device="cpu",
@@ -218,10 +218,13 @@ class DRLAgent:
 
             advantage = actor_advantages[i].detach()
             actor_loss = -log_probs[action] * advantage
+            imitation_weight = self.imitation_coef
+            if int(traj.get("actor_action", action)) != int(action):
+                imitation_weight *= 1.35
             imitation_loss = -log_probs[action]
 
             entropy = Categorical(probs).entropy()
-            actor_loss_total += actor_loss + self.imitation_coef * imitation_loss - self.entropy_coef * entropy
+            actor_loss_total += actor_loss + imitation_weight * imitation_loss - self.entropy_coef * entropy
             entropy_total += entropy.item()
             valid_count += 1
 
