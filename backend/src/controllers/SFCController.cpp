@@ -26,6 +26,52 @@ static std::vector<nlohmann::json> g_deployments;
 static std::mutex g_deployments_mutex;
 void persist_deployments_locked();
 
+Topology current_planning_topology() {
+    if (g_dynamic_sim) {
+        const auto snapshot = g_dynamic_sim->refresh_current_snapshot(false);
+        if (!snapshot.topology.nodes.empty()) {
+            return snapshot.topology;
+        }
+    }
+    return g_res_mgr ? g_res_mgr->export_current_topology() : Topology{};
+}
+
+std::string canonical_pair_key(const std::string& a, const std::string& b) {
+    return a <= b ? a + "|" + b : b + "|" + a;
+}
+
+bool candidate_links_are_available(
+    const DeploymentCandidate& candidate,
+    const Topology& topology,
+    std::string* reason
+) {
+    if (candidate.link_details.empty()) return true;
+    std::unordered_map<std::string, const Link*> active_links;
+    active_links.reserve(topology.links.size() * 2);
+    for (const auto& link : topology.links) {
+        if (link.source.empty() || link.target.empty()) continue;
+        active_links[canonical_pair_key(link.source, link.target)] = &link;
+    }
+    for (const auto& detail : candidate.link_details) {
+        const auto it = active_links.find(canonical_pair_key(detail.src, detail.dst));
+        if (it == active_links.end()) {
+            if (reason) *reason = "missing_link:" + detail.src + "->" + detail.dst;
+            return false;
+        }
+        const auto* link = it->second;
+        if (link->status == "down") {
+            if (reason) *reason = "down_link:" + detail.src + "->" + detail.dst;
+            return false;
+        }
+        const double required = std::max(0.0, detail.bandwidth_required_gbps);
+        if (required > 1e-9 && link->bandwidth_available_gbps + 1e-9 < required) {
+            if (reason) *reason = "insufficient_bandwidth:" + detail.src + "->" + detail.dst;
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string format_core_label(int seq) {
     std::ostringstream oss;
     oss << "CORE-";
@@ -1049,7 +1095,7 @@ void SFCController::plan(
         }
         
         auto sfc_request = parse_sfc_request(*json);
-        Topology topology = g_res_mgr->export_current_topology();
+        Topology topology = current_planning_topology();
 
         if (sfc_request.vnfs.empty()) {
             Json::Value error;
@@ -1062,8 +1108,8 @@ void SFCController::plan(
             return;
         }
 
-        spdlog::info("Starting inference: nodes={}, links={}", 
-                    topology.nodes.size(), topology.links.size());
+        spdlog::info("Starting inference on refreshed dynamic topology: nodes={}, links={}, version={}",
+                    topology.nodes.size(), topology.links.size(), topology.metadata.topology_version);
         
         nlohmann::json decision_process;
         auto candidates = g_inference_engine->inference(sfc_request, topology, &decision_process);
@@ -1422,6 +1468,21 @@ void SFCController::deploy(
                 callback(resp);
                 return;
             }
+        }
+
+        const Topology deploy_topology = current_planning_topology();
+        std::string topology_reason;
+        if (!candidate_links_are_available(candidate, deploy_topology, &topology_reason)) {
+            Json::Value error;
+            error["code"] = 409;
+            error["message"] = "Candidate path is no longer available on current dynamic topology";
+            error["details"] = topology_reason;
+            error["topology_version"] = deploy_topology.metadata.topology_version;
+            error["sim_time"] = deploy_topology.metadata.sim_time;
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k409Conflict);
+            callback(resp);
+            return;
         }
         
         // 生成部署ID

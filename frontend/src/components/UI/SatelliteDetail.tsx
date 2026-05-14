@@ -142,13 +142,20 @@ export default function SatelliteDetail() {
 
   return (
     <div
-      className="absolute right-[348px] top-12 z-10 rounded-2xl overflow-hidden shadow-2xl"
+      className="absolute top-12 z-10 rounded-lg overflow-hidden shadow-2xl"
       style={{
-        width: 318,
+        right: 'calc(clamp(320px, 22vw, 470px) + 12px)',
+        width: 330,
+        maxHeight: 'calc(68vh - 58px)',
         background:
-          'linear-gradient(180deg, rgba(20,20,35,0.97), rgba(10,10,20,0.97))',
-        border: isFault ? '1px solid rgba(239,68,68,0.45)' : '1px solid rgba(0,255,136,0.3)',
-        backdropFilter: 'blur(20px)'
+          isFault
+            ? 'linear-gradient(180deg, rgba(35,14,20,0.9), rgba(15,8,13,0.86))'
+            : 'linear-gradient(180deg, rgba(13,24,28,0.88), rgba(7,14,18,0.84))',
+        border: isFault ? '1px solid rgba(248,113,113,0.5)' : '1px solid rgba(34,197,94,0.32)',
+        backdropFilter: 'blur(18px)',
+        boxShadow: isFault
+          ? '0 18px 42px rgba(0,0,0,0.48), inset 0 1px 0 rgba(248,113,113,0.08)'
+          : '0 18px 42px rgba(0,0,0,0.48), inset 0 1px 0 rgba(125,211,252,0.08)',
       }}
     >
       {/* Header */}
@@ -201,7 +208,7 @@ export default function SatelliteDetail() {
       {/* Body */}
       <div
         className="px-4 py-3 space-y-3 overflow-y-auto"
-        style={{ maxHeight: 'calc(100vh - 220px)' }}
+        style={{ maxHeight: 'calc(68vh - 129px)', minHeight: 320 }}
       >
         {/* 轨道参数 */}
         <div>

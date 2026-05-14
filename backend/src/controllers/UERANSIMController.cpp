@@ -677,12 +677,33 @@ json build_reschedule_diff(const json& before, const json& after, const json& fa
         }
     }
 
+    auto recovery_text = [](const json& dep) {
+        std::ostringstream oss;
+        for (const auto& key : {"orchestration_trigger", "recovery_strategy", "decision_trigger"}) {
+            if (dep.contains(key) && dep[key].is_string()) oss << dep[key].get<std::string>() << " ";
+        }
+        if (dep.contains("decision_process") && dep["decision_process"].is_object()) {
+            for (const auto& key : {"recovery_algorithm", "recovery_reason", "detail", "algorithm"}) {
+                if (dep["decision_process"].contains(key) && dep["decision_process"][key].is_string()) {
+                    oss << dep["decision_process"][key].get<std::string>() << " ";
+                }
+            }
+        }
+        return oss.str();
+    };
+    const std::string after_recovery = normalize_token(recovery_text(after));
+    const bool full_redeploy_strategy =
+        after_recovery.find("full-redeploy") != std::string::npos ||
+        after_recovery.find("multi-node") != std::string::npos ||
+        after_recovery.find("overall") != std::string::npos;
+
     std::string scope = "none";
-    if (total_count > 0 && moved_count == total_count) scope = "overall";
+    if (full_redeploy_strategy || (total_count > 0 && moved_count == total_count)) scope = "overall";
     else if (moved_count > 0 || !removed_nodes.empty() || !added_nodes.empty()) scope = "partial";
 
     return {
         {"scope", scope},
+        {"strategy_hint", recovery_text(after)},
         {"nf_total", total_count},
         {"nf_moved", moved_count},
         {"nf_moves", moves},
@@ -773,6 +794,89 @@ bool wait_for_log(const std::string& container, const std::string& logfile, cons
             return true;
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    return false;
+}
+
+bool wait_for_amf_ngap_probe(const std::string& amf_container, int timeout_sec, std::string* detail = nullptr) {
+    if (amf_container.empty()) return false;
+    const std::string probe =
+        "if command -v ss >/dev/null 2>&1; then "
+        "  ss -H -l -n -A sctp 2>/dev/null | grep -Eq '(^|[[:space:]:])38412([[:space:]]|$)' && exit 0; "
+        "  ss -H -l -n 2>/dev/null | grep -Eq '(^|[[:space:]:])38412([[:space:]]|$)' && exit 0; "
+        "fi; "
+        "if command -v netstat >/dev/null 2>&1; then "
+        "  netstat -an 2>/dev/null | grep -E '38412' | grep -Eiq 'listen|sctp|0\\.0\\.0\\.0|::|172\\.' && exit 0; "
+        "fi; "
+        "grep -Eiq 'ngap|38412|SCTP' /tmp/open5gs/open5gs-amfd.log 2>/dev/null && exit 0; "
+        "exit 1";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
+    std::string last;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (run_ok("docker exec " + shell_quote(amf_container) + " sh -lc " + shell_quote(probe), &last)) {
+            if (detail) *detail = trim_copy(last);
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    if (detail) {
+        const auto res = run_cmd(
+            "docker exec " + shell_quote(amf_container) + " sh -lc " +
+            shell_quote("tail -n 40 /tmp/open5gs/open5gs-amfd.log 2>/dev/null || true")
+        );
+        *detail = res.output;
+    }
+    return false;
+}
+
+bool start_gnb_and_wait_ng_setup(
+    const std::shared_ptr<ValidationJob>& job,
+    const std::string& phase_tag,
+    const std::string& gnb_container,
+    const std::string& gnb_bin,
+    const std::string& config_path,
+    int attempts,
+    int wait_each_sec,
+    std::string* last_log = nullptr
+) {
+    const int safe_attempts = std::max(1, attempts);
+    auto read_gnb_tail = [&]() {
+        const auto res = run_cmd(
+            "docker exec " + shell_quote(gnb_container) + " sh -lc " +
+            shell_quote("tail -n 80 /tmp/gnb.log 2>/dev/null || true")
+        );
+        return res.output;
+    };
+    for (int attempt = 1; attempt <= safe_attempts; ++attempt) {
+        throw_if_stopped(job);
+        run_ok(
+            "docker exec " + shell_quote(gnb_container) + " sh -lc " +
+            shell_quote("pkill -f " + shell_quote(gnb_bin) + " >/dev/null 2>&1 || true; rm -f /tmp/gnb.log")
+        );
+        run_ok(
+            "docker exec -d " + shell_quote(gnb_container) + " sh -lc " +
+            shell_quote(shell_quote(gnb_bin) + " -c " + shell_quote(config_path) + " > /tmp/gnb.log 2>&1")
+        );
+        if (wait_for_log(gnb_container, "/tmp/gnb.log", "NG Setup procedure is successful|NG setup successful|NG Setup Response", wait_each_sec)) {
+            if (last_log) *last_log = read_gnb_tail();
+            return true;
+        }
+        const std::string tail = read_gnb_tail();
+        if (last_log) *last_log = tail;
+        const bool retryable =
+            tail.find("Connection refused") != std::string::npos ||
+            tail.find("SCTP could not connect") != std::string::npos ||
+            tail.find("Trying to establish SCTP connection") != std::string::npos ||
+            tail.find("timeout") != std::string::npos ||
+            tail.find("Timeout") != std::string::npos;
+        append_log(
+            job,
+            phase_tag + ": gNB NG Setup 第 " + std::to_string(attempt) + "/" + std::to_string(safe_attempts) +
+            " 次未完成" + (retryable ? "，等待 AMF SCTP 就绪后重试" : "，继续重试")
+        );
+        if (attempt < safe_attempts) {
+            std::this_thread::sleep_for(std::chrono::seconds(retryable ? 5 : 3));
+        }
     }
     return false;
 }
@@ -1104,9 +1208,15 @@ json run_single_ue_smoke_phase(
     write_file(dir / "ue1.yaml", ue_yaml.str());
 
     set_job_status(job, "running", pct(3), phase_tag + ": gNB NG Setup");
-    run_ok("docker exec -d " + shell_quote(gnb_container) + " sh -lc " + shell_quote(shell_quote(gnb_bin) + " -c /config/gnb.yaml > /tmp/gnb.log 2>&1"));
-    if (!wait_for_log(gnb_container, "/tmp/gnb.log", "NG Setup procedure is successful|NG setup successful|NG Setup Response", 75)) {
-        throw std::runtime_error(phase_tag + " gNB NG Setup failed: " + tail_file(gnb_container, "/tmp/gnb.log", 80));
+    std::string amf_probe_detail;
+    if (wait_for_amf_ngap_probe(amf_container, 45, &amf_probe_detail)) {
+        append_log(job, phase_tag + ": AMF NGAP/SCTP 就绪，开始 gNB 接入");
+    } else {
+        append_log(job, phase_tag + ": AMF NGAP/SCTP 探测未确认，进入 gNB 重试等待");
+    }
+    std::string gnb_log;
+    if (!start_gnb_and_wait_ng_setup(job, phase_tag, gnb_container, gnb_bin, "/config/gnb.yaml", 6, 25, &gnb_log)) {
+        throw std::runtime_error(phase_tag + " gNB NG Setup failed after retries: " + gnb_log);
     }
 
     set_job_status(job, "running", pct(4), phase_tag + ": UE 注册与 PDU Session");
@@ -1157,6 +1267,9 @@ void update_reschedule_report(const std::shared_ptr<ValidationJob>& job, const j
 }
 
 bool deployment_recovered_for_ueransim(const json& dep) {
+    const std::string phase = dep.value("orchestration_phase", std::string(""));
+    if (phase != "running") return false;
+    if (!dep.value("service_ready", false) || !dep.value("ready_for_ueransim", false)) return false;
     return deployment_effectively_ready(dep, collect_deployment_runtime(dep));
 }
 
@@ -1505,9 +1618,15 @@ void run_validation_job(const std::shared_ptr<ValidationJob>& job) {
 
         set_job_status(job, "running", 34, "启动 gNB 并等待 NG Setup");
         throw_if_stopped(job);
-        run_ok("docker exec -d " + shell_quote(gnb_container) + " sh -lc " + shell_quote(shell_quote(gnb_bin) + " -c /config/gnb.yaml > /tmp/gnb.log 2>&1"));
-        if (!wait_for_log(gnb_container, "/tmp/gnb.log", "NG Setup procedure is successful|NG setup successful|NG Setup Response", 75)) {
-            throw std::runtime_error("gNB NG Setup failed: " + tail_file(gnb_container, "/tmp/gnb.log", 80));
+        std::string amf_probe_detail;
+        if (wait_for_amf_ngap_probe(amf_container, 45, &amf_probe_detail)) {
+            append_log(job, "AMF NGAP/SCTP 就绪，开始 gNB 接入");
+        } else {
+            append_log(job, "AMF NGAP/SCTP 探测未确认，进入 gNB 重试等待");
+        }
+        std::string gnb_log;
+        if (!start_gnb_and_wait_ng_setup(job, "双 UE 验证", gnb_container, gnb_bin, "/config/gnb.yaml", 6, 25, &gnb_log)) {
+            throw std::runtime_error("gNB NG Setup failed after retries: " + gnb_log);
         }
         set_step(job, "gnb", "success", "gNB 与 AMF 完成 NG Setup");
 

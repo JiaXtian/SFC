@@ -534,7 +534,7 @@ export default function FaultInjectionControl() {
               </label>
 
               {injectScope === 'single' ? (
-                <label className="col-span-12">
+                <label className="col-span-12 md:col-span-8">
                   <div className="text-[10px] text-slate-400 mb-1">目标节点ID</div>
                   <input list="control-satellite-list" value={injectNodeId} onChange={(e) => setInjectNodeId(e.target.value)} placeholder="如 SAT_000_001" className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-cyan-200 font-mono" />
                 </label>
@@ -574,6 +574,13 @@ export default function FaultInjectionControl() {
                   )}
                 </>
               )}
+              <button
+                disabled={injectingFaults}
+                onClick={injectNodeFault}
+                className={`${injectScope === 'single' ? 'col-span-12 md:col-span-4' : 'col-span-12 md:col-span-3'} h-7 mt-[18px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition`}
+              >
+                {injectingFaults ? '注入中...' : '节点故障注入'}
+              </button>
             </div>
             {injectScope === 'batch' && injectMode === 'manual' && (
               <div className="max-h-16 overflow-y-auto rounded-lg border border-slate-700/65 bg-slate-900/35 p-1.5 flex flex-wrap gap-1.5">
@@ -586,15 +593,6 @@ export default function FaultInjectionControl() {
                 ))}
               </div>
             )}
-            <div className="flex justify-end pt-0.5">
-              <button
-                disabled={injectingFaults}
-                onClick={injectNodeFault}
-                className="h-7 min-w-[132px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition"
-              >
-                {injectingFaults ? '注入中...' : '节点故障注入'}
-              </button>
-            </div>
           </section>
 
           <section className="col-span-12 xl:col-span-6 p-2 rounded-xl border border-slate-700/60 bg-slate-900/25 space-y-1.5">
@@ -603,31 +601,29 @@ export default function FaultInjectionControl() {
             </div>
             <div className="text-[10px] text-slate-400">模拟链路断连或退化，验证路径重算。</div>
             <div className="grid grid-cols-12 gap-2">
-              <label className="col-span-12">
+              <label className="col-span-12 md:col-span-6">
                 <div className="text-[10px] text-slate-400 mb-1">故障类型</div>
                 <select value={linkFaultType} onChange={(e) => setLinkFaultType(e.target.value)} className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-slate-200">
                   <option value="auto">自动匹配</option>
                   {linkFaultCatalog.map((ft) => <option key={ft} value={ft}>{linkFaultTypeLabel(ft)}</option>)}
                 </select>
               </label>
-              <label className="col-span-6">
-                <div className="text-[10px] text-slate-400 mb-1">源节点ID</div>
-                <input list="control-satellite-list" value={linkFaultSource} onChange={(e) => setLinkFaultSource(e.target.value)} placeholder="如 SAT_000_001" className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-100 font-mono" />
-              </label>
-              <label className="col-span-6">
-                <div className="text-[10px] text-slate-400 mb-1">宿节点ID</div>
-                <input list="control-satellite-list" value={linkFaultTarget} onChange={(e) => setLinkFaultTarget(e.target.value)} placeholder="如 SAT_000_002" className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-100 font-mono" />
-              </label>
-              <label className="col-span-12">
+              <label className="col-span-12 md:col-span-6">
                 <div className="text-[10px] text-slate-400 mb-1">持续秒数</div>
                 <input type="number" min={1} max={3600} step={1} value={linkFaultDurationSec} onChange={(e) => setLinkFaultDurationSec(Math.max(1, Math.min(3600, Number(e.target.value) || 1)))} className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-200" />
               </label>
-            </div>
-            <div className="flex justify-end pt-0.5">
+              <label className="col-span-12 md:col-span-5">
+                <div className="text-[10px] text-slate-400 mb-1">源节点ID</div>
+                <input list="control-satellite-list" value={linkFaultSource} onChange={(e) => setLinkFaultSource(e.target.value)} placeholder="如 SAT_000_001" className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-100 font-mono" />
+              </label>
+              <label className="col-span-12 md:col-span-5">
+                <div className="text-[10px] text-slate-400 mb-1">宿节点ID</div>
+                <input list="control-satellite-list" value={linkFaultTarget} onChange={(e) => setLinkFaultTarget(e.target.value)} placeholder="如 SAT_000_002" className="w-full h-7 px-2 rounded-md bg-slate-900/60 border border-slate-700/70 text-[11px] text-amber-100 font-mono" />
+              </label>
               <button
                 disabled={injectingFaults}
                 onClick={injectLinkFault}
-                className="h-7 min-w-[132px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition"
+                className="col-span-12 md:col-span-2 h-7 mt-[18px] px-3 rounded-md text-[11px] font-semibold text-rose-200 bg-rose-500/10 border border-rose-400/35 shadow-[inset_0_0_18px_rgba(244,63,94,0.08)] hover:bg-rose-500/16 hover:border-rose-300/50 hover:text-rose-100 disabled:opacity-60 transition"
               >
                 {injectingFaults ? '注入中...' : '链路故障注入'}
               </button>
@@ -635,7 +631,7 @@ export default function FaultInjectionControl() {
           </section>
         </div>
 
-        <div className="grid grid-cols-12 gap-2 flex-[1.25] min-h-[260px]">
+        <div className="grid grid-cols-12 gap-2 flex-[1.45] min-h-[300px]">
           <section className="col-span-12 xl:col-span-6 p-2 rounded-xl border border-slate-700/60 bg-slate-900/25 h-full min-h-0 flex flex-col">
             <div className="flex items-center justify-between mb-2">
               <div className="text-[12px] text-cyan-100 font-semibold">当前卫星节点故障</div>

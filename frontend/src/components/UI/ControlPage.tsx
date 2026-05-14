@@ -77,7 +77,7 @@ export default function ControlPage() {
             <div className="h-9 px-3 rounded-xl text-[12px] text-amber-100 inline-flex items-center gap-1.5"
               style={{ background: 'rgba(120,53,15,0.35)', border: '1px solid rgba(251,191,36,0.35)' }}>
               <ShieldAlert className="w-3.5 h-3.5 text-amber-300" />
-              普通用户模式：仅可查看卫星节点控制
+              普通用户模式：仅可查看卫星详情，无操作权限
             </div>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -108,7 +108,7 @@ export default function ControlPage() {
               onClick={() => setTab('satellite')}
             >
               <Satellite className="w-3.5 h-3.5" />
-              卫星节点控制
+              {canManage ? '卫星节点控制' : '卫星详情查看'}
             </button>
           )}
           {visibleTabs.includes('strategy') && (

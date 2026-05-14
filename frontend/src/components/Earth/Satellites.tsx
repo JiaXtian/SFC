@@ -337,10 +337,11 @@ export default function Satellites() {
         <group position={vecToTuple(hovPos)}>
           <Html distanceFactor={10} zIndexRange={[200, 0]} style={{ pointerEvents: 'none' }}>
             <div style={{
-              transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 10,
-              background: 'linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.97))',
+              transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 8,
+              background: 'linear-gradient(135deg, rgba(15,23,42,0.34), rgba(30,41,59,0.26))',
               border: '1px solid rgba(0,255,136,0.4)', fontSize: 11, whiteSpace: 'nowrap',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: '"IBM Plex Mono", monospace',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.45)', fontFamily: '"IBM Plex Mono", monospace',
+              backdropFilter: 'blur(6px)',
             }}>
               <div style={{ color: '#00ff88', fontWeight: 700, marginBottom: 5 }}>{hov.id}</div>
               <div style={{ color: '#cbd5e1', fontSize: 10 }}>

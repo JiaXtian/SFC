@@ -306,58 +306,60 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
 
   return (
     <div className="relative h-full grid grid-cols-12 gap-3 overflow-hidden">
-      <div className="col-span-12 xl:col-span-3 h-full overflow-y-auto pr-1 space-y-2.5">
-        <ConstellationControlPanel
-          readonly={!canOperate}
-          onUnauthorized={() => openSystemPopup('无权限操作', '普通用户不允许生成或导入星座。', 'warning')}
-        />
-        <div
-          className="rounded-2xl p-3"
-          style={{
-            background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
-            border: '1px solid rgba(112,168,208,0.28)',
-            backdropFilter: 'blur(14px)',
-          }}
-        >
-          <div className="text-[12px] uppercase tracking-wide text-cyan-100 font-semibold inline-flex items-center gap-1.5">
-            <ListChecks className="w-3.5 h-3.5 text-cyan-300" />
-            系统资源采样配置
-          </div>
-          <div className="mt-1 text-[10px] text-slate-400">控制 CPU/内存/磁盘与核心网业务负载采样周期（10~120秒）。</div>
-          <div className="mt-2 flex items-end gap-2">
-            <label className="flex-1">
-              <div className="text-[10px] text-slate-400 mb-1">采样间隔（秒）</div>
-              <input
-                type="number"
-                min={10}
-                max={120}
-                step={1}
-                value={samplingSec}
-                onChange={(e) => setSamplingSec(Math.max(10, Math.min(120, Number(e.target.value) || 15)))}
-                className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
-              />
-            </label>
-            <button
-              onClick={saveSamplingConfig}
-              disabled={samplingSaving}
-              className="h-8 px-2.5 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/15 border border-cyan-500/35 disabled:opacity-60"
-            >
-              {samplingSaving ? '保存中...' : '保存'}
-            </button>
-            <button
-              onClick={() => refreshSamplingConfig(false)}
-              disabled={samplingRefreshing}
-              className="h-8 px-2 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70 disabled:opacity-60"
-              title="刷新采样配置"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${samplingRefreshing ? 'animate-spin' : ''}`} />
-            </button>
+      {canOperate && (
+        <div className="col-span-12 xl:col-span-3 h-full overflow-y-auto pr-1 space-y-2.5">
+          <ConstellationControlPanel
+            readonly={false}
+            onUnauthorized={() => openSystemPopup('无权限操作', '普通用户不允许生成或导入星座。', 'warning')}
+          />
+          <div
+            className="rounded-2xl p-3"
+            style={{
+              background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
+              border: '1px solid rgba(112,168,208,0.28)',
+              backdropFilter: 'blur(14px)',
+            }}
+          >
+            <div className="text-[12px] uppercase tracking-wide text-cyan-100 font-semibold inline-flex items-center gap-1.5">
+              <ListChecks className="w-3.5 h-3.5 text-cyan-300" />
+              系统资源采样配置
+            </div>
+            <div className="mt-1 text-[10px] text-slate-400">控制 CPU/内存/磁盘与核心网业务负载采样周期（10~120秒）。</div>
+            <div className="mt-2 flex items-end gap-2">
+              <label className="flex-1">
+                <div className="text-[10px] text-slate-400 mb-1">采样间隔（秒）</div>
+                <input
+                  type="number"
+                  min={10}
+                  max={120}
+                  step={1}
+                  value={samplingSec}
+                  onChange={(e) => setSamplingSec(Math.max(10, Math.min(120, Number(e.target.value) || 15)))}
+                  className="w-full h-8 px-2.5 rounded-lg bg-slate-900/60 border border-slate-700/70 text-[12px] text-cyan-100"
+                />
+              </label>
+              <button
+                onClick={saveSamplingConfig}
+                disabled={samplingSaving}
+                className="h-8 px-2.5 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/15 border border-cyan-500/35 disabled:opacity-60"
+              >
+                {samplingSaving ? '保存中...' : '保存'}
+              </button>
+              <button
+                onClick={() => refreshSamplingConfig(false)}
+                disabled={samplingRefreshing}
+                className="h-8 px-2 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70 disabled:opacity-60"
+                title="刷新采样配置"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${samplingRefreshing ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <div
-        className="col-span-12 xl:col-span-9 h-full rounded-2xl p-3.5 flex flex-col overflow-hidden"
+        className={`${canOperate ? 'col-span-12 xl:col-span-9' : 'col-span-12'} h-full rounded-2xl p-3.5 flex flex-col overflow-hidden`}
         style={{
           background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
           border: '1px solid rgba(112,168,208,0.28)',
@@ -374,8 +376,12 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
             总计 {total} 颗
             <span className="text-slate-500">|</span>
             当前页 {rows.length} 颗
-            <span className="text-slate-500">|</span>
-            已选 {selectedIds.size} 颗
+            {canOperate && (
+              <>
+                <span className="text-slate-500">|</span>
+                已选 {selectedIds.size} 颗
+              </>
+            )}
           </div>
         </div>
 
@@ -398,28 +404,32 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               刷新
             </button>
-            <button
-              onClick={toggleSelectAllSatellites}
-              disabled={selectingAll || total === 0}
-              className="h-8 px-2.5 rounded-lg text-[12px] text-sky-100 bg-sky-500/15 border border-sky-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
-            >
-              <CheckSquare className="w-3.5 h-3.5" />
-              {selectingAll ? '全选中...' : allAcrossSelected ? '取消全选' : '全选所有卫星'}
-            </button>
-            <button
-              onClick={deleteBatchSatellites}
-              disabled={batchDeleting}
-              className="h-8 px-2.5 rounded-lg text-[12px] text-rose-100 bg-rose-500/15 border border-rose-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              {batchDeleting ? '批量删除中...' : '批量删除'}
-            </button>
-            <button
-              onClick={() => setSelectedIds(new Set())}
-              className="h-8 px-2.5 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70"
-            >
-              清空选择
-            </button>
+            {canOperate && (
+              <>
+                <button
+                  onClick={toggleSelectAllSatellites}
+                  disabled={selectingAll || total === 0}
+                  className="h-8 px-2.5 rounded-lg text-[12px] text-sky-100 bg-sky-500/15 border border-sky-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
+                >
+                  <CheckSquare className="w-3.5 h-3.5" />
+                  {selectingAll ? '全选中...' : allAcrossSelected ? '取消全选' : '全选所有卫星'}
+                </button>
+                <button
+                  onClick={deleteBatchSatellites}
+                  disabled={batchDeleting}
+                  className="h-8 px-2.5 rounded-lg text-[12px] text-rose-100 bg-rose-500/15 border border-rose-500/35 inline-flex items-center gap-1.5 disabled:opacity-60"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  {batchDeleting ? '批量删除中...' : '批量删除'}
+                </button>
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  className="h-8 px-2.5 rounded-lg text-[12px] text-slate-200 bg-slate-800/60 border border-slate-700/70"
+                >
+                  清空选择
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -427,29 +437,31 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-300">
               <tr>
-                <th className="px-2 py-2 text-left w-[34px]">
-                  <button
-                    className="inline-flex items-center justify-center h-5 w-5 rounded text-cyan-200 hover:bg-cyan-500/15"
-                    onClick={() => {
-                      if (allOnPageSelected) {
-                        setSelectedIds((prev) => {
-                          const next = new Set(prev)
-                          rows.forEach((sat: any) => next.delete(String(sat.id)))
-                          return next
-                        })
-                      } else {
-                        setSelectedIds((prev) => {
-                          const next = new Set(prev)
-                          rows.forEach((sat: any) => next.add(String(sat.id)))
-                          return next
-                        })
-                      }
-                    }}
-                    title={allOnPageSelected ? '取消全选本页' : '全选本页'}
-                  >
-                    <CheckSquare className="w-3.5 h-3.5" />
-                  </button>
-                </th>
+                {canOperate && (
+                  <th className="px-2 py-2 text-left w-[34px]">
+                    <button
+                      className="inline-flex items-center justify-center h-5 w-5 rounded text-cyan-200 hover:bg-cyan-500/15"
+                      onClick={() => {
+                        if (allOnPageSelected) {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev)
+                            rows.forEach((sat: any) => next.delete(String(sat.id)))
+                            return next
+                          })
+                        } else {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev)
+                            rows.forEach((sat: any) => next.add(String(sat.id)))
+                            return next
+                          })
+                        }
+                      }}
+                      title={allOnPageSelected ? '取消全选本页' : '全选本页'}
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                    </button>
+                  </th>
+                )}
                 <th className="px-2 py-2 text-left">
                   <button className="inline-flex items-center gap-1 hover:text-cyan-200" onClick={() => toggleSort('id')}>
                     卫星ID<ArrowDownUp className="w-3 h-3" />
@@ -515,20 +527,22 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                 const coreBusinessLoad = Number.isFinite(coreBusinessLoadRaw) ? coreBusinessLoadRaw : 0
                 return (
                   <tr key={sat.id} className="border-t border-slate-800/80 text-slate-200">
-                    <td className="px-2 py-2">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          setSelectedIds((prev) => {
-                            const next = new Set(prev)
-                            if (e.target.checked) next.add(satId)
-                            else next.delete(satId)
-                            return next
-                          })
-                        }}
-                      />
-                    </td>
+                    {canOperate && (
+                      <td className="px-2 py-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev)
+                              if (e.target.checked) next.add(satId)
+                              else next.delete(satId)
+                              return next
+                            })
+                          }}
+                        />
+                      </td>
+                    )}
                     <td className="px-2 py-2 font-mono">{sat.id}</td>
                     <td className="px-2 py-2">
                       <span className={`px-1.5 py-0.5 rounded ${isDown ? 'text-rose-200 bg-rose-500/20' : 'text-emerald-200 bg-emerald-500/20'}`}>
@@ -600,14 +614,16 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
                         >
                           <Info className="w-3.5 h-3.5" />
                         </button>
-                        <button
-                          onClick={() => deleteSatellite(String(sat.id))}
-                          className="h-7 w-7 rounded-md inline-flex items-center justify-center text-rose-200 hover:bg-rose-400/15"
-                          title="删除卫星"
-                          disabled={deletingId === sat.id}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {canOperate && (
+                          <button
+                            onClick={() => deleteSatellite(String(sat.id))}
+                            className="h-7 w-7 rounded-md inline-flex items-center justify-center text-rose-200 hover:bg-rose-400/15"
+                            title="删除卫星"
+                            disabled={deletingId === sat.id}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -615,7 +631,7 @@ export default function SatelliteNodeControlPage({ role }: { role: Role }) {
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={15} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
+                  <td colSpan={canOperate ? 15 : 14} className="px-3 py-8 text-center text-slate-500">当前筛选条件下无卫星节点</td>
                 </tr>
               )}
             </tbody>

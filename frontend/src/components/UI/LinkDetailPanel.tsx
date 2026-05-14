@@ -51,21 +51,30 @@ export default function LinkDetailPanel() {
 
   const statusLabel = status === 'down' ? '断开' : status === 'congested' ? '拥塞' : '正常'
   const statusColor = status === 'down' ? '#ef4444' : status === 'congested' ? '#f59e0b' : '#22c55e'
+  const isFault = status === 'down'
 
   return (
     <div
-      className="absolute right-[348px] top-[420px] z-10 rounded-2xl overflow-hidden shadow-2xl"
+      className="absolute top-[calc(68vh+2px)] z-10 rounded-lg overflow-hidden shadow-2xl"
       style={{
-        width: 260,
-        background: 'linear-gradient(180deg, rgba(20,20,35,0.97), rgba(10,10,20,0.97))',
-        border: '1px solid rgba(34,211,238,0.35)',
-        backdropFilter: 'blur(20px)'
+        right: 'calc(clamp(320px, 22vw, 470px) + 12px)',
+        width: 300,
+        maxHeight: 'calc(32vh - 18px)',
+        background: isFault
+          ? 'linear-gradient(180deg, rgba(35,14,20,0.9), rgba(15,8,13,0.86))'
+          : 'linear-gradient(180deg, rgba(13,22,30,0.88), rgba(7,13,20,0.84))',
+        border: isFault ? '1px solid rgba(248,113,113,0.48)' : '1px solid rgba(34,211,238,0.35)',
+        backdropFilter: 'blur(18px)',
+        boxShadow: isFault
+          ? '0 18px 42px rgba(0,0,0,0.48), inset 0 1px 0 rgba(248,113,113,0.08)'
+          : '0 18px 42px rgba(0,0,0,0.48), inset 0 1px 0 rgba(125,211,252,0.08)',
       }}
     >
       <div
-        className="relative px-4 py-3"
+        className="relative px-3 py-2.5"
         style={{
           background: 'linear-gradient(135deg, rgba(34,211,238,0.15), rgba(14,116,144,0.12))',
+          ...(isFault ? { background: 'linear-gradient(135deg, rgba(239,68,68,0.18), rgba(153,27,27,0.16))' } : {}),
           borderBottom: '1px solid rgba(100,100,120,0.15)'
         }}
       >
@@ -76,7 +85,7 @@ export default function LinkDetailPanel() {
           <X className="w-3.5 h-3.5 text-gray-500" />
         </button>
 
-        <div className="text-xs font-bold text-cyan-300 font-mono mb-1">
+        <div className="text-[11px] font-bold text-cyan-300 font-mono mb-1 pr-5 break-all leading-4">
           {selectedLink.source} ↔ {selectedLink.target}
         </div>
 
@@ -86,9 +95,9 @@ export default function LinkDetailPanel() {
         </div>
       </div>
 
-      <div className="px-4 py-3 space-y-3">
+      <div className="px-3 py-2.5 space-y-2 overflow-y-auto" style={{ maxHeight: 'calc(32vh - 86px)', minHeight: 142 }}>
         <div>
-          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-1.5 font-semibold">
             <Network className="w-3 h-3" />链路资源
           </div>
 
@@ -109,7 +118,7 @@ export default function LinkDetailPanel() {
         </div>
 
         <div>
-          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-semibold">
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-1.5 font-semibold">
             <Activity className="w-3 h-3" />链路参数
           </div>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">

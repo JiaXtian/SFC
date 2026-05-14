@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
-  Server,
   ShieldCheck,
   Timer,
 } from 'lucide-react'
@@ -357,7 +356,6 @@ export default function MonitoringPage() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  const metrics = simulation.metrics
   const orch = simulation.orchestration
   const history = simulation.history.slice(-120)
   const orchestrationTraces = useMemo(
@@ -365,14 +363,6 @@ export default function MonitoringPage() {
     [decisionTraces]
   )
 
-  const latencySeries = useMemo(
-    () => history.map((h) => Number(h.metrics?.avg_latency_ms ?? 0)),
-    [history]
-  )
-  const bwSeries = useMemo(
-    () => history.map((h) => Number(h.metrics?.avg_bandwidth_utilization ?? 0) * 100),
-    [history]
-  )
   const faultInfraSeries = useMemo(
     () => history.map((h) => Number(h.metrics?.down_nodes ?? 0)),
     [history]
@@ -607,8 +597,11 @@ export default function MonitoringPage() {
     <div
       className="fixed inset-0 z-[120] overflow-y-auto overflow-x-hidden"
       style={{
-        background:
-          'radial-gradient(1200px 520px at 50% 110%, rgba(24,72,115,0.24) 0%, rgba(3,8,16,0.86) 42%, #010206 76%, #000000 100%)',
+        backgroundImage:
+          'linear-gradient(180deg, rgba(1,6,14,0.72), rgba(1,6,14,0.9)), url("/assets/background/background.png")',
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+        backgroundAttachment: 'fixed',
         fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif',
       }}
     >
@@ -639,49 +632,6 @@ export default function MonitoringPage() {
         </div>
 
         <div className="grid grid-cols-12 gap-2.5">
-          <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
-            style={{
-              background: 'rgba(8,16,28,0.66)',
-              border: '1px solid rgba(90,125,153,0.28)',
-              backdropFilter: 'blur(10px)',
-              fontFamily: '"Space Grotesk", "Noto Sans SC", sans-serif',
-            }}>
-            <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">
-              <Server className="w-4 h-4 text-cyan-300" />拓扑资源健康
-            </div>
-            <div className="text-[10px] text-slate-500 mb-2">
-              说明：用于观察全局节点/链路可用性及资源趋势，判断是否接近容量瓶颈。
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] mb-2">
-              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">节点活跃</div>
-                <div className="text-cyan-200 font-semibold">{metrics?.active_nodes ?? 0}/{metrics?.total_nodes ?? 0}</div>
-              </div>
-              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">链路活跃</div>
-                <div className="text-cyan-200 font-semibold">{metrics?.active_links ?? 0}/{metrics?.total_links ?? 0}</div>
-              </div>
-              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">拥塞链路</div>
-                <div className="text-amber-200 font-semibold">{metrics?.congested_links ?? 0}</div>
-              </div>
-              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">平均时延</div>
-                <div className="text-emerald-200 font-semibold">{(metrics?.avg_latency_ms ?? 0).toFixed(2)} ms</div>
-              </div>
-              <div className="rounded-lg px-2 py-1.5 bg-slate-900/45 border border-slate-700/60">
-                <div className="text-slate-400">平均带宽利用率</div>
-                <div className="text-violet-200 font-semibold">{((metrics?.avg_bandwidth_utilization ?? 0) * 100).toFixed(1)}%</div>
-              </div>
-            </div>
-            <div className="mt-2">
-              <AxisLineChart values={latencySeries} color="#38bdf8" title="链路平均时延趋势" yLabel="毫秒(ms)" xLabel="采样时序" />
-            </div>
-            <div className="mt-1">
-              <AxisLineChart values={bwSeries} color="#34d399" title="平均带宽利用率趋势" yLabel="利用率(%)" xLabel="采样时序" />
-            </div>
-          </div>
-
           <div className="col-span-12 lg:col-span-6 rounded-2xl p-3"
             style={{ background: 'rgba(8,16,28,0.66)', border: '1px solid rgba(90,125,153,0.28)', backdropFilter: 'blur(10px)' }}>
             <div className="text-[12px] uppercase tracking-wide text-slate-300 font-semibold mb-2 flex items-center gap-1.5">

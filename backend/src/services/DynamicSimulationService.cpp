@@ -321,6 +321,7 @@ TopologySnapshot DynamicSimulationService::step_once() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot = advance_one_tick_locked(sampling_interval_sec_ * simulation_speed_, true);
+        last_wall_tick_ = std::chrono::steady_clock::now();
         listeners = snapshot_listeners_;
     }
     for (const auto& kv : listeners) {
@@ -328,6 +329,31 @@ TopologySnapshot DynamicSimulationService::step_once() {
             kv.second(snapshot);
         } catch (const std::exception& e) {
             spdlog::warn("Snapshot listener {} failed: {}", kv.first, e.what());
+        }
+    }
+    return snapshot;
+}
+
+TopologySnapshot DynamicSimulationService::refresh_current_snapshot(bool emit_events) {
+    TopologySnapshot snapshot;
+    std::unordered_map<std::string, SnapshotListener> listeners;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        double sim_dt_sec = 0.0;
+        if (running_.load()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_wall_tick_).count();
+            sim_dt_sec = std::max(0.0, static_cast<double>(elapsed_ms) / 1000.0) * simulation_speed_;
+            last_wall_tick_ = now;
+        }
+        snapshot = advance_one_tick_locked(sim_dt_sec, emit_events, false, false);
+        if (emit_events) listeners = snapshot_listeners_;
+    }
+    for (const auto& kv : listeners) {
+        try {
+            kv.second(snapshot);
+        } catch (const std::exception& e) {
+            spdlog::warn("Snapshot listener {} failed after refresh: {}", kv.first, e.what());
         }
     }
     return snapshot;
@@ -954,8 +980,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const double d_km = link_distance_km(src->coordinates, dst->coordinates);
         link.latency_ms = (d_km / kLightSpeedKmPerSec) * 1000.0;
 
-        const double alt_km = std::max(src->orbital_params.altitude_km, dst->orbital_params.altitude_km);
-        const bool los_ok = d_km <= max_isl_range_km(alt_km);
+        const double src_r_km = coord_norm_km(src->coordinates);
+        const double dst_r_km = coord_norm_km(dst->coordinates);
+        const double range_km = practical_isl_range_km(src_r_km, dst_r_km, link.link_type);
+        const bool los_ok = has_line_of_sight(src->coordinates, dst->coordinates) && d_km <= range_km;
         const bool endpoint_down = src->status == "down" || dst->status == "down";
         (void)allow_random_fault_generation;
         if (endpoint_down) {
@@ -991,7 +1019,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
             link.status = "active";
         }
 
-        const double dist_factor = clamp(1.0 - d_km / std::max(1.0, max_isl_range_km(alt_km)), 0.0, 1.0);
+        const double dist_factor = clamp(1.0 - d_km / std::max(1.0, range_km), 0.0, 1.0);
         link.reliability = clamp(0.989 + 0.010 * dist_factor, 0.97, 0.9998);
     }
 
@@ -1136,7 +1164,11 @@ void DynamicSimulationService::run_loop() {
         std::unordered_map<std::string, SnapshotListener> listeners;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            snapshot = advance_one_tick_locked(sampling_interval_sec_ * simulation_speed_, true);
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_wall_tick_).count();
+            const double sim_dt_sec = std::max(0.0, static_cast<double>(elapsed_ms) / 1000.0) * simulation_speed_;
+            last_wall_tick_ = now;
+            snapshot = advance_one_tick_locked(sim_dt_sec, true);
             listeners = snapshot_listeners_;
         }
         for (const auto& kv : listeners) {
@@ -1173,10 +1205,48 @@ double DynamicSimulationService::link_distance_km(const Coordinates& a, const Co
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+double DynamicSimulationService::coord_norm_km(const Coordinates& c) {
+    return std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+}
+
+bool DynamicSimulationService::has_line_of_sight(const Coordinates& a, const Coordinates& b) {
+    const double ab_x = b.x - a.x;
+    const double ab_y = b.y - a.y;
+    const double ab_z = b.z - a.z;
+    const double ab2 = ab_x * ab_x + ab_y * ab_y + ab_z * ab_z;
+    if (ab2 < 1e-9) return false;
+    const double t_raw = -(a.x * ab_x + a.y * ab_y + a.z * ab_z) / ab2;
+    const double t = clamp(t_raw, 0.0, 1.0);
+    const double px = a.x + ab_x * t;
+    const double py = a.y + ab_y * t;
+    const double pz = a.z + ab_z * t;
+    const double min_r = std::sqrt(px * px + py * py + pz * pz);
+    return min_r > kEarthRadiusKm + 55.0;
+}
+
 double DynamicSimulationService::max_isl_range_km(double altitude_km) {
     const double h = std::max(50.0, altitude_km);
     const double horizon = std::sqrt(2.0 * kEarthRadiusKm * h + h * h);
-    return 1.9 * horizon;
+    return 0.98 * horizon;
+}
+
+double DynamicSimulationService::practical_isl_range_km(
+    double r1_km,
+    double r2_km,
+    const std::string& link_type
+) {
+    const double h1 = std::sqrt(std::max(0.0, r1_km * r1_km - kEarthRadiusKm * kEarthRadiusKm));
+    const double h2 = std::sqrt(std::max(0.0, r2_km * r2_km - kEarthRadiusKm * kEarthRadiusKm));
+    const double physics_limit = (h1 + h2) * 0.98;
+    const double h_min = std::min(
+        std::max(0.0, r1_km - kEarthRadiusKm),
+        std::max(0.0, r2_km - kEarthRadiusKm)
+    );
+    const bool inter_orbit = link_type == "inter_orbit";
+    const double engineering_limit = inter_orbit
+        ? std::min(3200.0, 1500.0 + 1.0 * h_min)
+        : std::min(3800.0, 1800.0 + 1.2 * h_min);
+    return std::min(physics_limit, engineering_limit);
 }
 
 double DynamicSimulationService::clamp(double v, double lo, double hi) {

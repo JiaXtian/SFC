@@ -228,11 +228,11 @@ export default function DeploymentPanel() {
                       {dep.per_vnf?.map((v, i) => {
                         const nfType = String((v as any).nf_type ?? (v as any).core_nf ?? v.vnf ?? '-').toUpperCase()
                         return (
-                        <div key={i} className="grid grid-cols-[minmax(56px,0.7fr)_minmax(0,1.15fr)_auto] items-center gap-2 px-2 py-1.5 rounded-lg text-[10px]"
+                        <div key={i} className="grid grid-cols-[minmax(48px,0.55fr)_minmax(0,1fr)_minmax(92px,auto)] items-start gap-2 px-2 py-1.5 rounded-lg text-[10px]"
                           style={{ background: 'rgba(15,23,42,0.28)', border: '1px solid rgba(100,130,155,0.2)' }}>
                           <div className="font-semibold text-cyan-200 truncate">{nfType}</div>
-                          <div className="font-mono text-green-400 truncate">→ {v.node}</div>
-                          <div className="flex gap-2 text-[9px] text-gray-400 justify-end whitespace-nowrap">
+                          <div className="font-mono text-green-400 min-w-0 break-all leading-4" title={String(v.node ?? '')}>→ {v.node}</div>
+                          <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px] text-gray-400 justify-end leading-4">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>

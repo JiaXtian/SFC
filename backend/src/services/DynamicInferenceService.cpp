@@ -671,6 +671,14 @@ std::optional<DeploymentCandidate> DynamicInferenceService::try_partial_node_red
         if (detail) *detail = "no_affected_core_nf";
         return std::nullopt;
     }
+    if (down_nodes.size() >= 2) {
+        if (detail) {
+            *detail = "escalate_full_redeploy_multi_node_fault:down_nodes=" + std::to_string(down_nodes.size()) +
+                ",affected_nodes=" + std::to_string(affected_nodes.size()) +
+                ",affected_nfs=" + std::to_string(affected.size());
+        }
+        return std::nullopt;
+    }
     if (affected_nodes.size() >= 2) {
         if (detail) {
             *detail = "escalate_full_redeploy_multi_node_fault:affected_nodes=" + std::to_string(affected_nodes.size()) +
@@ -1155,6 +1163,17 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                 {"status", "failed"},
                 {"detail", partial_detail}
             };
+            recovery_strategy = "full_redeploy_after_path_reroute_unavailable";
+            candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
+            if (!decision_process.is_object()) {
+                decision_process = nlohmann::json::object();
+            }
+            decision_process["recovery_algorithm"] = "model_full_redeploy";
+            decision_process["recovery_reason"] = "dependency_path_reroute_unavailable";
+            decision_process["detail"] = partial_detail;
+            if (candidates.empty()) {
+                decision_process["status"] = "failed";
+            }
         }
     } else if (trigger == "deployment_node_down") {
         auto partial = try_partial_node_redeploy(session, planning_topology, down_nodes, &partial_detail);
@@ -1348,8 +1367,6 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         const bool changed = (!session.has_last_candidate) || (sig != session.last_candidate_signature);
         const std::string status = changed ? (session.has_last_candidate ? "redeployed" : "deployed") : "stable";
 
-        const bool nodes_changed = (!session.has_last_candidate) ||
-            (session.last_candidate.deployed_nodes != chosen.deployed_nodes);
         if (changed) {
             const std::string previous_allocation_id = session.active_resource_deployment_id;
             const bool had_previous_allocation = !previous_allocation_id.empty();
@@ -1426,7 +1443,7 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             auto updated_topology = res_mgr_->export_current_topology();
             topo_mgr_->save_current_topology(updated_topology);
 
-            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator && nodes_changed) {
+            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator) {
                 const std::string orchestration_trigger = recovery_strategy.empty() ? trigger : recovery_strategy;
                 g_deployment_orchestrator->enqueue_deployment(
                     session.orchestration_deployment_id,
@@ -1581,7 +1598,7 @@ nlohmann::json DynamicInferenceService::start_session(
     sessions_[session.session_id] = session;
     sessions_[session.session_id].orchestration_deployment_id = initial_deployment_id;
 
-    TopologySnapshot snapshot = dynamic_sim_ ? dynamic_sim_->get_latest_snapshot() : TopologySnapshot{};
+    TopologySnapshot snapshot = dynamic_sim_ ? dynamic_sim_->refresh_current_snapshot(false) : TopologySnapshot{};
     if (snapshot.topology.nodes.empty()) {
         snapshot = build_snapshot_fallback(res_mgr_->export_current_topology());
     }
@@ -1889,7 +1906,7 @@ nlohmann::json DynamicInferenceService::force_recompute(const std::string& sessi
     if (it == sessions_.end()) {
         return {{"ok", false}, {"reason", "session_not_found"}, {"session_id", session_id}};
     }
-    TopologySnapshot snapshot = dynamic_sim_ ? dynamic_sim_->get_latest_snapshot() : TopologySnapshot{};
+    TopologySnapshot snapshot = dynamic_sim_ ? dynamic_sim_->refresh_current_snapshot(false) : TopologySnapshot{};
     if (snapshot.topology.nodes.empty()) {
         snapshot = build_snapshot_fallback(res_mgr_->export_current_topology());
     }
