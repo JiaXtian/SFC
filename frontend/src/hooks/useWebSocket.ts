@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore } from '@/store/useStore'
-import { resolveSfcLabel } from '@/utils/sfcLabel'
+import { clearSfcIdentityRegistry, rememberSfcIdentity, resolveSfcLabel } from '@/utils/sfcLabel'
 import { getAuthToken } from '@/auth/session'
 import { apiClient } from '@/api/client'
 
@@ -93,8 +93,15 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
             if (type === 'deployment_update') {
               const deploymentId = String(data.deployment_id ?? '')
               const sfcLabel = sfcLabelByDeploymentId(deploymentId)
+              const eventLabel = String(data.core_network_label || data.sfc_name || sfcLabel)
               const status = String(data.status ?? 'completed')
               if (status === 'rolled_back') {
+                rememberSfcIdentity({
+                  deploymentId,
+                  requestId: String(data.request_id ?? ''),
+                  coreNetworkId: String(data.core_network_id ?? ''),
+                  label: eventLabel,
+                })
                 removeDeployment(deploymentId)
                 const removedIds = Array.isArray(data?.removed_deployment_ids) ? data.removed_deployment_ids : []
                 removedIds.forEach((id: any) => {
@@ -108,6 +115,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                       apiClient.getTopology(),
                     ])
                     if (Array.isArray(depList)) {
+                      if (depList.length === 0) clearSfcIdentityRegistry()
                       setDeployments(depList as any)
                     }
                     if (applyTopologySnapshotEnabled) {
@@ -126,16 +134,22 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                   }
                 })()
               } else {
-                updateDeployment(deploymentId, {
+                const patch: any = {
                   status: status as any,
                   progress: Number(data.progress ?? 100),
-                })
+                }
+                if (data.core_network_id) patch.core_network_id = String(data.core_network_id)
+                if (data.core_network_label) {
+                  patch.core_network_label = String(data.core_network_label)
+                  patch.sfc_name = String(data.core_network_label)
+                }
+                updateDeployment(deploymentId, patch)
               }
               pushRuntimeEvent({
                 type: 'deployment_update',
                 sim_time: data.sim_time,
-                message: `部署进度 ${sfcLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
-                raw: { ...data, sfc_name: sfcLabel },
+                message: `部署进度 ${eventLabel}: ${data.status ?? 'completed'} (${Number(data.progress ?? 100)}%)`,
+                raw: { ...data, sfc_name: eventLabel },
               })
               return
             }
@@ -242,11 +256,11 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               if (trigger === 'source_node_down' || trigger === 'destination_node_down') {
                 if (now - last > 12000) {
                   endpointFaultPopupCooldownRef.current[key] = now
-                  const label = trigger === 'source_node_down' ? '源节点' : '宿节点'
+                  const label = '核心网相关节点'
                   pushRuntimeEvent({
                     type: 'reschedule_trigger',
                     sim_time: data.sim_time,
-                    message: `${sfcLabel} 触发重调度：${label}故障，系统正在重算可用路径`,
+                    message: `${sfcLabel} 触发重调度：${label}故障，系统正在重算核心网部署`,
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,
@@ -263,10 +277,13 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               ) {
                 if (now - last > 8000) {
                   endpointFaultPopupCooldownRef.current[key] = now
+                  const isNodeRedeploy = trigger === 'deployment_node_down'
                   pushRuntimeEvent({
-                    type: 'path_recompute_trigger',
+                    type: isNodeRedeploy ? 'reschedule_trigger' : 'path_recompute_trigger',
                     sim_time: data.sim_time,
-                    message: `${sfcLabel} 触发路径重算：${trigger}`,
+                    message: isNodeRedeploy
+                      ? `${sfcLabel} 承载网元卫星故障，系统正在执行分级重调度`
+                      : `${sfcLabel} 触发核心网依赖路径重算：${trigger}`,
                     raw: {
                       session_id: trace?.session_id,
                       request_id: trace?.request_id,
@@ -291,7 +308,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
-                message: `SFC编排更新 ${sfcLabel}: ${data.status}`,
+                message: `核心网编排更新 ${sfcLabel}: ${data.status}`,
                 raw: { ...data, sfc_name: sfcLabel },
               })
               return

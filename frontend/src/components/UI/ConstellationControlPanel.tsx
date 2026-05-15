@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { RefreshCw, Upload, Orbit, Activity, Cpu, Database } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { RefreshCw, Upload, Orbit, Activity, Cpu, Database, FileText, X } from 'lucide-react'
 import { useStore } from '@/store/useStore'
 import { apiClient } from '@/api/client'
 import {
@@ -55,6 +56,7 @@ export default function ConstellationControlPanel({
   const [type, setType] = useState<ConstellationType>('starlink_v1')
   const [total, setTotal] = useState(72)
   const [planes, setPlanes] = useState(6)
+  const [showImportExample, setShowImportExample] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
 
   const {
@@ -93,13 +95,28 @@ export default function ConstellationControlPanel({
     } catch {}
   }
 
-  const syncAndStartDynamic = async (sats: any[], links: any[], templateId: string) => {
+  const syncAndStartDynamic = async (sats: any[], links: any[], templateId: string, metadataOverride: any = {}) => {
     const topologyData: any = prepareTopologyForBackend(sats, links, type, planes)
+    const importedNumPlanes = Number(metadataOverride?.num_planes)
+    const importedAltitude = Number(metadataOverride?.altitude_km)
+    const importedInclination = Number(metadataOverride?.inclination_deg)
     topologyData.force_replace = true
     topologyData.metadata = {
       ...(topologyData.metadata ?? {}),
+      ...(metadataOverride ?? {}),
+      total_sats: sats.length,
+      num_planes: Number.isFinite(importedNumPlanes) && importedNumPlanes > 0
+        ? importedNumPlanes
+        : topologyData.metadata?.num_planes,
+      altitude_km: Number.isFinite(importedAltitude) && importedAltitude > 0
+        ? importedAltitude
+        : topologyData.metadata?.altitude_km,
+      inclination_deg: Number.isFinite(importedInclination) && importedInclination > 0
+        ? importedInclination
+        : topologyData.metadata?.inclination_deg,
       constellation_template: templateId,
       force_replace: true,
+      timestamp: metadataOverride?.timestamp ?? topologyData.metadata?.timestamp ?? new Date().toISOString(),
     }
     await apiClient.generateTopology(topologyData)
     const topo = await apiClient.getTopology()
@@ -173,7 +190,7 @@ export default function ConstellationControlPanel({
       setAutoDynamics({ enabled: true, playing: true, elapsed_sec: 0 })
       bumpTopologyVersion()
       setBackendTopologySynced(false)
-      await syncAndStartDynamic(parsed.satellites as any[], parsed.links as any[], 'imported_topology')
+      await syncAndStartDynamic(parsed.satellites as any[], parsed.links as any[], 'imported_topology', raw?.metadata ?? {})
       setBackendTopologySynced(true)
       addToast(`导入成功：${parsed.satellites.length} 节点 / ${parsed.links.length} 链路`, 'success')
     } catch (e: any) {
@@ -256,14 +273,24 @@ export default function ConstellationControlPanel({
           {loading ? '处理中...' : '生成模拟星座'}
         </button>
 
-        <button
-          onClick={() => importInputRef.current?.click()}
-          disabled={loading}
-          className="w-full h-9 rounded-lg text-[13px] text-slate-200 flex items-center justify-center gap-2 disabled:opacity-60 bg-slate-900/50 border border-slate-700/70"
-        >
-          <Upload className="w-3.5 h-3.5" />
-          导入第三方拓扑
-        </button>
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={loading}
+            className="h-9 rounded-lg text-[13px] text-slate-200 flex items-center justify-center gap-2 disabled:opacity-60 bg-slate-900/50 border border-slate-700/70"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            导入第三方拓扑
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowImportExample(true)}
+            className="h-9 px-3 rounded-lg text-[12px] text-cyan-100 bg-cyan-500/10 border border-cyan-500/35 inline-flex items-center justify-center gap-1.5"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            示例
+          </button>
+        </div>
         <input
           ref={importInputRef}
           type="file"
@@ -272,6 +299,150 @@ export default function ConstellationControlPanel({
           onChange={(e) => onImportThirdParty(e.target.files?.[0])}
         />
       </div>
+      {showImportExample && createPortal((
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/65 px-4">
+          <div className="w-[680px] max-w-full max-h-[82vh] overflow-hidden rounded-2xl border border-cyan-400/25 bg-slate-950 shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
+              <div>
+                <div className="text-[13px] font-semibold text-cyan-100">第三方拓扑 JSON 示例字段</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">后端 Topology 结构：metadata + topology.nodes/topology.links</div>
+              </div>
+              <button onClick={() => setShowImportExample(false)} className="h-8 w-8 rounded-lg inline-flex items-center justify-center text-slate-300 hover:bg-white/10">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="max-h-[65vh] overflow-auto p-4 text-[11px] leading-relaxed text-slate-200 bg-slate-950/95">
+{`{
+  "metadata": {
+    "total_sats": 2,
+    "num_planes": 1,
+    "altitude_km": 550,
+    "inclination_deg": 53,
+    "topology_version": 1,
+    "sampling_interval_sec": 15,
+    "sim_time": "T+0000s",
+    "timestamp": "2026-05-13T00:00:00.000Z"
+  },
+  "topology": {
+    "nodes": [
+      {
+        "id": "SAT_000_000",
+        "type": "satellite",
+        "orbital_params": {
+          "propagation_model": "SGP4",
+          "plane": 0,
+          "position_in_plane": 0,
+          "raan": 0,
+          "true_anomaly": 0,
+          "altitude_km": 550,
+          "inclination_deg": 53,
+          "inclination": 53,
+          "eccentricity": 0.0001,
+          "argument_of_perigee_deg": 0,
+          "mean_anomaly_deg": 0,
+          "mean_motion_rev_per_day": 15.055,
+          "bstar": 0.00005,
+          "epoch_jd": 2461163.5,
+          "epoch_iso": "2026-05-13T00:00:00.000Z",
+          "propagation_minutes": 0,
+          "semi_major_axis_km": 6921,
+          "period_minutes": 95.648,
+          "tle_line1": "1 00001U 26001A   26133.00000000  .00000000  00000-0  50000-4 0  9990",
+          "tle_line2": "2 00001  53.0000   0.0000 0001000   0.0000   0.0000 15.05500000000000"
+        },
+        "coordinates": { "x": 6921, "y": 0, "z": 0, "lat": 0, "lon": 0 },
+        "cpu_total": 24,
+        "cpu_available": 24,
+        "mem_total": 64,
+        "mem_available": 64,
+        "disk_total": 320,
+        "disk_available": 320,
+        "core_network_load": 0.18,
+        "core_business_load": {
+          "signaling_load": 0.19,
+          "session_load": 0.2,
+          "user_plane_load": 0.21,
+          "mobility_load": 0.18,
+          "policy_load": 0.17,
+          "auth_load": 0.18,
+          "load_index": 0.188333
+        },
+        "node_reliability": 0.995,
+        "status": "active",
+        "fault_tag": "",
+        "vnfs": [],
+        "core_nfs": []
+      },
+      {
+        "id": "SAT_000_001",
+        "type": "satellite",
+        "orbital_params": {
+          "propagation_model": "SGP4",
+          "plane": 0,
+          "position_in_plane": 1,
+          "raan": 0,
+          "true_anomaly": 180,
+          "altitude_km": 550,
+          "inclination_deg": 53,
+          "inclination": 53,
+          "eccentricity": 0.0001,
+          "argument_of_perigee_deg": 0,
+          "mean_anomaly_deg": 180,
+          "mean_motion_rev_per_day": 15.055,
+          "bstar": 0.00005,
+          "epoch_jd": 2461163.5,
+          "epoch_iso": "2026-05-13T00:00:00.000Z",
+          "propagation_minutes": 0,
+          "semi_major_axis_km": 6921,
+          "period_minutes": 95.648,
+          "tle_line1": "1 00002U 26001A   26133.00000000  .00000000  00000-0  50000-4 0  9990",
+          "tle_line2": "2 00002  53.0000   0.0000 0001000   0.0000 180.0000 15.05500000000000"
+        },
+        "coordinates": { "x": -6921, "y": 0, "z": 0, "lat": 0, "lon": 180 },
+        "cpu_total": 24,
+        "cpu_available": 24,
+        "mem_total": 64,
+        "mem_available": 64,
+        "disk_total": 320,
+        "disk_available": 320,
+        "core_network_load": 0.18,
+        "core_business_load": {
+          "signaling_load": 0.19,
+          "session_load": 0.2,
+          "user_plane_load": 0.21,
+          "mobility_load": 0.18,
+          "policy_load": 0.17,
+          "auth_load": 0.18,
+          "load_index": 0.188333
+        },
+        "node_reliability": 0.995,
+        "status": "active",
+        "fault_tag": "",
+        "vnfs": [],
+        "core_nfs": []
+      }
+    ],
+    "links": [
+      {
+        "source": "SAT_000_000",
+        "target": "SAT_000_001",
+        "link_type": "intra_orbit",
+        "status": "active",
+        "fault_tag": "",
+        "link_status": 1,
+        "latency_ms": 2.4,
+        "reliability": 0.999,
+        "link_reliability": 0.999,
+        "bandwidth_gbps": 20,
+        "bandwidth_available_gbps": 18
+      }
+    ]
+  }
+}`}
+            </pre>
+          </div>
+        </div>
+      ), document.body)}
     </div>
   )
 }

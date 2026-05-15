@@ -1,4 +1,5 @@
 #include "services/DynamicSimulationService.h"
+#include "utils/Sgp4Propagator.h"
 #include "services/AuthGlobals.h"
 #include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
@@ -15,12 +16,10 @@ namespace sfc {
 namespace {
 
 constexpr double kMinSamplingIntervalSec = 10.0;
-constexpr double kMaxSamplingIntervalSec = 30.0;
+constexpr double kMaxSamplingIntervalSec = 120.0;
 
 constexpr double kEarthRadiusKm = 6371.0;
-constexpr double kEarthMuKm3PerSec2 = 398600.4418;
 constexpr double kLightSpeedKmPerSec = 299792.458;
-constexpr double kPi = 3.14159265358979323846;
 
 const std::vector<std::string> kNodeFaultTypes = {
     "power_failure",
@@ -56,6 +55,61 @@ std::pair<std::string, std::string> split_link_key(const std::string& key) {
     const size_t pos = key.find('|');
     if (pos == std::string::npos) return {"", ""};
     return {key.substr(0, pos), key.substr(pos + 1)};
+}
+
+double json_number_or(const nlohmann::json& req, const char* key, double fallback) {
+    if (!req.contains(key) || !req[key].is_number()) return fallback;
+    return req[key].get<double>();
+}
+
+int ttl_ticks_from_seconds(double seconds, double sampling_interval_sec) {
+    return static_cast<int>(std::max(
+        1.0,
+        std::ceil(std::max(0.0, seconds) / std::max(1.0, sampling_interval_sec))
+    ));
+}
+
+double remaining_fault_seconds(
+    const DynamicSimulationService::FaultState& state,
+    std::chrono::steady_clock::time_point now
+) {
+    if (state.expires_at == std::chrono::steady_clock::time_point{}) {
+        return std::max(0.0, state.duration_sec);
+    }
+    const auto remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(state.expires_at - now).count();
+    return std::max(0.0, static_cast<double>(remaining_ms) / 1000.0);
+}
+
+double parse_fault_duration_seconds(
+    const nlohmann::json& req,
+    double sampling_interval_sec,
+    int fallback_ttl_ticks
+) {
+    double seconds = 0.0;
+    if (req.contains("ttl_seconds")) {
+        seconds = json_number_or(req, "ttl_seconds", 0.0);
+    } else if (req.contains("duration_sec")) {
+        seconds = json_number_or(req, "duration_sec", 0.0);
+    } else if (req.contains("duration_seconds")) {
+        seconds = json_number_or(req, "duration_seconds", 0.0);
+    } else {
+        seconds = static_cast<double>(fallback_ttl_ticks) * std::max(1.0, sampling_interval_sec);
+    }
+    return std::max(1.0, std::min(3600.0, seconds));
+}
+
+double parse_fault_extension_seconds(
+    const nlohmann::json& req,
+    double sampling_interval_sec
+) {
+    double seconds = 0.0;
+    if (req.contains("delta_seconds")) {
+        seconds = json_number_or(req, "delta_seconds", 0.0);
+    } else if (req.contains("delta_ttl_ticks")) {
+        seconds = json_number_or(req, "delta_ttl_ticks", 0.0) * std::max(1.0, sampling_interval_sec);
+    }
+    return std::max(1.0, std::min(3600.0, seconds));
 }
 
 std::vector<std::pair<std::string, std::string>> parse_target_links(const nlohmann::json& req) {
@@ -199,7 +253,7 @@ bool DynamicSimulationService::start(
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     sampling_interval_sec_ = clamp(sampling_interval_sec, kMinSamplingIntervalSec, kMaxSamplingIntervalSec);
-    simulation_speed_ = clamp(simulation_speed, 0.1, 20.0);
+    simulation_speed_ = clamp(simulation_speed, 0.1, 8.0);
     (void)enable_faults;
     (void)node_fault_prob_per_tick;
     enable_faults_ = false;
@@ -267,6 +321,7 @@ TopologySnapshot DynamicSimulationService::step_once() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot = advance_one_tick_locked(sampling_interval_sec_ * simulation_speed_, true);
+        last_wall_tick_ = std::chrono::steady_clock::now();
         listeners = snapshot_listeners_;
     }
     for (const auto& kv : listeners) {
@@ -279,6 +334,31 @@ TopologySnapshot DynamicSimulationService::step_once() {
     return snapshot;
 }
 
+TopologySnapshot DynamicSimulationService::refresh_current_snapshot(bool emit_events) {
+    TopologySnapshot snapshot;
+    std::unordered_map<std::string, SnapshotListener> listeners;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        double sim_dt_sec = 0.0;
+        if (running_.load()) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_wall_tick_).count();
+            sim_dt_sec = std::max(0.0, static_cast<double>(elapsed_ms) / 1000.0) * simulation_speed_;
+            last_wall_tick_ = now;
+        }
+        snapshot = advance_one_tick_locked(sim_dt_sec, emit_events, false, false);
+        if (emit_events) listeners = snapshot_listeners_;
+    }
+    for (const auto& kv : listeners) {
+        try {
+            kv.second(snapshot);
+        } catch (const std::exception& e) {
+            spdlog::warn("Snapshot listener {} failed after refresh: {}", kv.first, e.what());
+        }
+    }
+    return snapshot;
+}
+
 TopologySnapshot DynamicSimulationService::get_latest_snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return latest_snapshot_;
@@ -286,27 +366,32 @@ TopologySnapshot DynamicSimulationService::get_latest_snapshot() const {
 
 nlohmann::json DynamicSimulationService::status_json() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
     nlohmann::json node_fault_details = nlohmann::json::array();
     for (const auto& kv : node_fault_states_) {
+        const double remaining_sec = remaining_fault_seconds(kv.second, now);
         node_fault_details.push_back({
             {"node_id", kv.first},
             {"fault_type", kv.second.fault_type},
             {"injection_mode", kv.second.injection_mode},
-            {"ttl_ticks", kv.second.ttl_ticks},
-            {"remaining_sec", kv.second.ttl_ticks * sampling_interval_sec_}
+            {"ttl_ticks", ttl_ticks_from_seconds(remaining_sec, sampling_interval_sec_)},
+            {"duration_sec", kv.second.duration_sec},
+            {"remaining_sec", remaining_sec}
         });
     }
     nlohmann::json link_fault_details = nlohmann::json::array();
     for (const auto& kv : link_fault_states_) {
         const auto [source, target] = split_link_key(kv.first);
+        const double remaining_sec = remaining_fault_seconds(kv.second, now);
         link_fault_details.push_back({
             {"link_key", kv.first},
             {"source", source},
             {"target", target},
             {"fault_type", kv.second.fault_type},
             {"injection_mode", kv.second.injection_mode},
-            {"ttl_ticks", kv.second.ttl_ticks},
-            {"remaining_sec", kv.second.ttl_ticks * sampling_interval_sec_}
+            {"ttl_ticks", ttl_ticks_from_seconds(remaining_sec, sampling_interval_sec_)},
+            {"duration_sec", kv.second.duration_sec},
+            {"remaining_sec", remaining_sec}
         });
     }
     return {
@@ -360,7 +445,10 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
         const std::string action = request.value("action", std::string("inject"));
         const bool overwrite_existing = request.value("overwrite_existing", true);
         const int requested_ttl = static_cast<int>(request.value("ttl_ticks", 4));
-        const int ttl_ticks = static_cast<int>(clamp(static_cast<double>(requested_ttl), 1.0, 120.0));
+        const double duration_sec = parse_fault_duration_seconds(request, sampling_interval_sec_, requested_ttl);
+        const int ttl_ticks = ttl_ticks_from_seconds(duration_sec, sampling_interval_sec_);
+        const auto now = std::chrono::steady_clock::now();
+        const auto expires_at = now + std::chrono::milliseconds(static_cast<int64_t>(duration_sec * 1000.0));
         const std::string sim_time = current_sim_time_iso_locked();
 
         if (entity_type == "node") {
@@ -402,7 +490,13 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                             ? pick_node_fault_type()
                             : requested_type;
 
-                    node_fault_states_[node_id] = FaultState{ttl_ticks, fault_type, "manual"};
+                    node_fault_states_[node_id] = FaultState{
+                        ttl_ticks,
+                        fault_type,
+                        "manual",
+                        duration_sec,
+                        expires_at
+                    };
                     injected_count += 1;
                     events.push_back({
                         {"type", "fault_event"},
@@ -412,6 +506,8 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         {"reason", fault_type},
                         {"injection_mode", "manual"},
                         {"ttl_ticks", ttl_ticks},
+                        {"duration_sec", duration_sec},
+                        {"remaining_sec", duration_sec},
                         {"sim_time", sim_time},
                         {"topology_version", topology_version_ + 1}
                     });
@@ -452,17 +548,22 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         invalid_targets.push_back(node_id);
                         continue;
                     }
-                    int delta_ttl_ticks = static_cast<int>(request.value("delta_ttl_ticks", 0));
-                    if (delta_ttl_ticks <= 0 && request.contains("delta_seconds")) {
-                        const double delta_seconds = std::max(0.0, request.value("delta_seconds", 0.0));
-                        delta_ttl_ticks = static_cast<int>(std::ceil(delta_seconds / std::max(1.0, sampling_interval_sec_)));
+                    const double delta_seconds = parse_fault_extension_seconds(request, sampling_interval_sec_);
+                    if (it->second.expires_at == std::chrono::steady_clock::time_point{}) {
+                        const double fallback_remaining =
+                            std::max(1.0, static_cast<double>(it->second.ttl_ticks) * std::max(1.0, sampling_interval_sec_));
+                        it->second.expires_at = now + std::chrono::milliseconds(static_cast<int64_t>(fallback_remaining * 1000.0));
+                        it->second.duration_sec = fallback_remaining;
                     }
-                    delta_ttl_ticks = static_cast<int>(clamp(static_cast<double>(delta_ttl_ticks), 1.0, 3600.0));
-                    it->second.ttl_ticks = static_cast<int>(clamp(
-                        static_cast<double>(it->second.ttl_ticks + delta_ttl_ticks),
-                        1.0,
-                        7200.0
-                    ));
+                    const auto base = it->second.expires_at > now ? it->second.expires_at : now;
+                    it->second.expires_at =
+                        base + std::chrono::milliseconds(static_cast<int64_t>(delta_seconds * 1000.0));
+                    it->second.duration_sec = std::max(
+                        it->second.duration_sec,
+                        remaining_fault_seconds(it->second, now)
+                    ) + delta_seconds;
+                    const double remaining_sec = remaining_fault_seconds(it->second, now);
+                    it->second.ttl_ticks = ttl_ticks_from_seconds(remaining_sec, sampling_interval_sec_);
                     extended_count += 1;
                     events.push_back({
                         {"type", "fault_update_event"},
@@ -471,8 +572,10 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         {"fault_type", it->second.fault_type},
                         {"reason", "ttl_extended"},
                         {"injection_mode", "manual_extend"},
-                        {"delta_ttl_ticks", delta_ttl_ticks},
+                        {"delta_seconds", delta_seconds},
                         {"ttl_ticks", it->second.ttl_ticks},
+                        {"duration_sec", it->second.duration_sec},
+                        {"remaining_sec", remaining_sec},
                         {"sim_time", sim_time},
                         {"topology_version", topology_version_ + 1}
                     });
@@ -523,7 +626,13 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         kLinkFaultTypeSet.find(requested_type) == kLinkFaultTypeSet.end())
                             ? pick_link_fault_type()
                             : requested_type;
-                    link_fault_states_[link_key] = FaultState{ttl_ticks, fault_type, "manual"};
+                    link_fault_states_[link_key] = FaultState{
+                        ttl_ticks,
+                        fault_type,
+                        "manual",
+                        duration_sec,
+                        expires_at
+                    };
                     injected_count += 1;
                     events.push_back({
                         {"type", "fault_event"},
@@ -535,6 +644,8 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         {"reason", fault_type},
                         {"injection_mode", "manual"},
                         {"ttl_ticks", ttl_ticks},
+                        {"duration_sec", duration_sec},
+                        {"remaining_sec", duration_sec},
                         {"sim_time", sim_time},
                         {"topology_version", topology_version_ + 1}
                     });
@@ -570,17 +681,22 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         invalid_targets.push_back(link_key);
                         continue;
                     }
-                    int delta_ttl_ticks = static_cast<int>(request.value("delta_ttl_ticks", 0));
-                    if (delta_ttl_ticks <= 0 && request.contains("delta_seconds")) {
-                        const double delta_seconds = std::max(0.0, request.value("delta_seconds", 0.0));
-                        delta_ttl_ticks = static_cast<int>(std::ceil(delta_seconds / std::max(1.0, sampling_interval_sec_)));
+                    const double delta_seconds = parse_fault_extension_seconds(request, sampling_interval_sec_);
+                    if (it->second.expires_at == std::chrono::steady_clock::time_point{}) {
+                        const double fallback_remaining =
+                            std::max(1.0, static_cast<double>(it->second.ttl_ticks) * std::max(1.0, sampling_interval_sec_));
+                        it->second.expires_at = now + std::chrono::milliseconds(static_cast<int64_t>(fallback_remaining * 1000.0));
+                        it->second.duration_sec = fallback_remaining;
                     }
-                    delta_ttl_ticks = static_cast<int>(clamp(static_cast<double>(delta_ttl_ticks), 1.0, 3600.0));
-                    it->second.ttl_ticks = static_cast<int>(clamp(
-                        static_cast<double>(it->second.ttl_ticks + delta_ttl_ticks),
-                        1.0,
-                        7200.0
-                    ));
+                    const auto base = it->second.expires_at > now ? it->second.expires_at : now;
+                    it->second.expires_at =
+                        base + std::chrono::milliseconds(static_cast<int64_t>(delta_seconds * 1000.0));
+                    it->second.duration_sec = std::max(
+                        it->second.duration_sec,
+                        remaining_fault_seconds(it->second, now)
+                    ) + delta_seconds;
+                    const double remaining_sec = remaining_fault_seconds(it->second, now);
+                    it->second.ttl_ticks = ttl_ticks_from_seconds(remaining_sec, sampling_interval_sec_);
                     extended_count += 1;
                     events.push_back({
                         {"type", "fault_update_event"},
@@ -591,8 +707,10 @@ nlohmann::json DynamicSimulationService::inject_faults(const nlohmann::json& req
                         {"fault_type", it->second.fault_type},
                         {"reason", "ttl_extended"},
                         {"injection_mode", "manual_extend"},
-                        {"delta_ttl_ticks", delta_ttl_ticks},
+                        {"delta_seconds", delta_seconds},
                         {"ttl_ticks", it->second.ttl_ticks},
+                        {"duration_sec", it->second.duration_sec},
+                        {"remaining_sec", remaining_sec},
                         {"sim_time", sim_time},
                         {"topology_version", topology_version_ + 1}
                     });
@@ -701,9 +819,8 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         runtime_snapshot = g_deployment_orchestrator->snapshot_node_runtime();
     }
 
-    const double inclination_deg = topology.metadata.inclination_deg;
     for (auto& sat : topology.nodes) {
-        update_satellite_position(sat, inclination_deg, sim_dt_sec);
+        update_satellite_position(sat, sim_dt_sec);
         // Rebuild node fault view from source-of-truth `node_fault_states_` each tick.
         // This prevents stale "down/fault_tag" residue after manual fault removal.
         sat.status = "active";
@@ -748,12 +865,23 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     }
 
     std::vector<nlohmann::json> change_events;
+    const auto wall_now = std::chrono::steady_clock::now();
+    auto fault_expired = [&](FaultState& state) {
+        if (!advance_fault_timers) return false;
+        if (state.expires_at == std::chrono::steady_clock::time_point{}) {
+            const double fallback_remaining =
+                std::max(1.0, static_cast<double>(state.ttl_ticks) * std::max(1.0, sampling_interval_sec_));
+            state.duration_sec = std::max(state.duration_sec, fallback_remaining);
+            state.expires_at =
+                wall_now + std::chrono::milliseconds(static_cast<int64_t>(fallback_remaining * 1000.0));
+        }
+        const double remaining_sec = remaining_fault_seconds(state, wall_now);
+        state.ttl_ticks = ttl_ticks_from_seconds(remaining_sec, sampling_interval_sec_);
+        return remaining_sec <= 1e-6;
+    };
 
     for (auto it = node_fault_states_.begin(); it != node_fault_states_.end();) {
-        if (advance_fault_timers) {
-            it->second.ttl_ticks -= 1;
-        }
-        if (advance_fault_timers && it->second.ttl_ticks <= 0) {
+        if (fault_expired(it->second)) {
             const std::string sat_id = it->first;
             const std::string fault_type = it->second.fault_type;
             for (auto& sat : topology.nodes) {
@@ -779,10 +907,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
     }
 
     for (auto it = link_fault_states_.begin(); it != link_fault_states_.end();) {
-        if (advance_fault_timers) {
-            it->second.ttl_ticks -= 1;
-        }
-        if (advance_fault_timers && it->second.ttl_ticks <= 0) {
+        if (fault_expired(it->second)) {
             const std::string link_key = it->first;
             const std::string fault_type = it->second.fault_type;
             const auto [source, target] = split_link_key(link_key);
@@ -855,8 +980,10 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
         const double d_km = link_distance_km(src->coordinates, dst->coordinates);
         link.latency_ms = (d_km / kLightSpeedKmPerSec) * 1000.0;
 
-        const double alt_km = std::max(src->orbital_params.altitude_km, dst->orbital_params.altitude_km);
-        const bool los_ok = d_km <= max_isl_range_km(alt_km);
+        const double src_r_km = coord_norm_km(src->coordinates);
+        const double dst_r_km = coord_norm_km(dst->coordinates);
+        const double range_km = practical_isl_range_km(src_r_km, dst_r_km, link.link_type);
+        const bool los_ok = has_line_of_sight(src->coordinates, dst->coordinates) && d_km <= range_km;
         const bool endpoint_down = src->status == "down" || dst->status == "down";
         (void)allow_random_fault_generation;
         if (endpoint_down) {
@@ -892,7 +1019,7 @@ TopologySnapshot DynamicSimulationService::advance_one_tick_locked(
             link.status = "active";
         }
 
-        const double dist_factor = clamp(1.0 - d_km / std::max(1.0, max_isl_range_km(alt_km)), 0.0, 1.0);
+        const double dist_factor = clamp(1.0 - d_km / std::max(1.0, range_km), 0.0, 1.0);
         link.reliability = clamp(0.989 + 0.010 * dist_factor, 0.97, 0.9998);
     }
 
@@ -1001,6 +1128,33 @@ void DynamicSimulationService::run_loop() {
             const int64_t slice_ms = std::min<int64_t>(200, remaining_ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(slice_ms));
             remaining_ms -= slice_ms;
+            if (!running_.load()) break;
+
+            TopologySnapshot fault_snapshot;
+            std::unordered_map<std::string, SnapshotListener> fault_listeners;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto now = std::chrono::steady_clock::now();
+                const auto has_expired = [&](const auto& states) {
+                    return std::any_of(states.begin(), states.end(), [&](const auto& kv) {
+                        const auto expires_at = kv.second.expires_at;
+                        return expires_at != std::chrono::steady_clock::time_point{} && expires_at <= now;
+                    });
+                };
+                if (has_expired(node_fault_states_) || has_expired(link_fault_states_)) {
+                    fault_snapshot = advance_one_tick_locked(0.0, true, false, true);
+                    fault_listeners = snapshot_listeners_;
+                }
+            }
+            if (!fault_snapshot.topology.nodes.empty()) {
+                for (const auto& kv : fault_listeners) {
+                    try {
+                        kv.second(fault_snapshot);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("Snapshot listener {} failed after fault expiry: {}", kv.first, e.what());
+                    }
+                }
+            }
         }
 
         if (!running_.load()) {
@@ -1010,7 +1164,11 @@ void DynamicSimulationService::run_loop() {
         std::unordered_map<std::string, SnapshotListener> listeners;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            snapshot = advance_one_tick_locked(sampling_interval_sec_ * simulation_speed_, true);
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_wall_tick_).count();
+            const double sim_dt_sec = std::max(0.0, static_cast<double>(elapsed_ms) / 1000.0) * simulation_speed_;
+            last_wall_tick_ = now;
+            snapshot = advance_one_tick_locked(sim_dt_sec, true);
             listeners = snapshot_listeners_;
         }
         for (const auto& kv : listeners) {
@@ -1036,36 +1194,8 @@ std::string DynamicSimulationService::iso_time_from_system_clock(const std::chro
     return oss.str();
 }
 
-void DynamicSimulationService::update_satellite_position(
-    Satellite& sat,
-    double inclination_deg,
-    double dt_sec
-) {
-    const double altitude = std::max(100.0, sat.orbital_params.altitude_km);
-    const double orbit_radius = kEarthRadiusKm + altitude;
-    const double period_sec = 2.0 * kPi * std::sqrt(
-        (orbit_radius * orbit_radius * orbit_radius) / kEarthMuKm3PerSec2
-    );
-    const double delta_deg = 360.0 * dt_sec / std::max(1.0, period_sec);
-    sat.orbital_params.true_anomaly = std::fmod(sat.orbital_params.true_anomaly + delta_deg, 360.0);
-    if (sat.orbital_params.true_anomaly < 0.0) {
-        sat.orbital_params.true_anomaly += 360.0;
-    }
-    sat.orbital_params.inclination_deg = inclination_deg;
-
-    const double raan_rad = sat.orbital_params.raan * kPi / 180.0;
-    const double inc_rad = inclination_deg * kPi / 180.0;
-    const double ta_rad = sat.orbital_params.true_anomaly * kPi / 180.0;
-
-    const double x_orb = orbit_radius * std::cos(ta_rad);
-    const double y_orb = orbit_radius * std::sin(ta_rad);
-
-    sat.coordinates.x = std::cos(raan_rad) * x_orb - std::sin(raan_rad) * std::cos(inc_rad) * y_orb;
-    sat.coordinates.y = std::sin(raan_rad) * x_orb + std::cos(raan_rad) * std::cos(inc_rad) * y_orb;
-    sat.coordinates.z = std::sin(inc_rad) * y_orb;
-
-    sat.coordinates.lat = std::asin(clamp(sat.coordinates.z / orbit_radius, -1.0, 1.0)) * 180.0 / kPi;
-    sat.coordinates.lon = std::atan2(sat.coordinates.y, sat.coordinates.x) * 180.0 / kPi;
+void DynamicSimulationService::update_satellite_position(Satellite& sat, double dt_sec) {
+    sgp4::propagate_inplace(sat, std::max(0.0, dt_sec) / 60.0);
 }
 
 double DynamicSimulationService::link_distance_km(const Coordinates& a, const Coordinates& b) {
@@ -1075,10 +1205,48 @@ double DynamicSimulationService::link_distance_km(const Coordinates& a, const Co
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+double DynamicSimulationService::coord_norm_km(const Coordinates& c) {
+    return std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+}
+
+bool DynamicSimulationService::has_line_of_sight(const Coordinates& a, const Coordinates& b) {
+    const double ab_x = b.x - a.x;
+    const double ab_y = b.y - a.y;
+    const double ab_z = b.z - a.z;
+    const double ab2 = ab_x * ab_x + ab_y * ab_y + ab_z * ab_z;
+    if (ab2 < 1e-9) return false;
+    const double t_raw = -(a.x * ab_x + a.y * ab_y + a.z * ab_z) / ab2;
+    const double t = clamp(t_raw, 0.0, 1.0);
+    const double px = a.x + ab_x * t;
+    const double py = a.y + ab_y * t;
+    const double pz = a.z + ab_z * t;
+    const double min_r = std::sqrt(px * px + py * py + pz * pz);
+    return min_r > kEarthRadiusKm + 55.0;
+}
+
 double DynamicSimulationService::max_isl_range_km(double altitude_km) {
     const double h = std::max(50.0, altitude_km);
     const double horizon = std::sqrt(2.0 * kEarthRadiusKm * h + h * h);
-    return 1.9 * horizon;
+    return 0.98 * horizon;
+}
+
+double DynamicSimulationService::practical_isl_range_km(
+    double r1_km,
+    double r2_km,
+    const std::string& link_type
+) {
+    const double h1 = std::sqrt(std::max(0.0, r1_km * r1_km - kEarthRadiusKm * kEarthRadiusKm));
+    const double h2 = std::sqrt(std::max(0.0, r2_km * r2_km - kEarthRadiusKm * kEarthRadiusKm));
+    const double physics_limit = (h1 + h2) * 0.98;
+    const double h_min = std::min(
+        std::max(0.0, r1_km - kEarthRadiusKm),
+        std::max(0.0, r2_km - kEarthRadiusKm)
+    );
+    const bool inter_orbit = link_type == "inter_orbit";
+    const double engineering_limit = inter_orbit
+        ? std::min(3200.0, 1500.0 + 1.0 * h_min)
+        : std::min(3800.0, 1800.0 + 1.2 * h_min);
+    return std::min(physics_limit, engineering_limit);
 }
 
 double DynamicSimulationService::clamp(double v, double lo, double hi) {

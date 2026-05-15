@@ -9,31 +9,36 @@ SKIP_BUILD=0
 SKIP_INFER=0
 
 DEVICE="auto"
-EPOCHS=160
-MAX_REQUESTS_PER_FILE=24
-MAX_DATA_FILES=24
-WARMUP_EPOCHS=24
-TIME_BUDGET_HOURS=6.0
-MIN_EPOCHS=80
-HEURISTIC_TOP_M=110
+EPOCHS=80
+MAX_REQUESTS_PER_FILE=20
+MAX_DATA_FILES=20
+WARMUP_EPOCHS=5
+TIME_BUDGET_HOURS=0.0
+MIN_EPOCHS=0
+HEURISTIC_TOP_M=64
+EVAL_DATA_FILES=8
+EVAL_REQUESTS_PER_FILE=8
 
 REL_CURR_START_EPOCH=1
-REL_CURR_END_EPOCH=120
+REL_CURR_END_EPOCH=32
 REL_CURR_MIN_SCALE=0.72
 REL_CURR_STRICT_RATIO=0.78
 REL_CURR_STRICT_RAMP_RATIO=0.24
-SHARED_RESOURCES_PROB_MIN=0.18
-SHARED_RESOURCES_PROB_MAX=0.42
+SHARED_RESOURCES_PROB_MIN=0.60
+SHARED_RESOURCES_PROB_MAX=0.90
+CONTINUOUS_GROUP_LEN_MIN=5
+CONTINUOUS_GROUP_LEN_MAX=12
+EVAL_CONTINUOUS_GROUP_LEN=12
 
-TRAIN_TOPOLOGIES=18
-TRAIN_GROUPS_PER_TOPOLOGY=7
-TRAIN_REQUESTS_PER_GROUP=800
-TRAIN_SCALES="2500,6000"
-SCALE_DISTRIBUTION="6,5"
-VAL_TOPOLOGIES=10
-VAL_REQUESTS_PER_TOPOLOGY=500
+TRAIN_TOPOLOGIES=20
+TRAIN_GROUPS_PER_TOPOLOGY=4
+TRAIN_REQUESTS_PER_GROUP=128
+TRAIN_SCALES="300,800,2500,5000,6000"
+SCALE_DISTRIBUTION="3,3,8,3,3"
+VAL_TOPOLOGIES=6
+VAL_REQUESTS_PER_TOPOLOGY=48
 
-TOP_M=120
+TOP_M=80
 ONNXRUNTIME_DIR_ARG=""
 TEST_TOPOLOGY_DIR="data/val/topologies"
 TEST_REQUESTS_DIR="data/val/requests"
@@ -43,6 +48,7 @@ TEST_REQUESTS_FILE="data/val/requests/requests_000.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MODEL_EXPORT_DIR="${PROJECT_ROOT}/models/exported"
+MODEL_CHECKPOINT_DIR="${PROJECT_ROOT}/models/checkpoints"
 RESULT_JSON="${SCRIPT_DIR}/results/results.json"
 
 usage() {
@@ -65,6 +71,8 @@ usage() {
   --time-budget-hours N
   --min-epochs N
   --heuristic-top-m N
+  --eval-data-files N
+  --eval-requests-per-file N
   --train-topologies N
   --train-groups-per-topology N
   --train-requests-per-group N
@@ -79,6 +87,9 @@ usage() {
   --rel-curr-strict-ramp-ratio N
   --shared-resources-prob-min N
   --shared-resources-prob-max N
+  --continuous-group-len-min N
+  --continuous-group-len-max N
+  --eval-continuous-group-len N
 
 推理参数:
   --top-m N
@@ -103,6 +114,19 @@ jobs_for_make() {
 
 require_file() { [[ -f "$1" ]] || die "缺少文件: $1"; }
 require_dir_nonempty() { [[ -d "$1" ]] || die "缺少目录: $1"; find "$1" -type f | head -n 1 >/dev/null || die "目录为空: $1"; }
+resolve_checkpoint() {
+  local best_path="$1"
+  local final_path="$2"
+  if [[ -f "$best_path" ]]; then
+    printf '%s\n' "$best_path"
+    return 0
+  fi
+  if [[ -f "$final_path" ]]; then
+    printf '%s\n' "$final_path"
+    return 0
+  fi
+  die "缺少模型文件: $best_path 或 $final_path"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -119,6 +143,8 @@ while [[ $# -gt 0 ]]; do
     --time-budget-hours) TIME_BUDGET_HOURS="$2"; shift 2 ;;
     --min-epochs) MIN_EPOCHS="$2"; shift 2 ;;
     --heuristic-top-m) HEURISTIC_TOP_M="$2"; shift 2 ;;
+    --eval-data-files) EVAL_DATA_FILES="$2"; shift 2 ;;
+    --eval-requests-per-file) EVAL_REQUESTS_PER_FILE="$2"; shift 2 ;;
     --rel-curr-start-epoch) REL_CURR_START_EPOCH="$2"; shift 2 ;;
     --rel-curr-end-epoch) REL_CURR_END_EPOCH="$2"; shift 2 ;;
     --rel-curr-min-scale) REL_CURR_MIN_SCALE="$2"; shift 2 ;;
@@ -126,6 +152,9 @@ while [[ $# -gt 0 ]]; do
     --rel-curr-strict-ramp-ratio) REL_CURR_STRICT_RAMP_RATIO="$2"; shift 2 ;;
     --shared-resources-prob-min) SHARED_RESOURCES_PROB_MIN="$2"; shift 2 ;;
     --shared-resources-prob-max) SHARED_RESOURCES_PROB_MAX="$2"; shift 2 ;;
+    --continuous-group-len-min) CONTINUOUS_GROUP_LEN_MIN="$2"; shift 2 ;;
+    --continuous-group-len-max) CONTINUOUS_GROUP_LEN_MAX="$2"; shift 2 ;;
+    --eval-continuous-group-len) EVAL_CONTINUOUS_GROUP_LEN="$2"; shift 2 ;;
     --train-topologies) TRAIN_TOPOLOGIES="$2"; shift 2 ;;
     --train-groups-per-topology) TRAIN_GROUPS_PER_TOPOLOGY="$2"; shift 2 ;;
     --train-requests-per-group) TRAIN_REQUESTS_PER_GROUP="$2"; shift 2 ;;
@@ -152,7 +181,7 @@ fi
 have_cmd python || die "未找到 python 命令"
 
 echo "=========================================="
-echo "  SFC智能编排系统 训练与推理流程"
+echo "  open5gs星座核心网部署 训练与推理流程"
 echo "=========================================="
 echo "项目目录: $SCRIPT_DIR"
 echo "跳过阶段: data=$SKIP_DATA train=$SKIP_TRAIN export=$SKIP_EXPORT build=$SKIP_BUILD infer=$SKIP_INFER"
@@ -188,23 +217,33 @@ if [[ "$SKIP_TRAIN" -eq 0 ]]; then
     --time_budget_hours "$TIME_BUDGET_HOURS" \
     --min_epochs "$MIN_EPOCHS" \
     --heuristic_top_m "$HEURISTIC_TOP_M" \
+    --eval_data_files "$EVAL_DATA_FILES" \
+    --eval_requests_per_file "$EVAL_REQUESTS_PER_FILE" \
     --rel_curr_start_epoch "$REL_CURR_START_EPOCH" \
     --rel_curr_end_epoch "$REL_CURR_END_EPOCH" \
     --rel_curr_min_scale "$REL_CURR_MIN_SCALE" \
     --rel_curr_strict_ratio "$REL_CURR_STRICT_RATIO" \
     --rel_curr_strict_ramp_ratio "$REL_CURR_STRICT_RAMP_RATIO" \
     --shared_resources_prob_min "$SHARED_RESOURCES_PROB_MIN" \
-    --shared_resources_prob_max "$SHARED_RESOURCES_PROB_MAX"
+    --shared_resources_prob_max "$SHARED_RESOURCES_PROB_MAX" \
+    --continuous_group_len_min "$CONTINUOUS_GROUP_LEN_MIN" \
+    --continuous_group_len_max "$CONTINUOUS_GROUP_LEN_MAX" \
+    --eval_continuous_group_len "$EVAL_CONTINUOUS_GROUP_LEN"
 else
   log "2/5" "跳过训练"
 fi
 
 # 3) Export ONNX
 if [[ "$SKIP_EXPORT" -eq 0 ]]; then
-  require_file "models/checkpoints/gnn_best.pth"
-  require_file "models/checkpoints/model_best.pth"
+  GNN_CHECKPOINT="$(resolve_checkpoint "${MODEL_CHECKPOINT_DIR}/gnn_best.pth" "${MODEL_CHECKPOINT_DIR}/gnn_final.pth")"
+  ACTOR_CHECKPOINT="$(resolve_checkpoint "${MODEL_CHECKPOINT_DIR}/model_best.pth" "${MODEL_CHECKPOINT_DIR}/model_final.pth")"
   log "3/5" "导出ONNX模型..."
-  python -m training.models.model_export --output-dir "${MODEL_EXPORT_DIR}"
+  echo "  GNN checkpoint: ${GNN_CHECKPOINT}"
+  echo "  Actor checkpoint: ${ACTOR_CHECKPOINT}"
+  python -m training.models.model_export \
+    --gnn-checkpoint "${GNN_CHECKPOINT}" \
+    --actor-checkpoint "${ACTOR_CHECKPOINT}" \
+    --output-dir "${MODEL_EXPORT_DIR}"
 else
   log "3/5" "跳过ONNX导出"
 fi

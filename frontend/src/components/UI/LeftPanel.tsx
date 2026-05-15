@@ -33,23 +33,41 @@ const TYPES_ZH: Record<ConstellationType, string> = {
 
 const IMPORT_EXAMPLE_JSON = `{
   "metadata": {
-    "total_sats": 4,
-    "num_planes": 2,
+    "total_sats": 2,
+    "num_planes": 1,
     "altitude_km": 550,
     "inclination_deg": 53,
-    "timestamp": "2026-01-01T00:00:00.000Z"
+    "topology_version": 1,
+    "sampling_interval_sec": 15,
+    "sim_time": "T+0000s",
+    "timestamp": "2026-05-13T00:00:00.000Z"
   },
   "topology": {
     "nodes": [
       {
         "id": "SAT_000_000",
+        "type": "satellite",
         "orbital_params": {
+          "propagation_model": "SGP4",
           "plane": 0,
           "position_in_plane": 0,
           "raan": 0,
           "true_anomaly": 0,
           "altitude_km": 550,
-          "inclination": 53
+          "inclination_deg": 53,
+          "inclination": 53,
+          "eccentricity": 0.0001,
+          "argument_of_perigee_deg": 0,
+          "mean_anomaly_deg": 0,
+          "mean_motion_rev_per_day": 15.055,
+          "bstar": 0.00005,
+          "epoch_jd": 2461163.5,
+          "epoch_iso": "2026-05-13T00:00:00.000Z",
+          "propagation_minutes": 0,
+          "semi_major_axis_km": 6921,
+          "period_minutes": 95.648,
+          "tle_line1": "1 00001U 26001A   26133.00000000  .00000000  00000-0  50000-4 0  9990",
+          "tle_line2": "2 00001  53.0000   0.0000 0001000   0.0000   0.0000 15.05500000000000"
         },
         "coordinates": { "x": 6921, "y": 0, "z": 0, "lat": 0, "lon": 0 },
         "cpu_total": 24,
@@ -58,6 +76,67 @@ const IMPORT_EXAMPLE_JSON = `{
         "mem_available": 64,
         "disk_total": 320,
         "disk_available": 320,
+        "core_network_load": 0.18,
+        "core_business_load": {
+          "signaling_load": 0.19,
+          "session_load": 0.2,
+          "user_plane_load": 0.21,
+          "mobility_load": 0.18,
+          "policy_load": 0.17,
+          "auth_load": 0.18,
+          "load_index": 0.188333
+        },
+        "node_reliability": 0.995,
+        "status": "active",
+        "fault_tag": "",
+        "vnfs": [],
+        "core_nfs": []
+      },
+      {
+        "id": "SAT_000_001",
+        "type": "satellite",
+        "orbital_params": {
+          "propagation_model": "SGP4",
+          "plane": 0,
+          "position_in_plane": 1,
+          "raan": 0,
+          "true_anomaly": 180,
+          "altitude_km": 550,
+          "inclination_deg": 53,
+          "inclination": 53,
+          "eccentricity": 0.0001,
+          "argument_of_perigee_deg": 0,
+          "mean_anomaly_deg": 180,
+          "mean_motion_rev_per_day": 15.055,
+          "bstar": 0.00005,
+          "epoch_jd": 2461163.5,
+          "epoch_iso": "2026-05-13T00:00:00.000Z",
+          "propagation_minutes": 0,
+          "semi_major_axis_km": 6921,
+          "period_minutes": 95.648,
+          "tle_line1": "1 00002U 26001A   26133.00000000  .00000000  00000-0  50000-4 0  9990",
+          "tle_line2": "2 00002  53.0000   0.0000 0001000   0.0000 180.0000 15.05500000000000"
+        },
+        "coordinates": { "x": -6921, "y": 0, "z": 0, "lat": 0, "lon": 180 },
+        "cpu_total": 24,
+        "cpu_available": 24,
+        "mem_total": 64,
+        "mem_available": 64,
+        "disk_total": 320,
+        "disk_available": 320,
+        "core_network_load": 0.18,
+        "core_business_load": {
+          "signaling_load": 0.19,
+          "session_load": 0.2,
+          "user_plane_load": 0.21,
+          "mobility_load": 0.18,
+          "policy_load": 0.17,
+          "auth_load": 0.18,
+          "load_index": 0.188333
+        },
+        "node_reliability": 0.995,
+        "status": "active",
+        "fault_tag": "",
         "vnfs": [],
         "core_nfs": []
       }
@@ -68,8 +147,11 @@ const IMPORT_EXAMPLE_JSON = `{
         "target": "SAT_000_001",
         "link_type": "intra_orbit",
         "status": "active",
+        "fault_tag": "",
+        "link_status": 1,
+        "latency_ms": 2.4,
         "reliability": 0.999,
-        "latency_ms": 3.2,
+        "link_reliability": 0.999,
         "bandwidth_gbps": 20,
         "bandwidth_available_gbps": 18
       }
@@ -259,19 +341,30 @@ export default function LeftPanel() {
       setBackendTopologySynced(false)
 
       try {
+        const rawMetadata = raw?.metadata ?? {}
+        const importedNumPlanes = Number(rawMetadata?.num_planes)
+        const importedAltitude = Number(rawMetadata?.altitude_km)
+        const importedInclination = Number(rawMetadata?.inclination_deg)
         const topologyData: any = {
           metadata: {
+            ...(rawMetadata ?? {}),
             total_sats: parsed.satellites.length,
-            num_planes: planes,
-            altitude_km: parsed.satellites[0]?.orbital_params?.altitude_km ?? tpl.altitude_km,
-            inclination_deg: parsed.satellites[0]?.orbital_params?.inclination ?? tpl.inclination_deg,
+            num_planes: Number.isFinite(importedNumPlanes) && importedNumPlanes > 0 ? importedNumPlanes : planes,
+            altitude_km: Number.isFinite(importedAltitude) && importedAltitude > 0
+              ? importedAltitude
+              : parsed.satellites[0]?.orbital_params?.altitude_km ?? tpl.altitude_km,
+            inclination_deg: Number.isFinite(importedInclination) && importedInclination > 0
+              ? importedInclination
+              : parsed.satellites[0]?.orbital_params?.inclination ?? tpl.inclination_deg,
             constellation_template: 'imported_topology',
             force_replace: true,
-            timestamp: new Date().toISOString(),
+            timestamp: rawMetadata?.timestamp ?? new Date().toISOString(),
           },
           force_replace: true,
-          nodes: parsed.satellites,
-          links: parsed.links,
+          topology: {
+            nodes: parsed.satellites,
+            links: parsed.links,
+          },
         }
         await apiClient.generateTopology(topologyData)
         const topo = await apiClient.getTopology()
@@ -482,7 +575,7 @@ export default function LeftPanel() {
                 className="mt-2 rounded-lg p-2 max-h-44 overflow-auto"
                 style={{ background: 'rgba(6,14,24,0.85)', border: '1px solid rgba(102, 134, 158, 0.28)' }}
               >
-                <div className="text-[10px] text-slate-400 mb-1">示例 JSON（可直接参考字段）</div>
+                <div className="text-[10px] text-slate-400 mb-1">示例 JSON（后端 Topology 结构）</div>
                 <pre className="text-[9px] leading-4 text-slate-300 whitespace-pre-wrap">{IMPORT_EXAMPLE_JSON}</pre>
               </div>
             )}

@@ -4,6 +4,7 @@
 #include "services/DeploymentOrchestratorService.h"
 #include "services/RuntimeStateService.h"
 #include "utils/json_converter.h"
+#include "utils/Sgp4Propagator.h"
 #include "websocket/WSHandler.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -20,7 +21,7 @@
 namespace {
 
 constexpr double kMinSamplingIntervalSec = 10.0;
-constexpr double kMaxSamplingIntervalSec = 30.0;
+constexpr double kMaxSamplingIntervalSec = 120.0;
 constexpr double kDefaultSamplingIntervalSec = 15.0;
 
 bool json_bool(const Json::Value& obj, const std::string& key, bool fallback = false) {
@@ -191,10 +192,67 @@ void TopologyController::generateTopology(
             }
         }
 
-        const bool has_nodes = json->isMember("nodes") && (*json)["nodes"].isArray() && (*json)["nodes"].size() > 0;
-        const bool has_links = json->isMember("links") && (*json)["links"].isArray() && (*json)["links"].size() > 0;
+        const Json::Value* topology_json = nullptr;
+        if (json->isMember("topology") && (*json)["topology"].isObject()) {
+            topology_json = &(*json)["topology"];
+        }
+        const Json::Value* nodes_json = nullptr;
+        const Json::Value* links_json = nullptr;
+        if (topology_json && topology_json->isMember("nodes") && (*topology_json)["nodes"].isArray()) {
+            nodes_json = &(*topology_json)["nodes"];
+        } else if (json->isMember("nodes") && (*json)["nodes"].isArray()) {
+            nodes_json = &(*json)["nodes"];
+        }
+        if (topology_json && topology_json->isMember("links") && (*topology_json)["links"].isArray()) {
+            links_json = &(*topology_json)["links"];
+        } else if (json->isMember("links") && (*json)["links"].isArray()) {
+            links_json = &(*json)["links"];
+        }
+        const bool has_nodes = nodes_json && nodes_json->size() > 0;
+        const bool has_links = links_json && links_json->size() > 0;
         if (constellation_template.empty()) {
             constellation_template = has_nodes ? "imported_topology" : "starlink_v1";
+        }
+
+        if (has_nodes) {
+            Json::Value validation_errors(Json::arrayValue);
+            int idx = 0;
+            for (const auto& n : *nodes_json) {
+                const std::string node_id = n.get("id", "").asString();
+                if (!n.isMember("orbital_params") || !n["orbital_params"].isObject()) {
+                    validation_errors.append("node#" + std::to_string(idx + 1) + " missing orbital_params");
+                    ++idx;
+                    continue;
+                }
+                const auto& op = n["orbital_params"];
+                const std::string model = lower_ascii(op.get("propagation_model", "").asString());
+                const std::string line1 = op.get("tle_line1", "").asString();
+                const std::string line2 = op.get("tle_line2", "").asString();
+                if (model != "sgp4") {
+                    validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " propagation_model must be SGP4");
+                }
+                if (line1.empty() || line2.empty()) {
+                    validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " must include tle_line1 and tle_line2");
+                } else {
+                    OrbitalParams tmp;
+                    std::string parse_error;
+                    if (!sgp4::parse_tle_into_params(tmp, line1, line2, &parse_error)) {
+                        validation_errors.append((node_id.empty() ? ("node#" + std::to_string(idx + 1)) : node_id) + " invalid TLE: " + parse_error);
+                    }
+                }
+                ++idx;
+                if (validation_errors.size() >= 8) break;
+            }
+            if (!validation_errors.empty()) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "Imported topology requires SGP4 TLE orbital parameters";
+                error["details"] = validation_errors;
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
         }
 
         Topology existing = g_topo_mgr->get_current_topology();
@@ -219,7 +277,7 @@ void TopologyController::generateTopology(
             kMinSamplingIntervalSec,
             kMaxSamplingIntervalSec
         );
-        double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
+        double simulation_speed = clamp_double(old_dynamic_status.value("simulation_speed", 1.0), 0.1, 8.0);
         g_dynamic_sim->stop();
         const int rolled_back_deployments = rollback_existing_deployments_before_topology_replace();
 
@@ -255,7 +313,7 @@ void TopologyController::generateTopology(
             }
 
             int max_plane_idx = 0;
-            for (const auto& n : (*json)["nodes"]) {
+            for (const auto& n : *nodes_json) {
                 Satellite sat;
                 sat.id = n.get("id", "").asString();
                 sat.type = n.get("type", "satellite").asString();
@@ -265,24 +323,23 @@ void TopologyController::generateTopology(
                     const auto& op = n["orbital_params"];
                     sat.orbital_params.plane = op.get("plane", 0).asInt();
                     sat.orbital_params.position_in_plane = op.get("position_in_plane", 0).asInt();
-                    sat.orbital_params.raan = op.get("raan", 0.0).asDouble();
-                    sat.orbital_params.true_anomaly = op.get("true_anomaly", 0.0).asDouble();
-                    sat.orbital_params.altitude_km = op.get("altitude_km", altitude).asDouble();
-                    sat.orbital_params.inclination_deg = op.get(
-                        "inclination_deg",
-                        op.get("inclination", inclination).asDouble()
-                    ).asDouble();
+                    sat.orbital_params.propagation_model = "SGP4";
+                    sat.orbital_params.propagation_minutes = op.get("propagation_minutes", 0.0).asDouble();
+                    sat.orbital_params.tle_line1 = op.get("tle_line1", "").asString();
+                    sat.orbital_params.tle_line2 = op.get("tle_line2", "").asString();
+                    std::string parse_error;
+                    if (!sgp4::parse_tle_into_params(
+                            sat.orbital_params,
+                            sat.orbital_params.tle_line1,
+                            sat.orbital_params.tle_line2,
+                            &parse_error
+                        )) {
+                        throw std::runtime_error("Invalid TLE for " + sat.id + ": " + parse_error);
+                    }
                     max_plane_idx = std::max(max_plane_idx, sat.orbital_params.plane);
                 }
 
-                if (n.isMember("coordinates")) {
-                    const auto& c = n["coordinates"];
-                    sat.coordinates.x = c.get("x", 0.0).asDouble();
-                    sat.coordinates.y = c.get("y", 0.0).asDouble();
-                    sat.coordinates.z = c.get("z", 0.0).asDouble();
-                    sat.coordinates.lat = c.get("lat", 0.0).asDouble();
-                    sat.coordinates.lon = c.get("lon", 0.0).asDouble();
-                }
+                sat.coordinates = sgp4::propagate(sat.orbital_params, sat.orbital_params.propagation_minutes).coordinates;
 
                 sat.cpu_total = n.get("cpu_total", 16.0).asDouble();
                 sat.cpu_available = n.get("cpu_available", sat.cpu_total).asDouble();
@@ -312,7 +369,7 @@ void TopologyController::generateTopology(
             }
 
             if (has_links) {
-                for (const auto& l : (*json)["links"]) {
+                for (const auto& l : *links_json) {
                     Link link;
                     link.source = l.get("source", "").asString();
                     link.target = l.get("target", "").asString();
@@ -371,7 +428,7 @@ void TopologyController::generateTopology(
                     simulation_speed = clamp_double(
                         control_config.value("simulation_speed", simulation_speed),
                         0.1,
-                        20.0
+                        8.0
                     );
                 }
             }
@@ -474,7 +531,7 @@ void TopologyController::startDynamicSimulation(
                 kMinSamplingIntervalSec,
                 kMaxSamplingIntervalSec
             );
-            cfg["simulation_speed"] = clamp_double(sim_speed, 0.1, 20.0);
+            cfg["simulation_speed"] = clamp_double(sim_speed, 0.1, 8.0);
             cfg["running"] = started;
             g_runtime_state_service->save_control_config(cfg);
         }
@@ -944,7 +1001,7 @@ void TopologyController::deleteSatellite(
             kMinSamplingIntervalSec,
             kMaxSamplingIntervalSec
         );
-        const double speed = clamp_double(dynamic_status.value("simulation_speed", 1.0), 0.1, 20.0);
+        const double speed = clamp_double(dynamic_status.value("simulation_speed", 1.0), 0.1, 8.0);
         g_dynamic_sim->stop();
 
         g_res_mgr->reset_all_allocations();
@@ -1066,7 +1123,7 @@ void TopologyController::updateControlConfig(
         const double speed = clamp_double(
             json->get("simulation_speed", 1.0).asDouble(),
             0.1,
-            20.0
+            8.0
         );
         const bool apply_now = json_bool(*json, "apply_now", true);
 

@@ -4,8 +4,11 @@ Thumbs.db
 .vscode/
 .idea/
 .run/
+.deps/
+.env.kylin
 data/
 docs/
+sfc-kylin-images.tar
 
 # Python
 __pycache__/
@@ -27,6 +30,7 @@ ENV/
 # Node / frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+frontend/dist-control/
 
 # CMake / C++ build artifacts
 build/
@@ -67,6 +71,6 @@ models.zip
 *.bin
 
 # Logs / temp files
-*.log
+
 *.tmp
 *.temp

@@ -1,51 +1,16 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
+import { parseTleOrbitalParams, propagateSgp4Orbit } from '@/utils/constellationGenerator'
 
 const EARTH_RADIUS_KM = 6371
 const LIGHT_SPEED_KM_S = 299792.458
-const MU_EARTH = 398600.4418
 
 type Vec3 = { x: number; y: number; z: number }
 type LinkStatus = 'active' | 'congested' | 'down'
 
 function norm(v: Vec3) {
   return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
-}
-
-function toLatLon(v: Vec3) {
-  const r = Math.max(1e-9, norm(v))
-  const lat = Math.asin(Math.max(-1, Math.min(1, v.z / r))) * 180 / Math.PI
-  const lon = Math.atan2(v.y, v.x) * 180 / Math.PI
-  return { lat, lon }
-}
-
-function satPositionAtTime(
-  altitudeKm: number,
-  inclinationDeg: number,
-  raanDeg: number,
-  trueAnomalyDeg0: number,
-  elapsedSec: number
-) {
-  const r = EARTH_RADIUS_KM + altitudeKm
-  const inc = (inclinationDeg * Math.PI) / 180
-  const raan = (raanDeg * Math.PI) / 180
-  const n = Math.sqrt(MU_EARTH / (r * r * r))
-  const ta = ((trueAnomalyDeg0 * Math.PI) / 180 + n * elapsedSec) % (2 * Math.PI)
-
-  const cosO = Math.cos(raan)
-  const sinO = Math.sin(raan)
-  const cosI = Math.cos(inc)
-  const sinI = Math.sin(inc)
-  const cosV = Math.cos(ta)
-  const sinV = Math.sin(ta)
-  const xOrb = r * cosV
-  const yOrb = r * sinV
-
-  const x = cosO * xOrb - sinO * cosI * yOrb
-  const y = sinO * xOrb + cosO * cosI * yOrb
-  const z = sinI * yOrb
-  return { pos: { x, y, z }, trueAnomalyDeg: ((ta * 180) / Math.PI + 360) % 360 }
 }
 
 function minDistanceToOriginSegment(a: Vec3, b: Vec3) {
@@ -123,42 +88,20 @@ function buildDynamicLinkPlan(sats: any[], prevLinks: any[]) {
         String(l?.link_type ?? '') === 'intra_orbit' ? 'intra_orbit' : 'inter_orbit'
       add(source, target, linkType)
     })
-    if (out.length > 0) return out
+    const hasOrbitLayout = sats.some((sat: any) =>
+      Number.isFinite(Number(sat?.orbital_params?.plane)) &&
+      Number.isFinite(Number(sat?.orbital_params?.position_in_plane))
+    )
+    if (out.length > 0 && !hasOrbitLayout) return out
   }
 
-  // Fallback for the very first local frame when no links exist yet.
-  const byPlane = new Map<number, any[]>()
-  sats.forEach((sat) => {
-    const plane = Number(sat?.orbital_params?.plane ?? 0)
-    if (!byPlane.has(plane)) byPlane.set(plane, [])
-    byPlane.get(plane)!.push(sat)
-  })
-  byPlane.forEach((arr) => {
-    arr.sort((a, b) => {
-      const pa = Number(a?.orbital_params?.position_in_plane ?? 0)
-      const pb = Number(b?.orbital_params?.position_in_plane ?? 0)
-      return pa - pb
-    })
-  })
-  const planeIds = Array.from(byPlane.keys()).sort((a, b) => a - b)
-
-  byPlane.forEach((arr) => {
-    const n = arr.length
-    if (n < 2) return
-    for (let i = 0; i < n; i++) {
-      add(String(arr[i]?.id ?? ''), String(arr[(i + 1) % n]?.id ?? ''), 'intra_orbit')
-    }
-  })
-
-  for (let p = 0; p < planeIds.length; p++) {
-    const aPlane = byPlane.get(planeIds[p]) ?? []
-    const bPlane = byPlane.get(planeIds[(p + 1) % planeIds.length]) ?? []
-    const n = Math.min(aPlane.length, bPlane.length)
-    for (let i = 0; i < n; i++) {
-      add(String(aPlane[i]?.id ?? ''), String(bPlane[i]?.id ?? ''), 'inter_orbit')
-    }
-  }
   return out
+}
+
+function persistentFaultTag(tag: any) {
+  const t = String(tag ?? '').trim()
+  if (!t || t === 'line_of_sight_loss' || t === 'topology_inconsistent') return ''
+  return t
 }
 
 function remapSelectedLink(selectedLink: any, links: any[]) {
@@ -187,9 +130,9 @@ export function useAutoDynamics() {
   const lastTsRef = useRef<number>(performance.now())
   const posAccRef = useRef(0)
   const resAccRef = useRef(0)
-  const pathRefreshAccRef = useRef(0)
   const resourceSyncRunningRef = useRef(false)
   const clockEpochMsRef = useRef<number>(Date.now())
+  const inactiveSinceRef = useRef<number | null>(null)
 
   useEffect(() => {
     const syncResources = async () => {
@@ -295,6 +238,24 @@ export function useAutoDynamics() {
     const frame = (ts: number) => {
       const s = useStore.getState()
       const ad = s.autoDynamics
+      const inactive = document.visibilityState === 'hidden' || window.location.pathname.startsWith('/monitor')
+      if (inactive) {
+        if (inactiveSinceRef.current == null) inactiveSinceRef.current = ts
+        lastTsRef.current = ts
+        posAccRef.current = 0
+        rafRef.current = window.requestAnimationFrame(frame)
+        return
+      }
+      if (inactiveSinceRef.current != null) {
+        // The main earth view is paused while hidden or while the monitor page is active.
+        // On resume, continue from the current visual state instead of replaying the
+        // accumulated wall-clock gap; otherwise large constellations rebuild thousands
+        // of node/link transforms in a single burst.
+        inactiveSinceRef.current = null
+        lastTsRef.current = ts
+        posAccRef.current = 0
+        resAccRef.current = 0
+      }
       const dtReal = Math.max(0, (ts - lastTsRef.current) / 1000)
       lastTsRef.current = ts
 
@@ -304,7 +265,9 @@ export function useAutoDynamics() {
 
       if (ad.enabled && ad.playing && s.satellites.length > 0) {
         const satCount = s.satellites.length
-        const posInterval = satCount >= 5000 ? 0.18 : (satCount >= 3000 ? 0.13 : 0.1)
+        const configuredHz = clamp(0.5, 5, Number(ad.position_update_hz ?? 4))
+        const maxHzByScale = satCount >= 5000 ? 1.2 : (satCount >= 3000 ? 1.6 : (satCount >= 1200 ? 2.4 : 5))
+        const posInterval = 1 / Math.min(configuredHz, maxHzByScale)
         posAccRef.current += dtReal
         resAccRef.current += dtReal
 
@@ -322,24 +285,32 @@ export function useAutoDynamics() {
           const posMap = new Map<string, Vec3>()
           const newSats = s.satellites.map((sat: any) => {
             const op = sat.orbital_params ?? {}
-            const altitudeKm = Number(op.altitude_km ?? 550)
-            const inclinationDeg = Number(op.inclination_deg ?? op.inclination ?? 53)
-            const raanDeg = Number(op.raan ?? 0)
-            const ta0 = Number((sat as any).__base_true_anomaly ?? op.true_anomaly ?? 0)
-            const { pos, trueAnomalyDeg } = satPositionAtTime(
-              altitudeKm,
-              inclinationDeg,
-              raanDeg,
-              ta0,
-              elapsedSec
-            )
+            const baseMinutes = Number((sat as any).__base_propagation_minutes ?? op.propagation_minutes ?? 0)
+            const baseOrbit = (sat as any).__sgp4_base_orbit ?? (() => {
+              const tle1 = String(op?.tle_line1 ?? '').trim()
+              const tle2 = String(op?.tle_line2 ?? '').trim()
+              if (tle1 && tle2) {
+                return { ...op, ...parseTleOrbitalParams(tle1, tle2), __tle_parsed: true }
+              }
+              return op
+            })()
+            const propagated = propagateSgp4Orbit(baseOrbit, baseMinutes + elapsedSec / 60)
+            const pos = { x: propagated.x, y: propagated.y, z: propagated.z }
             posMap.set(String(sat.id), pos)
-            const ll = toLatLon(pos)
             return {
               ...sat,
-              __base_true_anomaly: ta0,
-              coordinates: { ...sat.coordinates, ...pos, lat: ll.lat, lon: ll.lon },
-              orbital_params: { ...sat.orbital_params, true_anomaly: trueAnomalyDeg },
+              __base_propagation_minutes: baseMinutes,
+              __sgp4_base_orbit: baseOrbit,
+              coordinates: { ...sat.coordinates, ...pos, lat: propagated.lat, lon: propagated.lon },
+              orbital_params: {
+                ...sat.orbital_params,
+                true_anomaly: propagated.true_anomaly,
+                mean_anomaly_deg: propagated.mean_anomaly_deg,
+                raan: propagated.raan,
+                argument_of_perigee_deg: propagated.argument_of_perigee_deg,
+                altitude_km: propagated.altitude_km,
+                propagation_minutes: baseMinutes + elapsedSec / 60,
+              },
             }
           })
 
@@ -386,17 +357,18 @@ export function useAutoDynamics() {
             const prev = prevByPair.get(pairKey(src, dst))
             if (!a || !b) {
               const fallbackBw = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
-            return {
-              source: src,
-              target: dst,
-              link_type: linkType,
-              bandwidth_gbps: fallbackBw,
-              bandwidth_available_gbps: 0,
-              reliability: Number(prev?.reliability ?? 0.8),
-              fault_tag: String(prev?.fault_tag ?? 'topology_inconsistent'),
-              __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
-              __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
-              __dynamic_up: false,
+              const faultTag = persistentFaultTag(prev?.fault_tag)
+              return {
+                source: src,
+                target: dst,
+                link_type: linkType,
+                bandwidth_gbps: fallbackBw,
+                bandwidth_available_gbps: 0,
+                reliability: Number(prev?.reliability ?? 0.8),
+                fault_tag: faultTag,
+                __resource_status_seed: String(prev?.__resource_status_seed ?? 'active'),
+                __resource_status: String(prev?.__resource_status ?? prev?.status ?? 'active'),
+                __dynamic_up: false,
                 status: 'down' as LinkStatus,
                 latency_ms: Number(prev?.latency_ms ?? 0),
               }
@@ -419,6 +391,9 @@ export function useAutoDynamics() {
             const endpointDown =
               satStatusById.get(src) === 'down' ||
               satStatusById.get(dst) === 'down'
+            const faultTag = nextStatus === 'down' && resourceStatus === 'down'
+              ? (persistentFaultTag(prev?.fault_tag) || (endpointDown ? 'endpoint_node_fault' : ''))
+              : ''
 
             const bwTotal = Number(prev?.bandwidth_gbps ?? (linkType === 'intra_orbit' ? avgBw.intra : avgBw.inter))
             const bwAvailPrev = Number(prev?.bandwidth_available_gbps ?? bwTotal)
@@ -434,9 +409,7 @@ export function useAutoDynamics() {
               bandwidth_gbps: bwTotal,
               bandwidth_available_gbps: bwAvail,
               reliability,
-              fault_tag: nextStatus === 'down'
-                ? String(prev?.fault_tag ?? (endpointDown ? 'endpoint_node_fault' : 'line_of_sight_loss'))
-                : '',
+              fault_tag: faultTag,
               __resource_status_seed: seededResourceStatus,
               __resource_status: resourceStatus,
               __dynamic_up: up,
@@ -458,16 +431,9 @@ export function useAutoDynamics() {
             autoDynamics: {
               ...prev.autoDynamics,
               elapsed_sec: elapsedSec,
+              snap_visual_token: prev.autoDynamics.snap_visual_token,
             },
           }))
-          if (s.deployments.length > 0) {
-            pathRefreshAccRef.current += stepReal
-            const refreshInterval = satCount >= 5000 ? 1.5 : (satCount >= 4200 ? 0.9 : (satCount >= 2200 ? 0.5 : 0.16))
-            if (pathRefreshAccRef.current >= refreshInterval) {
-              pathRefreshAccRef.current = 0
-              useStore.getState().refreshDeploymentPaths()
-            }
-          }
         }
 
         if (resAccRef.current >= Math.max(10, ad.resource_update_sec)) {

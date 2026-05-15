@@ -27,15 +27,8 @@ public:
     // 保存当前拓扑（用于资源更新后）
     void save_current_topology(const Topology& topology);
     
-    // 计算卫星位置
-    Coordinates calculate_position(
-        int plane_id,
-        int sat_in_plane,
-        int total_planes,
-        int sats_per_plane,
-        double altitude_km,
-        double time_offset = 0.0
-    );
+    // 使用 SGP4 平均轨道根数计算卫星位置
+    Coordinates calculate_position(const OrbitalParams& params, double minutes_since_epoch = 0.0);
     
 private:
     mutable std::mutex topology_mutex_;

@@ -111,7 +111,20 @@ export interface SatelliteData {
   orbital_params: {
     plane: number; position_in_plane: number
     raan: number; true_anomaly: number
-    altitude_km: number; inclination: number
+    altitude_km: number; inclination: number; inclination_deg?: number
+    propagation_model?: string
+    eccentricity?: number
+    argument_of_perigee_deg?: number
+    mean_anomaly_deg?: number
+    mean_motion_rev_per_day?: number
+    bstar?: number
+    epoch_jd?: number
+    epoch_iso?: string
+    propagation_minutes?: number
+    semi_major_axis_km?: number
+    period_minutes?: number
+    tle_line1?: string
+    tle_line2?: string
   }
   coordinates: { x: number; y: number; z: number; lat: number; lon: number }
   cpu_total: number; cpu_available: number
@@ -153,6 +166,9 @@ export interface LinkData {
 
 const PI = Math.PI
 const EARTH_R = 6371.0
+const SGP4_EARTH_R = 6378.135
+const SGP4_MU = 398600.8
+const SGP4_J2 = 1.082616e-3
 const C = 299792.458
 
 function seeded(n: number) {
@@ -187,34 +203,211 @@ function buildCoreBusinessLoad(seedBase: number, avgResourceLoad: number) {
   }
 }
 
-function walkerCoord(
+function julianDate(date = new Date()): number {
+  return 2440587.5 + date.getTime() / 86400000
+}
+
+function wrapDeg(v: number): number {
+  const x = v % 360
+  return x < 0 ? x + 360 : x
+}
+
+function meanMotionFromAltitude(altitudeKm: number): number {
+  const a = SGP4_EARTH_R + Math.max(100, altitudeKm)
+  const nRadSec = Math.sqrt(SGP4_MU / (a * a * a))
+  return nRadSec * 86400 / (2 * PI)
+}
+
+function semiMajorAxis(meanMotionRevPerDay: number): number {
+  const n = Math.max(1e-9, meanMotionRevPerDay) * 2 * PI / 86400
+  return Math.cbrt(SGP4_MU / (n * n))
+}
+
+function solveKepler(meanRad: number, ecc: number): number {
+  let e = meanRad
+  for (let i = 0; i < 10; i++) {
+    const f = e - ecc * Math.sin(e) - meanRad
+    const fp = 1 - ecc * Math.cos(e)
+    if (Math.abs(fp) < 1e-12) break
+    const step = f / fp
+    e -= step
+    if (Math.abs(step) < 1e-12) break
+  }
+  return e
+}
+
+function tleEpoch(epochJd: number): string {
+  const d = new Date((epochJd - 2440587.5) * 86400000)
+  const start = Date.UTC(d.getUTCFullYear(), 0, 0)
+  const doy = Math.floor((d.getTime() - start) / 86400000)
+  const yy = String(d.getUTCFullYear() % 100).padStart(2, '0')
+  const frac = ((d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds() + d.getUTCMilliseconds() / 1000) / 86400)
+    .toFixed(8)
+    .slice(1)
+  return `${yy}${String(doy).padStart(3, '0')}${frac}`
+}
+
+function makeTleLines(satNum: number, op: any): { line1: string; line2: string } {
+  const sat = String(((satNum % 100000) + 100000) % 100000).padStart(5, '0')
+  const ecc7 = String(Math.round(Math.max(0, Math.min(0.9999999, op.eccentricity)) * 1e7)).padStart(7, '0')
+  const line1 = `1 ${sat}U 26001A   ${tleEpoch(op.epoch_jd)}  .00000000  00000-0  5000-4 0  9990`
+  const line2 = `2 ${sat} ${op.inclination_deg.toFixed(4).padStart(8)} ${wrapDeg(op.raan).toFixed(4).padStart(8)} ${ecc7} ${wrapDeg(op.argument_of_perigee_deg).toFixed(4).padStart(8)} ${wrapDeg(op.mean_anomaly_deg).toFixed(4).padStart(8)} ${op.mean_motion_rev_per_day.toFixed(8).padStart(11)}00000`
+  return { line1, line2 }
+}
+
+function julianDateFromYearDoy(year: number, dayOfYear: number): number {
+  const ms = Date.UTC(year, 0, 1) + (dayOfYear - 1) * 86400000
+  return 2440587.5 + ms / 86400000
+}
+
+function parseCompactTleExponential(raw: string): number {
+  let s = String(raw ?? '').trim()
+  if (!s) return 0
+  let sign = 1
+  if (s[0] === '-' || s[0] === '+') {
+    sign = s[0] === '-' ? -1 : 1
+    s = s.slice(1)
+  }
+  s = s.replace(/\s+/g, '')
+  const match = s.match(/^(\d+)([+-]\d+)$/)
+  if (!match) return 0
+  const mantissa = Number(match[1]) / Math.pow(10, match[1].length)
+  return sign * mantissa * Math.pow(10, Number(match[2]))
+}
+
+export function parseTleOrbitalParams(tleLine1: string, tleLine2: string): Partial<SatelliteData['orbital_params']> {
+  const line1 = String(tleLine1 ?? '').trim()
+  const line2 = String(tleLine2 ?? '').trim()
+  if (line1.length < 63 || line2.length < 63 || !line1.startsWith('1') || !line2.startsWith('2')) {
+    throw new Error('TLE 两行根数格式不完整')
+  }
+  const epochRaw = line1.slice(18, 32).trim()
+  const yy = Number(epochRaw.slice(0, 2))
+  const year = yy < 57 ? 2000 + yy : 1900 + yy
+  const dayOfYear = Number(epochRaw.slice(2))
+  const epochJd = julianDateFromYearDoy(year, dayOfYear)
+  const inclinationDeg = Number(line2.slice(8, 16).trim())
+  const raan = Number(line2.slice(17, 25).trim())
+  const eccDigits = line2.slice(26, 33).trim()
+  const eccentricity = Number(`0.${eccDigits || '0'}`)
+  const argumentOfPerigeeDeg = Number(line2.slice(34, 42).trim())
+  const meanAnomalyDeg = Number(line2.slice(43, 51).trim())
+  const meanMotionRevPerDay = Number(line2.slice(52, 63).trim())
+  if (![inclinationDeg, raan, eccentricity, argumentOfPerigeeDeg, meanAnomalyDeg, meanMotionRevPerDay, epochJd].every(Number.isFinite)) {
+    throw new Error('TLE 轨道根数字段无法解析')
+  }
+  const semiMajor = semiMajorAxis(meanMotionRevPerDay)
+  return {
+    propagation_model: 'SGP4',
+    raan: wrapDeg(raan),
+    true_anomaly: wrapDeg(meanAnomalyDeg),
+    inclination: inclinationDeg,
+    inclination_deg: inclinationDeg,
+    altitude_km: semiMajor - SGP4_EARTH_R,
+    eccentricity,
+    argument_of_perigee_deg: wrapDeg(argumentOfPerigeeDeg),
+    mean_anomaly_deg: wrapDeg(meanAnomalyDeg),
+    mean_motion_rev_per_day: meanMotionRevPerDay,
+    bstar: parseCompactTleExponential(line1.slice(53, 61)),
+    epoch_jd: epochJd,
+    epoch_iso: new Date((epochJd - 2440587.5) * 86400000).toISOString(),
+    semi_major_axis_km: semiMajor,
+    period_minutes: 1440 / meanMotionRevPerDay,
+    tle_line1: line1,
+    tle_line2: line2,
+  }
+}
+
+function makeWalkerSgp4Orbit(
   plane: number, numPlanes: number,
   pos: number, satsPerPlane: number,
   altitude: number, inclination: number,
-  fPhasing: number, isWalkerStar: boolean
-): { x: number; y: number; z: number; lat: number; lon: number; raan: number; ta: number } {
+  fPhasing: number, isWalkerStar: boolean,
+  epochJd: number
+) {
   const raan = isWalkerStar
     ? (180 / numPlanes) * plane
     : (360 / numPlanes) * plane
   const phaseShift = isWalkerStar ? 0 : (360 / (numPlanes * satsPerPlane)) * plane * fPhasing
-  const ta = ((360 / satsPerPlane) * pos + phaseShift) % 360
+  const ta = wrapDeg((360 / satsPerPlane) * pos + phaseShift)
+  const meanMotion = meanMotionFromAltitude(altitude)
+  const sma = semiMajorAxis(meanMotion)
+  const op = {
+    propagation_model: 'SGP4',
+    plane,
+    position_in_plane: pos,
+    raan,
+    true_anomaly: ta,
+    altitude_km: altitude,
+    inclination,
+    inclination_deg: inclination,
+    eccentricity: 0.0001,
+    argument_of_perigee_deg: 0,
+    mean_anomaly_deg: ta,
+    mean_motion_rev_per_day: meanMotion,
+    bstar: 0.00005,
+    epoch_jd: epochJd,
+    epoch_iso: new Date((epochJd - 2440587.5) * 86400000).toISOString(),
+    propagation_minutes: 0,
+    semi_major_axis_km: sma,
+    period_minutes: 1440 / meanMotion,
+  }
+  const tle = makeTleLines(plane * 1000 + pos + 1, op)
+  return { ...op, tle_line1: tle.line1, tle_line2: tle.line2 }
+}
 
-  const r = EARTH_R + altitude
-  const i = inclination * PI / 180
-  const O = raan * PI / 180
-  const v = ta * PI / 180
+export function propagateSgp4Orbit(op: any, minutesSinceEpoch = 0): { x: number; y: number; z: number; lat: number; lon: number; true_anomaly: number; mean_anomaly_deg: number; raan: number; argument_of_perigee_deg: number; altitude_km: number } {
+  const tleLine1 = String(op?.tle_line1 ?? '').trim()
+  const tleLine2 = String(op?.tle_line2 ?? '').trim()
+  const source = (tleLine1 && tleLine2 && !op?.__tle_parsed)
+    ? { ...op, ...parseTleOrbitalParams(tleLine1, tleLine2), __tle_parsed: true }
+    : op
+  const ecc = Math.max(0, Math.min(0.25, Number(source.eccentricity ?? 0.0001)))
+  const mm = Number(source.mean_motion_rev_per_day ?? meanMotionFromAltitude(Number(source.altitude_km ?? 550)))
+  const a = semiMajorAxis(mm)
+  const inc = Number(source.inclination_deg ?? source.inclination ?? 53) * PI / 180
+  const p = a * (1 - ecc * ecc)
+  const nRadMin = mm * 2 * PI / 1440
+  const coeff = 1.5 * SGP4_J2 * SGP4_EARTH_R * SGP4_EARTH_R / (p * p) * nRadMin
+  const raanRate = -coeff * Math.cos(inc)
+  const argpRate = 0.5 * coeff * (5 * Math.cos(inc) * Math.cos(inc) - 1)
+  const meanRate = nRadMin + 0.5 * coeff * Math.sqrt(Math.max(1e-9, 1 - ecc * ecc)) * (3 * Math.cos(inc) * Math.cos(inc) - 1)
+  const raan = Number(source.raan ?? 0) * PI / 180 + raanRate * minutesSinceEpoch
+  const argp = Number(source.argument_of_perigee_deg ?? 0) * PI / 180 + argpRate * minutesSinceEpoch
+  const mean = Number(source.mean_anomaly_deg ?? source.true_anomaly ?? 0) * PI / 180 + meanRate * minutesSinceEpoch
+  const eAnom = solveKepler(mean % (2 * PI), ecc)
+  const radius = a * (1 - ecc * Math.cos(eAnom))
+  const nu = Math.atan2(Math.sqrt(Math.max(0, 1 - ecc * ecc)) * Math.sin(eAnom), Math.cos(eAnom) - ecc)
+  const u = argp + nu
+  const x = radius * (Math.cos(raan) * Math.cos(u) - Math.sin(raan) * Math.sin(u) * Math.cos(inc))
+  const y = radius * (Math.sin(raan) * Math.cos(u) + Math.cos(raan) * Math.sin(u) * Math.cos(inc))
+  const z = radius * (Math.sin(u) * Math.sin(inc))
+  return {
+    x, y, z,
+    lat: Math.asin(Math.max(-1, Math.min(1, z / radius))) * 180 / PI,
+    lon: Math.atan2(y, x) * 180 / PI,
+    true_anomaly: wrapDeg(nu * 180 / PI),
+    mean_anomaly_deg: wrapDeg((mean % (2 * PI)) * 180 / PI),
+    raan: wrapDeg(raan * 180 / PI),
+    argument_of_perigee_deg: wrapDeg(argp * 180 / PI),
+    altitude_km: radius - SGP4_EARTH_R,
+  }
+}
 
-  const xOrb = r * Math.cos(v)
-  const yOrb = r * Math.sin(v)
-
-  const x = Math.cos(O) * xOrb - Math.sin(O) * Math.cos(i) * yOrb
-  const y = Math.sin(O) * xOrb + Math.cos(O) * Math.cos(i) * yOrb
-  const z = Math.sin(i) * yOrb
-
-  const lon = Math.atan2(y, x) * 180 / PI
-  const lat = Math.asin(Math.max(-1, Math.min(1, z / r))) * 180 / PI
-
-  return { x, y, z, lat, lon, raan, ta }
+function walkerCoord(
+  plane: number, numPlanes: number,
+  pos: number, satsPerPlane: number,
+  altitude: number, inclination: number,
+  fPhasing: number, isWalkerStar: boolean,
+  epochJd: number
+): { orbit: SatelliteData['orbital_params']; coords: { x: number; y: number; z: number; lat: number; lon: number } } {
+  const orbit = makeWalkerSgp4Orbit(plane, numPlanes, pos, satsPerPlane, altitude, inclination, fPhasing, isWalkerStar, epochJd)
+  const propagated = propagateSgp4Orbit(orbit, 0)
+  orbit.true_anomaly = propagated.true_anomaly
+  orbit.raan = propagated.raan
+  orbit.argument_of_perigee_deg = propagated.argument_of_perigee_deg
+  orbit.altitude_km = propagated.altitude_km
+  return { orbit, coords: { x: propagated.x, y: propagated.y, z: propagated.z, lat: propagated.lat, lon: propagated.lon } }
 }
 
 // 生成与后端一致的卫星命名: SAT_XXX_XXX
@@ -234,6 +427,7 @@ export function generateConstellation(
   const satsPerPlaneBase = Math.floor(totalSats / numPlanes)
   const remainder = totalSats % numPlanes
   const satellites: SatelliteData[] = []
+  const epochJd = julianDate()
 
   const halfPlanes = type === 'telesat' ? Math.floor(numPlanes / 2) : numPlanes
 
@@ -247,7 +441,7 @@ export function generateConstellation(
     for (let pos = 0; pos < satsInThisPlane; pos++) {
       const coord = walkerCoord(
         plane, numPlanes, pos, satsInThisPlane,
-        altitude, inclination, tpl.fPhasing, tpl.isWalkerStar
+        altitude, inclination, tpl.fPhasing, tpl.isWalkerStar, epochJd
       )
 
       const seed = plane * 1000 + pos
@@ -262,12 +456,8 @@ export function generateConstellation(
 
       satellites.push({
         id: generateSatelliteID(plane, pos, numPlanes, satsInThisPlane),
-        orbital_params: {
-          plane, position_in_plane: pos,
-          raan: coord.raan, true_anomaly: coord.ta,
-          altitude_km: altitude, inclination,
-        },
-        coordinates: { x: coord.x, y: coord.y, z: coord.z, lat: coord.lat, lon: coord.lon },
+        orbital_params: coord.orbit,
+        coordinates: coord.coords,
         cpu_total: cpuT, cpu_available: cpuT * (1 - cpuLoad),
         mem_total: memT, mem_available: memT * (1 - memLoad),
         disk_total: diskT, disk_available: diskT * (1 - diskLoad),
@@ -407,45 +597,47 @@ export function prepareTopologyForBackend(
       inclination_deg: tpl.inclination_deg,
       timestamp: new Date().toISOString() // 后端字段名是 timestamp
     },
-    // 注意：后端 Topology 结构体的 to_json 返回的是 { metadata: ..., topology: { nodes: ..., links: ... } }
-    // 但后端接收 generate 接口时，通常直接解析 nodes 和 links
-    nodes: satellites.map(s => ({
-      id: s.id,
-      type: "satellite",
-      orbital_params: s.orbital_params,
-      coordinates: s.coordinates,
-      cpu_total: s.cpu_total,
-      cpu_available: s.cpu_available,
-      mem_total: s.mem_total,
-      mem_available: s.mem_available,
-      disk_total: s.disk_total,
-      disk_available: s.disk_available,
-      core_network_load: Number(s.core_network_load ?? 0.5),
-      core_business_load: s.core_business_load ?? {
-        signaling_load: Number(s.core_network_load ?? 0.5),
-        session_load: Number(s.core_network_load ?? 0.5),
-        user_plane_load: Number(s.core_network_load ?? 0.5),
-        mobility_load: Number(s.core_network_load ?? 0.5),
-        policy_load: Number(s.core_network_load ?? 0.5),
-        auth_load: Number(s.core_network_load ?? 0.5),
-      },
-      node_reliability: Number(s.node_reliability ?? 0.985),
-      status: s.status ?? 'active',
-      fault_tag: s.fault_tag ?? '',
-      vnfs: [],
-      core_nfs: []
-    })),
-    links: links.map(l => ({
-      source: l.source,
-      target: l.target,
-      link_type: l.link_type,
-      status: l.status ?? 'active',
-      fault_tag: l.fault_tag ?? '',
-      reliability: l.reliability ?? 0.999,
-      latency_ms: l.latency_ms,
-      bandwidth_gbps: l.bandwidth_gbps,
-      bandwidth_available_gbps: l.bandwidth_available_gbps
-    }))
+    topology: {
+      nodes: satellites.map(s => ({
+        id: s.id,
+        type: "satellite",
+        orbital_params: s.orbital_params,
+        coordinates: s.coordinates,
+        cpu_total: s.cpu_total,
+        cpu_available: s.cpu_available,
+        mem_total: s.mem_total,
+        mem_available: s.mem_available,
+        disk_total: s.disk_total,
+        disk_available: s.disk_available,
+        core_network_load: Number(s.core_network_load ?? 0.5),
+        core_business_load: s.core_business_load ?? {
+          signaling_load: Number(s.core_network_load ?? 0.5),
+          session_load: Number(s.core_network_load ?? 0.5),
+          user_plane_load: Number(s.core_network_load ?? 0.5),
+          mobility_load: Number(s.core_network_load ?? 0.5),
+          policy_load: Number(s.core_network_load ?? 0.5),
+          auth_load: Number(s.core_network_load ?? 0.5),
+        },
+        node_reliability: Number(s.node_reliability ?? 0.985),
+        status: s.status ?? 'active',
+        fault_tag: s.fault_tag ?? '',
+        vnfs: [],
+        core_nfs: []
+      })),
+      links: links.map(l => ({
+        source: l.source,
+        target: l.target,
+        link_type: l.link_type,
+        status: l.status ?? 'active',
+        fault_tag: l.fault_tag ?? '',
+        link_status: (l.status ?? 'active') === 'down' ? 0 : 1,
+        reliability: l.reliability ?? 0.999,
+        link_reliability: l.reliability ?? 0.999,
+        latency_ms: l.latency_ms,
+        bandwidth_gbps: l.bandwidth_gbps,
+        bandwidth_available_gbps: l.bandwidth_available_gbps
+      }))
+    }
   }
 }
 
@@ -457,8 +649,6 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
   const satellites: SatelliteData[] = nodesRaw.map((n: any, idx: number) => {
     const id = String(n.id ?? n.name ?? `SAT_EXT_${idx}`)
     const orbital = n.orbital_params ?? n.orbit ?? {}
-    const coords = n.coordinates ?? n.position ?? {}
-
     const cpuTotal = Number(n.cpu_total ?? n.cpu?.total ?? 16)
     const cpuAvail = Number(n.cpu_available ?? n.cpu?.available ?? cpuTotal)
     const memTotal = Number(n.mem_total ?? n.memory_total ?? n.mem?.total ?? 32)
@@ -467,23 +657,32 @@ export function parseThirdPartyTopology(raw: any): { satellites: SatelliteData[]
     const diskAvail = Number(n.disk_available ?? n.storage_available ?? n.disk?.available ?? diskTotal)
     const coreBusiness = n.core_business_load ?? {}
     const fallbackLoad = Number(n.core_network_load ?? 0.5)
+    const tleLine1 = String(orbital.tle_line1 ?? '').trim()
+    const tleLine2 = String(orbital.tle_line2 ?? '').trim()
+    if (!tleLine1 || !tleLine2) {
+      throw new Error(`节点 ${id} 缺少 SGP4 TLE 两行根数`)
+    }
+    const tleOrbit = parseTleOrbitalParams(tleLine1, tleLine2)
+    const parsedOrbit: SatelliteData['orbital_params'] = {
+      ...(tleOrbit as SatelliteData['orbital_params']),
+      propagation_model: 'SGP4',
+      plane: Number(orbital.plane ?? orbital.plane_id ?? 0),
+      position_in_plane: Number(orbital.position_in_plane ?? orbital.slot ?? idx),
+      propagation_minutes: Number(orbital.propagation_minutes ?? 0),
+      tle_line1: tleLine1,
+      tle_line2: tleLine2,
+    }
+    const propagated = propagateSgp4Orbit(parsedOrbit, Number(parsedOrbit.propagation_minutes ?? 0))
 
     return {
       id,
-      orbital_params: {
-        plane: Number(orbital.plane ?? orbital.plane_id ?? 0),
-        position_in_plane: Number(orbital.position_in_plane ?? orbital.slot ?? idx),
-        raan: Number(orbital.raan ?? 0),
-        true_anomaly: Number(orbital.true_anomaly ?? orbital.ta ?? 0),
-        altitude_km: Number(orbital.altitude_km ?? orbital.altitude ?? 550),
-        inclination: Number(orbital.inclination ?? orbital.inclination_deg ?? 53),
-      },
+      orbital_params: parsedOrbit,
       coordinates: {
-        x: Number(coords.x ?? 0),
-        y: Number(coords.y ?? 0),
-        z: Number(coords.z ?? 0),
-        lat: Number(coords.lat ?? coords.latitude ?? 0),
-        lon: Number(coords.lon ?? coords.longitude ?? 0),
+        x: propagated.x,
+        y: propagated.y,
+        z: propagated.z,
+        lat: propagated.lat,
+        lon: propagated.lon,
       },
       cpu_total: cpuTotal,
       cpu_available: cpuAvail,

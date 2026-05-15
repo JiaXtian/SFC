@@ -195,16 +195,6 @@ export default function DeploymentPanel() {
                       约束未满足（等待重算）
                     </span>
                   )}
-                  {dep.source_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(59,130,246,0.16)', border: '1px solid rgba(96,165,250,0.35)', color: '#93c5fd' }}>
-                      入口 {dep.source_node}
-                    </span>
-                  )}
-                  {dep.destination_node && (
-                    <span className="px-2 py-0.5 rounded font-mono text-[9px]" style={{ background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(251,146,60,0.35)', color: '#fdba74' }}>
-                      出口 {dep.destination_node}
-                    </span>
-                  )}
                   {dep.deployed_nodes.slice(0,4).map(n => (
                     <span key={n} className="px-2 py-0.5 rounded font-mono text-[9px]"
                       style={{ background: 'rgba(0,255,136,0.12)', border: '1px solid rgba(0,255,136,0.25)', color: '#00ff88' }}>
@@ -225,7 +215,7 @@ export default function DeploymentPanel() {
                       <div className="space-y-0.5">
                         {(toChineseFailureList(dep.violation_details).length > 0
                           ? toChineseFailureList(dep.violation_details)
-                          : ['当前候选不满足SLA硬约束，系统正在持续路径重算/重调度']
+                          : ['当前候选不满足核心网部署约束，系统正在持续路径重算/重调度']
                         ).map((reason, idx) => (
                           <div key={idx} className="text-[10px] text-rose-100">- {reason}</div>
                         ))}
@@ -235,24 +225,21 @@ export default function DeploymentPanel() {
                   <div className="mt-2">
                     <div className="text-[11px] text-gray-400 uppercase tracking-wider mb-1.5 font-semibold">核心网网元详情</div>
                     <div className="space-y-1">
-                      {dep.per_vnf?.map((v, i) => (
-                        <div key={i} className="flex items-center justify-between px-2 py-1.5 rounded-lg text-[10px]"
+                      {dep.per_vnf?.map((v, i) => {
+                        const nfType = String((v as any).nf_type ?? (v as any).core_nf ?? v.vnf ?? '-').toUpperCase()
+                        return (
+                        <div key={i} className="grid grid-cols-[minmax(48px,0.55fr)_minmax(0,1fr)_minmax(92px,auto)] items-start gap-2 px-2 py-1.5 rounded-lg text-[10px]"
                           style={{ background: 'rgba(15,23,42,0.28)', border: '1px solid rgba(100,130,155,0.2)' }}>
-                          <div className="flex items-center gap-2">
-                            <span className="w-4.5 h-4.5 rounded flex items-center justify-center text-[8px] font-bold"
-                              style={{ background: 'rgba(0,255,136,0.2)', color: '#00ff88' }}>{i+1}</span>
-                            <span className="font-medium text-gray-300">{(v as any).core_nf ?? v.vnf}</span>
-                            <span className="text-[9px] text-cyan-300">{(v as any).nf_type ?? '-'}</span>
-                            <span className="text-gray-700">→</span>
-                            <span className="font-mono text-green-400">{v.node}</span>
-                          </div>
-                          <div className="flex gap-2 text-[9px] text-gray-500">
+                          <div className="font-semibold text-cyan-200 truncate">{nfType}</div>
+                          <div className="font-mono text-green-400 min-w-0 break-all leading-4" title={String(v.node ?? '')}>→ {v.node}</div>
+                          <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px] text-gray-400 justify-end leading-4">
                             <span>CPU {v.cpu_used?.toFixed(2)}</span>
                             <span>MEM {v.mem_used?.toFixed(1)}G</span>
                             <span>DISK {(v as any).disk_used?.toFixed?.(1) ?? '0.0'}G</span>
                           </div>
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </div>
 
@@ -273,25 +260,24 @@ export default function DeploymentPanel() {
                           const usedPct = clampPercent(totalBw > 1e-9 ? (usedBw / totalBw) * 100 : 0)
                           const sfcPct = clampPercent(totalBw > 1e-9 ? (sfcUsedBw / totalBw) * 100 : 0)
                           const otherPct = clampPercent(totalBw > 1e-9 ? (otherUsedBw / totalBw) * 100 : 0)
-                          const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps`
+                          const depLabel = l.dependency_source_nf && l.dependency_target_nf
+                            ? `${String(l.dependency_source_nf).toUpperCase()}→${String(l.dependency_target_nf).toUpperCase()}`
+                            : '核心网依赖'
+                          const hoverText = `链路总容量 ${totalBw.toFixed(2)}Gbps\n链路总占用 ${usedBw.toFixed(2)}Gbps (${usedPct.toFixed(1)}%)\n当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps (${sfcPct.toFixed(1)}%)\n其他业务占用 ${otherUsedBw.toFixed(2)}Gbps (${otherPct.toFixed(1)}%)\n链路可用 ${availBw.toFixed(2)}Gbps\n依赖边 ${depLabel}`
                           return (
-                            <div key={i} className="px-2 py-1 rounded text-[10px]"
+                            <div key={i} className="px-2 py-1.5 rounded-md text-[10px]"
                               style={{ background: 'rgba(15,23,42,0.3)', border: '1px solid rgba(100,130,155,0.18)' }}>
-                              <div className="flex items-center justify-between">
-                                <span className="font-mono text-green-400">
-                                  <span className="text-gray-500 mr-1">{String(i + 1).padStart(2, '0')}.</span>
+                              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                                <span className="font-mono text-green-400 truncate">
                                   <span className="text-green-400">{l.src}</span>
                                   <span className="text-gray-700 mx-1">→</span>
                                   <span className="text-green-400">{l.dst}</span>
+                                  <span className="ml-2 text-[9px] text-cyan-300">{depLabel}</span>
                                 </span>
-                                <span className="text-green-300">{l.latency_ms?.toFixed(2)}ms</span>
+                                <span className="text-green-300 font-mono">{l.latency_ms?.toFixed(2)}ms</span>
                               </div>
-                              <div className="mt-1.5" title={hoverText}>
-                                <div className="flex items-center justify-between text-[9px] mb-1">
-                                  <span className="text-cyan-300">链路占用分布</span>
-                                  <span className="text-cyan-300 font-mono">{usedPct.toFixed(1)}%</span>
-                                </div>
-                                <div className="h-2 rounded-full bg-slate-900/80 border border-cyan-500/20 overflow-hidden flex">
+                              <div className="mt-1" title={hoverText}>
+                                <div className="h-1 rounded-full bg-slate-900/80 border border-cyan-500/15 overflow-hidden flex">
                                   <div
                                     className="h-full"
                                     style={{
@@ -306,12 +292,9 @@ export default function DeploymentPanel() {
                                       width: `${sfcPct}%`,
                                       background: 'linear-gradient(90deg, rgba(74,222,128,0.88), rgba(16,185,129,0.76))',
                                     }}
-                                    title={`当前SFC占用 ${sfcUsedBw.toFixed(2)}Gbps`}
+                                    title={`当前核心网占用 ${sfcUsedBw.toFixed(2)}Gbps`}
                                   />
                                 </div>
-                              </div>
-                              <div className="mt-1 text-[9px] text-cyan-300 font-mono" title={hoverText}>
-                                SFC需 {sfcUsedBw.toFixed(2)} / 链路已用 {usedBw.toFixed(2)} / 可用 {availBw.toFixed(2)} / 总 {totalBw.toFixed(2)} Gbps
                               </div>
                             </div>
                           )
@@ -348,7 +331,7 @@ export default function DeploymentPanel() {
             </div>
             <div className="px-4 py-3">
               <p className="text-sm text-gray-300 leading-relaxed mb-2">
-                确定要回滚此 SFC 部署吗？
+                确定要回滚此核心网部署吗？
               </p>
               <p className="text-xs text-gray-500">
                 此操作将释放所有已分配的资源，且无法撤销。

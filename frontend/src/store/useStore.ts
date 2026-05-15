@@ -14,6 +14,8 @@ export interface VNFDeploy {
 export interface LinkDetail {
   src: string
   dst: string
+  dependency_source_nf?: string
+  dependency_target_nf?: string
   latency_ms: number
   bandwidth_gbps: number
   bandwidth_available_gbps?: number
@@ -22,9 +24,20 @@ export interface LinkDetail {
   fault_tag?: string
   reliability?: number
 }
+export interface CoreNFDependency {
+  source: string
+  target: string
+  criticality?: number
+  bandwidth_scale?: number
+  latency_weight?: number
+  reliability_weight?: number
+  bandwidth_required_gbps?: number
+}
 export interface Deployment {
   deployment_id: string
   backend_deployment_id?: string
+  core_network_id?: string
+  core_network_label?: string
   request_id: string
   sfc_name: string
   candidate_index: number
@@ -43,25 +56,30 @@ export interface Deployment {
     resource: number
     reliability: number
     bandwidth: number
-    dispersion: number
   }
   score_weights?: {
     latency: number
     resource: number
     reliability: number
     bandwidth: number
-    dispersion: number
   }
   score_constraints?: {
     max_latency_ms: number
+    registration_latency_ms?: number
+    registration_access_latency_ms?: number
+    pdu_session_latency_ms?: number
+    pdu_access_latency_ms?: number
     min_bandwidth_gbps: number
     min_reliability: number
   }
   deployed_nodes: string[]
   per_vnf: VNFDeploy[]
   link_details: LinkDetail[]
+  core_nf_dependencies?: CoreNFDependency[]
   previous_link_details?: LinkDetail[]
   total_latency_ms: number
+  registration_latency_ms?: number
+  pdu_session_latency_ms?: number
   deployed_at: string
   progress: number
   strategy_mode?: 'single_request' | 'session_continuous'
@@ -89,6 +107,8 @@ export interface Deployment {
 export interface CandidateResult {
   requestId: string
   sfcName: string
+  coreNetworkId?: string
+  coreNetworkLabel?: string
   candidates: any[]
   inferenceTime?: number
   topologyVersion: number
@@ -102,6 +122,10 @@ export interface CandidateResult {
     optimize: string
     constraints: {
       max_latency_ms: number
+      registration_latency_ms?: number
+      registration_access_latency_ms?: number
+      pdu_session_latency_ms?: number
+      pdu_access_latency_ms?: number
       min_bandwidth_gbps: number
       min_reliability: number
     }
@@ -110,13 +134,13 @@ export interface CandidateResult {
       resource: number
       reliability: number
       bandwidth: number
-      dispersion: number
     } | null
-    vnfCount: number
   }
   requestPayload?: any
   sessionConfig?: {
     auto_redeploy: boolean
+    realtime_mode?: boolean
+    inference_profile?: 'fast' | 'balanced' | 'quality' | string
     max_planning_attempts: number
     planning_time_budget_ms: number
   }
@@ -182,6 +206,8 @@ export interface DecisionTrace {
   trigger?: string
   session_id?: string
   request_id: string
+  core_network_id?: string
+  core_network_label?: string
   source_node?: string
   destination_node?: string
   topology_version: number
@@ -194,10 +220,13 @@ export interface DecisionTrace {
   decision_process?: any
   request_vnfs?: RequestVNF[]
   request_core_nfs?: RequestVNF[]
+  core_nf_dependencies?: CoreNFDependency[]
   candidates: Array<{
     score: number
     satisfies_constraints: boolean
     total_latency_ms: number
+    registration_latency_ms?: number
+    pdu_session_latency_ms?: number
     estimated_reliability: number
     bottleneck_bandwidth_gbps: number
     deployed_nodes?: string[]
@@ -252,6 +281,7 @@ export interface AutoDynamicsState {
   time_scale: number
   elapsed_sec: number
   last_resource_sync_at: string
+  snap_visual_token: number
 }
 
 export interface DisplaySettings {
@@ -342,6 +372,33 @@ type PathGraph = {
   linkMap: Map<string, LinkData>
 }
 
+const DEFAULT_CORE_NF_DEPENDENCIES: CoreNFDependency[] = [
+  { source: 'nrf', target: 'scp', bandwidth_scale: 0.55 },
+  { source: 'scp', target: 'amf', bandwidth_scale: 0.72 },
+  { source: 'scp', target: 'smf', bandwidth_scale: 0.76 },
+  { source: 'scp', target: 'ausf', bandwidth_scale: 0.42 },
+  { source: 'scp', target: 'udm', bandwidth_scale: 0.44 },
+  { source: 'scp', target: 'pcf', bandwidth_scale: 0.34 },
+  { source: 'scp', target: 'nssf', bandwidth_scale: 0.28 },
+  { source: 'scp', target: 'bsf', bandwidth_scale: 0.24 },
+  { source: 'scp', target: 'sepp', bandwidth_scale: 0.3 },
+  { source: 'amf', target: 'ausf', bandwidth_scale: 0.46 },
+  { source: 'amf', target: 'udm', bandwidth_scale: 0.48 },
+  { source: 'amf', target: 'smf', bandwidth_scale: 0.86 },
+  { source: 'amf', target: 'nssf', bandwidth_scale: 0.34 },
+  { source: 'smf', target: 'upf', bandwidth_scale: 1.0 },
+  { source: 'smf', target: 'pcf', bandwidth_scale: 0.44 },
+  { source: 'smf', target: 'bsf', bandwidth_scale: 0.3 },
+  { source: 'smf', target: 'udm', bandwidth_scale: 0.38 },
+  { source: 'udm', target: 'udr', bandwidth_scale: 0.56 },
+  { source: 'pcf', target: 'udr', bandwidth_scale: 0.34 },
+  { source: 'pcf', target: 'bsf', bandwidth_scale: 0.28 },
+]
+
+function normalizeNfType(value: any): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_')
+}
+
 function linkKey(src: string, dst: string) {
   return `${src}|${dst}`
 }
@@ -379,13 +436,32 @@ function isSatelliteDown(sat: SatelliteData | undefined): boolean {
   return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
 }
 
-function buildAdjacency(links: LinkData[], satellites: SatelliteData[]): PathGraph {
+function collectDownNodeIds(satellites: SatelliteData[]): Set<string> {
   const downNodes = new Set<string>()
   satellites.forEach((sat: any) => {
     const id = String(sat?.id ?? '')
     if (!id) return
     if (isSatelliteDown(sat as SatelliteData)) downNodes.add(id)
   })
+  return downNodes
+}
+
+function buildUsableLinkMap(links: LinkData[], satellites: SatelliteData[]): Map<string, LinkData> {
+  const downNodes = collectDownNodeIds(satellites)
+  const linkMap = new Map<string, LinkData>()
+  links.forEach((l) => {
+    if (downNodes.has(l.source) || downNodes.has(l.target)) return
+    const status = (l as any).status ?? 'active'
+    const avail = Number((l as any).bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0)
+    if (status === 'down' || avail <= 0) return
+    linkMap.set(linkKey(l.source, l.target), l)
+    linkMap.set(linkKey(l.target, l.source), l)
+  })
+  return linkMap
+}
+
+function buildAdjacency(links: LinkData[], satellites: SatelliteData[]): PathGraph {
+  const downNodes = collectDownNodeIds(satellites)
   const adj = new Map<string, string[]>()
   const linkMap = new Map<string, LinkData>()
   links.forEach((l) => {
@@ -437,6 +513,42 @@ function shortestPath(src: string, dst: string, adj: Map<string, string[]>) {
   }
   if (path[path.length - 1] !== src) return []
   return path.reverse()
+}
+
+function dependencyListForDeployment(dep: Deployment): CoreNFDependency[] {
+  return Array.isArray(dep.core_nf_dependencies) && dep.core_nf_dependencies.length > 0
+    ? dep.core_nf_dependencies
+    : DEFAULT_CORE_NF_DEPENDENCIES
+}
+
+function nfNodeMapForDeployment(dep: Deployment): Map<string, string> {
+  const out = new Map<string, string>()
+  ;(Array.isArray(dep.per_vnf) ? dep.per_vnf : []).forEach((p) => {
+    const node = String(p?.node ?? '')
+    if (!node) return
+    const keys = [
+      normalizeNfType(p?.nf_type),
+      normalizeNfType(p?.core_nf),
+      normalizeNfType(p?.vnf),
+    ].filter(Boolean)
+    keys.forEach((k) => out.set(k, node))
+  })
+  return out
+}
+
+function dependencySegmentsForDeployment(dep: Deployment) {
+  const nodeByNf = nfNodeMapForDeployment(dep)
+  const segments: Array<{ source: string; target: string; srcNode: string; dstNode: string; requiredBw: number }> = []
+  dependencyListForDeployment(dep).forEach((d) => {
+    const source = normalizeNfType(d?.source)
+    const target = normalizeNfType(d?.target)
+    const srcNode = nodeByNf.get(source) ?? ''
+    const dstNode = nodeByNf.get(target) ?? ''
+    if (!source || !target || !srcNode || !dstNode || srcNode === dstNode) return
+    const requiredBw = Math.max(0, Number(d?.bandwidth_required_gbps ?? 0))
+    segments.push({ source, target, srcNode, dstNode, requiredBw })
+  })
+  return segments
 }
 
 function buildAnchorsForDeployment(dep: Deployment): string[] {
@@ -505,7 +617,9 @@ function linksAreStillUsable(dep: Deployment, linkMap: Map<string, LinkData>) {
     if (!cur) return false
     const status = String((cur as any)?.status ?? 'active')
     const avail = Number((cur as any)?.bandwidth_available_gbps ?? (cur as any)?.bandwidth_gbps ?? 0)
+    const required = Number((l as any)?.bandwidth_required_gbps ?? 0)
     if (status === 'down' || avail <= 0) return false
+    if (required > 1e-9 && avail + 1e-9 < required) return false
   }
   return true
 }
@@ -521,6 +635,8 @@ function refreshLinkMetrics(linkDetails: LinkDetail[], linkMap: Map<string, Link
     const next: LinkDetail = {
       src: String(l.src),
       dst: String(l.dst),
+      dependency_source_nf: String(l.dependency_source_nf ?? ''),
+      dependency_target_nf: String(l.dependency_target_nf ?? ''),
       latency_ms: Number((cur as any)?.latency_ms ?? l.latency_ms ?? 0),
       bandwidth_gbps: Number((cur as any)?.bandwidth_gbps ?? l.bandwidth_gbps ?? 0),
       bandwidth_available_gbps: Number((cur as any)?.bandwidth_available_gbps ?? l.bandwidth_available_gbps ?? l.bandwidth_gbps ?? 0),
@@ -545,7 +661,8 @@ function refreshLinkMetrics(linkDetails: LinkDetail[], linkMap: Map<string, Link
 function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
   const { adj, linkMap } = graph
   const anchors = buildAnchorsForDeployment(dep)
-  if (anchors.length < 2) return dep
+  const dependencySegments = dependencySegmentsForDeployment(dep)
+  if (anchors.length < 2 && dependencySegments.length === 0) return dep
 
   const requiredByEdge = new Map<string, number>()
   const requiredSamples: number[] = []
@@ -561,6 +678,67 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
   const requiredFallback = requiredSamples.length > 0
     ? Math.max(...requiredSamples)
     : Math.max(0.1, Number(dep.score_constraints?.min_bandwidth_gbps ?? 0))
+
+  if (dependencySegments.length > 0 && linksAreStillUsable(dep, linkMap)) {
+    const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
+    const { refreshed, changed } = refreshLinkMetrics(currentLinks, linkMap)
+    if (!changed) return dep
+    const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+    return {
+      ...dep,
+      link_details: refreshed,
+      total_latency_ms: totalLatency > 0 ? totalLatency : dep.total_latency_ms,
+    }
+  }
+
+  if (dependencySegments.length > 0) {
+    const newNodes: string[] = []
+    const newLinks: LinkDetail[] = []
+    let segmentFailed = false
+    for (const seg of dependencySegments) {
+      const segPath = shortestPath(seg.srcNode, seg.dstNode, adj)
+      if (segPath.length < 2) {
+        segmentFailed = true
+        continue
+      }
+      segPath.forEach((node) => {
+        if (newNodes[newNodes.length - 1] !== node) newNodes.push(node)
+      })
+      for (let k = 0; k + 1 < segPath.length; k++) {
+        const src = segPath[k]
+        const dst = segPath[k + 1]
+        const lk = linkMap.get(linkKey(src, dst))
+        const req = seg.requiredBw > 0 ? seg.requiredBw : requiredFallback
+        newLinks.push({
+          src,
+          dst,
+          dependency_source_nf: seg.source,
+          dependency_target_nf: seg.target,
+          latency_ms: Number((lk as any)?.latency_ms ?? 0),
+          bandwidth_gbps: Number((lk as any)?.bandwidth_gbps ?? 0),
+          bandwidth_available_gbps: Number((lk as any)?.bandwidth_available_gbps ?? 0),
+          bandwidth_required_gbps: req,
+          status: (lk as any)?.status ?? 'down',
+          fault_tag: String((lk as any)?.fault_tag ?? ''),
+          reliability: Number((lk as any)?.reliability ?? (lk as any)?.link_reliability ?? 0),
+        })
+      }
+    }
+    if (segmentFailed || newLinks.length === 0) {
+      return {
+        ...dep,
+        link_details: [],
+        total_latency_ms: 0,
+      }
+    }
+    const totalLatency = newLinks.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+    return {
+      ...dep,
+      path_nodes: newNodes,
+      link_details: newLinks,
+      total_latency_ms: totalLatency > 0 ? totalLatency : dep.total_latency_ms,
+    }
+  }
 
   const chainValid = followsSingleChain(dep, anchors)
   if (chainValid && linksAreStillUsable(dep, linkMap)) {
@@ -623,6 +801,31 @@ function rebuildDeploymentPath(dep: Deployment, graph: PathGraph): Deployment {
 function pathSignature(linkDetails: LinkDetail[] | undefined): string {
   if (!Array.isArray(linkDetails) || linkDetails.length === 0) return ''
   return linkDetails.map((l) => `${l.src}->${l.dst}`).join('|')
+}
+
+function deploymentRuntimeSignature(dep: Deployment | undefined): string {
+  if (!dep) return ''
+  const nf = (Array.isArray(dep.per_vnf) ? dep.per_vnf : [])
+    .map((p: any) => [
+      String(p?.core_nf ?? p?.vnf ?? p?.nf_type ?? ''),
+      String(p?.node ?? ''),
+      Number(p?.cpu_used ?? 0).toFixed(2),
+      Number(p?.mem_used ?? 0).toFixed(2),
+      Number(p?.disk_used ?? 0).toFixed(2),
+    ].join(':'))
+    .join(',')
+  return [
+    String(dep.status ?? ''),
+    String(dep.satisfies_constraints ?? ''),
+    String(dep.decision_trigger ?? ''),
+    pathSignature(dep.link_details),
+    (Array.isArray(dep.deployed_nodes) ? dep.deployed_nodes : []).join(','),
+    nf,
+    Number(dep.total_latency_ms ?? 0).toFixed(1),
+    Number(dep.bottleneck_bandwidth_gbps ?? 0).toFixed(2),
+    Number(dep.estimated_reliability ?? 0).toFixed(4),
+    Number(dep.inference_latency_ms ?? 0).toFixed(1),
+  ].join('|')
 }
 
 function decisionTraceSignature(trace: DecisionTrace): string {
@@ -716,24 +919,23 @@ function derivePathAnchors(trace: DecisionTrace, chosen: any, perVnf: VNFDeploy[
   const fromTrace = Array.isArray(chosen?.deployed_nodes) ? chosen.deployed_nodes : []
   const fromPerVnf = perVnf.map((p) => p.node).filter(Boolean)
   const core = fromTrace.length > 0 ? fromTrace : fromPerVnf
-  const seq = [trace.source_node ?? '', ...core, trace.destination_node ?? ''].filter(Boolean)
+  const seq = [...core].filter(Boolean)
   return seq.filter((n, idx) => idx === 0 || n !== seq[idx - 1])
 }
 
 function pickTraceLinkDetails(chosen: any): LinkDetail[] {
   if (!Array.isArray(chosen?.link_details)) return []
-  const seen = new Set<string>()
   const out: LinkDetail[] = []
   chosen.link_details.forEach((l: any) => {
     const src = String(l?.src ?? '')
     const dst = String(l?.dst ?? '')
     if (!src || !dst || src === dst) return
-    const k = `${src}|${dst}`
-    if (seen.has(k)) return
-    seen.add(k)
+    const dep = l?.core_nf_dependency ?? {}
     out.push({
       src,
       dst,
+      dependency_source_nf: String(l?.dependency_source_nf ?? dep?.source ?? ''),
+      dependency_target_nf: String(l?.dependency_target_nf ?? dep?.target ?? ''),
       latency_ms: Number(l?.latency_ms ?? 0),
       bandwidth_gbps: Number(l?.bandwidth_gbps ?? 0),
       bandwidth_available_gbps: Number(l?.bandwidth_available_gbps ?? 0),
@@ -875,12 +1077,14 @@ function orbitalLayoutChanged(current: SatelliteData[], incoming: any[]): boolea
     const nOp: any = src?.orbital_params ?? {}
     const samePlane = toFinite(cOp.plane, -1) === toFinite(nOp.plane, -1)
     const samePos = toFinite(cOp.position_in_plane, -1) === toFinite(nOp.position_in_plane, -1)
-    const sameRaan = Math.abs(toFinite(cOp.raan, 0) - toFinite(nOp.raan, 0)) <= 1e-6
-    const sameAlt = Math.abs(toFinite(cOp.altitude_km, 0) - toFinite(nOp.altitude_km, 0)) <= 1e-6
     const cIncl = toFinite(cOp.inclination ?? cOp.inclination_deg, 0)
     const nIncl = toFinite(nOp.inclination ?? nOp.inclination_deg, 0)
     const sameIncl = Math.abs(cIncl - nIncl) <= 1e-6
-    if (!(samePlane && samePos && sameRaan && sameAlt && sameIncl)) return true
+    const sameMeanMotion = Math.abs(toFinite(cOp.mean_motion_rev_per_day, 0) - toFinite(nOp.mean_motion_rev_per_day, 0)) <= 1e-7
+    const sameEcc = Math.abs(toFinite(cOp.eccentricity, 0) - toFinite(nOp.eccentricity, 0)) <= 1e-8
+    const sameEpoch = Math.abs(toFinite(cOp.epoch_jd, 0) - toFinite(nOp.epoch_jd, 0)) <= 1e-8
+    const sameModel = String(cOp.propagation_model ?? 'SGP4') === String(nOp.propagation_model ?? 'SGP4')
+    if (!(samePlane && samePos && sameIncl && sameMeanMotion && sameEcc && sameEpoch && sameModel)) return true
     checked += 1
     if (checked >= 32) break
   }
@@ -941,6 +1145,7 @@ export const useStore = create<Store>((set, get) => ({
     time_scale: 1,
     elapsed_sec: 0,
     last_resource_sync_at: '',
+    snap_visual_token: 0,
   },
 
   setSatellites: (s) => set((st) => ({
@@ -984,6 +1189,22 @@ export const useStore = create<Store>((set, get) => ({
       return {
         deployments: nextDeployments,
         highlightedDeploymentIds: nextHighlighted,
+        runtimeEvents: nextDeployments.length === 0
+          ? s.runtimeEvents.filter((evt) => {
+              const type = String(evt.type)
+              if (type === 'recovery_event') return String(evt.raw?.entity_type ?? '') !== 'session'
+              return ![
+                'deployment_action',
+                'deployment_update',
+                'deployment_runtime_update',
+                'decision_trace',
+                'session_update',
+                'reschedule_trigger',
+                'path_recompute_trigger',
+                'planning_result',
+              ].includes(type)
+            })
+          : s.runtimeEvents,
       }
     })
     get().refreshDeploymentPaths()
@@ -1020,11 +1241,27 @@ export const useStore = create<Store>((set, get) => ({
   clearDeployments: () => set({ deployments: [], highlightedDeploymentIds: [] }),
   refreshDeploymentPaths: () => set((s) => {
     if (s.deployments.length === 0) return s
-    const graph = buildAdjacency(s.links, s.satellites)
+    const linkMap = buildUsableLinkMap(s.links, s.satellites)
+    let graph: PathGraph | null = null
     const topoV = Number(s.simulation.topology_version || s.topologyVersion || 0)
     let stateChanged = false
     const nextDeployments = s.deployments.map((dep) => {
-      const rebuilt = rebuildDeploymentPath(dep, graph)
+      let rebuilt = dep
+      const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
+      if (currentLinks.length > 0 && linksAreStillUsable(dep, linkMap)) {
+        const { refreshed, changed } = refreshLinkMetrics(currentLinks, linkMap)
+        if (changed) {
+          const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+          rebuilt = {
+            ...dep,
+            link_details: refreshed,
+            total_latency_ms: totalLatency > 0 ? totalLatency : dep.total_latency_ms,
+          }
+        }
+      } else {
+        if (!graph) graph = buildAdjacency(s.links, s.satellites)
+        rebuilt = rebuildDeploymentPath(dep, graph)
+      }
       const oldSig = pathSignature(dep.link_details)
       const newSig = pathSignature(rebuilt.link_details)
       const pathChanged = oldSig !== newSig
@@ -1032,11 +1269,11 @@ export const useStore = create<Store>((set, get) => ({
       const trackRecompute = hasBoundVersion && (dep.strategy_mode === 'session_continuous' || dep.path_recompute_count != null)
       const nextRecomputeCountRaw = (dep.path_recompute_count ?? 0) + (pathChanged && trackRecompute ? 1 : 0)
       const nextRecomputeCount = dep.path_recompute_count == null && !trackRecompute ? undefined : nextRecomputeCountRaw
-      const topologyChanged = Number(dep.topology_version_bound ?? -1) !== topoV
+      const shouldBindTopology = !hasBoundVersion || pathChanged
       const deploymentChanged =
         rebuilt !== dep ||
         dep.path_recompute_count !== nextRecomputeCount ||
-        topologyChanged ||
+        (shouldBindTopology && Number(dep.topology_version_bound ?? -1) !== topoV) ||
         dep.previous_link_details !== undefined ||
         dep.path_transition_until !== undefined
 
@@ -1044,7 +1281,7 @@ export const useStore = create<Store>((set, get) => ({
       stateChanged = true
       return {
         ...rebuilt,
-        topology_version_bound: topoV,
+        topology_version_bound: shouldBindTopology ? topoV : dep.topology_version_bound,
         path_recompute_count: nextRecomputeCount,
         previous_link_details: undefined,
         path_transition_until: undefined,
@@ -1076,9 +1313,11 @@ export const useStore = create<Store>((set, get) => ({
   setAutoDynamics: (patch) => set((s) => {
     const next = { ...s.autoDynamics, ...patch }
     const sampling = Number(next.resource_update_sec ?? s.autoDynamics.resource_update_sec ?? 15)
-    next.resource_update_sec = Math.max(10, Math.min(30, Number.isFinite(sampling) ? sampling : 15))
+    next.resource_update_sec = Math.max(10, Math.min(120, Number.isFinite(sampling) ? sampling : 15))
     const speed = Number(next.time_scale ?? s.autoDynamics.time_scale ?? 1)
-    next.time_scale = Math.max(0.1, Math.min(20, Number.isFinite(speed) ? speed : 1))
+    next.time_scale = Math.max(0.1, Math.min(8, Number.isFinite(speed) ? speed : 1))
+    const positionHz = Number(next.position_update_hz ?? s.autoDynamics.position_update_hz ?? 4)
+    next.position_update_hz = Math.max(0.5, Math.min(5, Number.isFinite(positionHz) ? positionHz : 4))
     return { autoDynamics: next }
   }),
   setSimulationViewMode: (mode) => {
@@ -1165,7 +1404,7 @@ export const useStore = create<Store>((set, get) => ({
               metrics,
             }
           : null
-      const maxHistoryFrames = nodeCount >= 5000 ? 20 : (nodeCount >= 3000 ? 40 : 240)
+      const maxHistoryFrames = nodeCount >= 5000 ? 6 : (nodeCount >= 3000 ? 12 : 120)
       const history = frame
         ? [...s.simulation.history, frame].slice(-maxHistoryFrames)
         : s.simulation.history
@@ -1248,13 +1487,13 @@ export const useStore = create<Store>((set, get) => ({
     const base: Deployment = {
       deployment_id: depId,
       backend_deployment_id: existing?.backend_deployment_id,
+      core_network_id: existing?.core_network_id ?? String(trace.core_network_id ?? depId),
+      core_network_label: existing?.core_network_label ?? String(trace.core_network_label ?? ''),
       request_id: trace.request_id,
-      sfc_name: `SFC策略 ${trace.request_id}`,
+      sfc_name: existing?.core_network_label ?? String(trace.core_network_label ?? existing?.sfc_name ?? `核心网策略 ${trace.request_id}`),
       candidate_index: 0,
       status: chosen.satisfies_constraints ? 'completed' : 'in-progress',
       inference_latency_ms: resolvedInference,
-      source_node: trace.source_node,
-      destination_node: trace.destination_node,
       path_nodes: anchors,
       satisfies_constraints: !!chosen.satisfies_constraints,
       violation_details: Array.isArray(chosen.violation_details) ? chosen.violation_details : [],
@@ -1267,8 +1506,13 @@ export const useStore = create<Store>((set, get) => ({
       deployed_nodes: Array.isArray(chosen.deployed_nodes) ? chosen.deployed_nodes : perVnf.map((p) => p.node),
       per_vnf: perVnf.length > 0 ? perVnf : (existing?.per_vnf ?? []),
       link_details: pickTraceLinkDetails(chosen),
+      core_nf_dependencies: Array.isArray(trace.core_nf_dependencies)
+        ? trace.core_nf_dependencies
+        : existing?.core_nf_dependencies,
       previous_link_details: undefined,
       total_latency_ms: Number(chosen.total_latency_ms ?? existing?.total_latency_ms ?? 0),
+      registration_latency_ms: Number(chosen.registration_latency_ms ?? existing?.registration_latency_ms ?? 0),
+      pdu_session_latency_ms: Number(chosen.pdu_session_latency_ms ?? existing?.pdu_session_latency_ms ?? 0),
       deployed_at: nowIso,
       progress: 100,
       strategy_mode: 'session_continuous',
@@ -1279,21 +1523,50 @@ export const useStore = create<Store>((set, get) => ({
       path_transition_until: undefined,
     }
 
-    const rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links, s.satellites))
+    const linkMap = buildUsableLinkMap(s.links, s.satellites)
+    let rebuilt = base
+    if (Array.isArray(base.link_details) && base.link_details.length > 0 && linksAreStillUsable(base, linkMap)) {
+      const { refreshed, changed } = refreshLinkMetrics(base.link_details, linkMap)
+      if (changed) {
+        const totalLatency = refreshed.reduce((acc, l) => acc + Number(l.latency_ms || 0), 0)
+        rebuilt = {
+          ...base,
+          link_details: refreshed,
+          total_latency_ms: totalLatency > 0 ? totalLatency : base.total_latency_ms,
+        }
+      }
+    } else {
+      rebuilt = rebuildDeploymentPath(base, buildAdjacency(s.links, s.satellites))
+    }
     const hasExisting = !!existing
-    const deployments = hasExisting
-      ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
-      : [
+    if (hasExisting) {
+      const pathChanged = pathSignature(existing?.link_details) !== pathSignature(rebuilt.link_details)
+      rebuilt = {
+        ...rebuilt,
+        topology_version_bound: pathChanged || existing?.topology_version_bound == null
+          ? topoV
+          : existing.topology_version_bound,
+        path_recompute_count: (existing?.path_recompute_count ?? 0) + (pathChanged ? 1 : 0),
+      }
+    }
+    const highlightedAlready = s.highlightedDeploymentIds.includes(depId)
+    const runtimeUnchanged = hasExisting && deploymentRuntimeSignature(existing) === deploymentRuntimeSignature(rebuilt)
+    const deployments = runtimeUnchanged
+      ? s.deployments
+      : (hasExisting
+        ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
+        : [
           rebuilt,
           ...s.deployments.filter((dep) =>
             !(dep.request_id === trace.request_id && !dep.session_id)
           ),
-        ]
+        ])
 
-    const highlighted = s.highlightedDeploymentIds.includes(depId)
+    const highlighted = highlightedAlready
       ? s.highlightedDeploymentIds
       : [depId, ...s.highlightedDeploymentIds]
 
+    if (runtimeUnchanged && highlightedAlready) return {}
     return { deployments, highlightedDeploymentIds: highlighted }
   }),
   suppressSessionDeployment: (sessionId) => set((s) => ({

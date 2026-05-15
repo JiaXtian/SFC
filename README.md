@@ -1,209 +1,204 @@
-# 动态卫星 SFC 智能编排系统
+# 动态卫星 Open5GS 核心网智能编排系统
 
-一个面向动态卫星网络的 SFC（Service Function Chaining）编排与可视化系统，提供从数据生成、模型训练、ONNX 导出、后端推理到前端实时展示的完整闭环。
+本项目面向动态卫星网络上的 Open5GS 核心网部署与持续编排，提供星座拓扑生成/导入、12 网元核心网策略生成、真实容器化网元拉起、故障注入、分级恢复、UERANSIM 功能验证和三维大屏可视化能力。
 
 ## 1. 主要能力
-- 动态星座生成（Walker-Delta 参数化）。
-- 卫星位置与 ISL 链路动态更新。
-- SFC 候选策略生成、手动选择初始部署、持续编排维护。
-- 故障注入与恢复（节点/链路故障、恢复事件流）。
-- 监控中心展示拓扑健康、编排时延、恢复质量与稳定性。
-- 训练产物导出 ONNX，供 C++ 后端在线推理。
+
+- 动态星座生成与第三方拓扑导入，导入结构与后端 `Topology` 模型保持一致。
+- 在卫星星座上部署完整 Open5GS 核心网，覆盖 NRF、SCP、AMF、SMF、UPF、AUSF、UDM、UDR、PCF、BSF、NSSF、SEPP 等 12 个网元。
+- 按 Open5GS 网元依赖关系计算网元间路径，而不是简单全图完全连通。
+- 使用训练导出的 ONNX 模型生成核心网部署候选，并提供硬约束兜底策略。
+- 启动真实 Open5GS 容器、Mongo 容器和 UERANSIM 验证容器。
+- 支持节点/链路故障注入、路径重算、局部重调度、整体重调度和 SLA 持续监测。
+- 大屏主页面、系统控制中心、监控中心、卫星/链路详情和消息面板联动展示。
 
 ## 2. 项目结构
+
 ```text
 sfc_deploy/
 ├── backend/                   # C++ 后端（Drogon + ONNX Runtime）
 ├── frontend/                  # React + Vite + Three.js 前端
 ├── train/                     # 数据生成、训练、评估、导出
-├── models/
-│   ├── checkpoints/           # 训练权重（.pth）
-│   └── exported/              # ONNX 模型
-├── logs/                      # 训练与验证日志
-├── 算法训练与推理说明.md
-└── 项目总体设计文档.md
+├── models/exported/           # 后端推理使用的 ONNX 模型
+├── docker/                    # Open5GS 卫星节点容器构建文件
+├── scripts/                   # 银河麒麟 V10 部署脚本
+├── testdata/                  # 拓扑导入演示数据
+├── KYLIN_V10_MIGRATION.md     # 银河麒麟 V10 完整迁移部署文档
+└── dev.sh                     # 通用本地启动脚本
 ```
 
-## 3. 环境要求
+## 3. 推荐环境
 
-### 3.1 通用
+### 银河麒麟 V10 桌面版（amd64）
+
+已提供完整迁移文档：`KYLIN_V10_MIGRATION.md`
+
+首次部署：
+
+```bash
+./scripts/kylin_v10_install_deps.sh
+newgrp docker   # 若当前用户刚加入 docker 组，可执行；也可注销后重新登录
+./scripts/kylin_v10_build.sh
+./scripts/kylin_v10_start.sh
+```
+
+日常操作：
+
+```bash
+./scripts/kylin_v10_status.sh
+./scripts/kylin_v10_stop.sh
+./scripts/kylin_v10_start.sh
+```
+
+### 通用依赖
+
 - Node.js 18+
 - Python 3.10+
 - CMake 3.16+
-- C++17 编译器（clang++/g++）
-
-### 3.2 后端依赖
+- C++17 编译器
+- Docker
 - Drogon
 - spdlog
 - nlohmann-json
 - ONNX Runtime 1.16+
 
-后端配置文件：`/Users/t1an/Desktop/project/SFC/sfc_deploy/backend/config.json`
-默认模型路径：
-- `../models/exported/gnn_encoder.onnx`
-- `../models/exported/actor.onnx`
+## 4. 本地快速启动
 
-## 4. 快速启动（仅运行推理与可视化）
+如果依赖已经安装完成，可以直接使用：
 
-### 4.1 启动后端
 ```bash
-# 确保 MySQL 容器已运行（容器名：sfc-mysql）
-docker start sfc-mysql
-
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy/backend
-./build.sh
-cd build
-./sfc_server
-```
-
-Ubuntu 可使用：
-```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy/backend
-./build_ubuntu.sh --release
-cd build
-LD_LIBRARY_PATH=$ONNXRUNTIME_DIR/lib:$LD_LIBRARY_PATH ./sfc_server
-```
-
-### 4.2 启动前端
-```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy/frontend
-npm install
-npm run dev
+./dev.sh start
 ```
 
 默认访问：
+
 - 大屏主页面：`http://localhost:3001`
 - 系统控制中心：`http://localhost:3002`
-- 后端：`http://localhost:8080`
+- 后端 API：`http://localhost:8080`
 
 默认账号：
+
 - 管理员：`admin / 123456`
 - 普通用户：`user / 123456`
 
-说明：后端启动时会自动在 `sfc_runtime.users` 表初始化默认账号（若不存在则创建，已存在则更新密码与角色）。
+停止：
 
-## 5. 训练与导出完整流程
-
-### 5.1 安装训练依赖
 ```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy
+./dev.sh stop
+```
+
+## 5. 模型文件
+
+后端默认读取：
+
+```text
+models/exported/gnn_encoder.onnx
+models/exported/actor.onnx
+models/exported/model_io_meta.json
+```
+
+如果模型缺失，可在训练侧导出后复制到 `models/exported/`。部署系统本身不要求重新训练。
+
+## 6. 拓扑导入样例
+
+当前提供一份可直接导入的 520 节点演示拓扑：
+
+```text
+testdata/third_party_constellation_import_520.json
+```
+
+该文件严格使用后端拓扑结构：
+
+```json
+{
+  "metadata": {},
+  "topology": {
+    "nodes": [],
+    "links": []
+  }
+}
+```
+
+其中包含 520 颗卫星和 1040 条 ISL，轨道内链路、轨道间链路均参与路径计算。
+
+## 7. 训练与导出
+
+安装训练依赖：
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r train/requirements.txt
 ```
 
-### 5.2 一键训练流水线（数据生成→训练→评估→导出→推理测试）
+一键训练流水线：
+
 ```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy/train
+cd train
 ./start.sh
 ```
 
-常见跳过参数示例：
-```bash
-# 仅使用已有模型做推理链路验证
-./start.sh --skip-data --skip-train --skip-val-eval --skip-export
-```
+仅导出 ONNX：
 
-### 5.3 单独导出 ONNX
 ```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy/train
+cd train
 python -m training.models.model_export --context-dim 48
 ```
 
-导出结果：
-- `/Users/t1an/Desktop/project/SFC/sfc_deploy/models/exported/gnn_encoder.onnx`
-- `/Users/t1an/Desktop/project/SFC/sfc_deploy/models/exported/actor.onnx`
+## 8. 关键接口
 
-## 6. 关键接口
 后端 API 基础前缀：`/api/v1`
 
 - 健康检查：`GET /health`
-- 生成拓扑：`POST /topology/generate`
-- 动态仿真：
-  - `POST /topology/dynamic/start`
-  - `POST /topology/dynamic/stop`
-  - `GET /topology/dynamic/status`
-- SFC 规划：`POST /sfc/plan`
-- SFC 部署：`POST /sfc/deploy`
-- 回滚：`POST /sfc/rollback`
-- 会话连续编排：
-  - `POST /sfc/session/start`
-  - `POST /sfc/session/stop`
-  - `GET /sfc/sessions`
-  - `POST /sfc/session/{id}/recompute`
+- 生成/导入拓扑：`POST /topology/generate`
+- 动态仿真：`POST /topology/dynamic/start`、`GET /topology/dynamic/status`
+- 核心网规划：`POST /sfc/plan`
+- 核心网会话启动：`POST /sfc/session/start`
+- 核心网会话停止：`POST /sfc/session/stop`
+- 核心网会话列表：`GET /sfc/sessions`
+- 重算/重调度：`POST /sfc/session/{id}/recompute`
+- UERANSIM 验证：`/ueransim/*`
 - WebSocket：`/ws/updates`
 
-## 7. 推荐运行顺序
-1. 启动后端。
-2. 启动前端。
-3. 前端生成/导入星座。
-4. 创建 SFC 请求并生成候选方案。
-5. 手动选择初始方案部署。
-6. 观察动态拓扑、路径重算与必要重调度。
-7. 在系统监控中心查看稳定性与恢复指标。
+说明：部分 API 路径仍保留 `/sfc` 命名，这是历史兼容入口；当前业务语义已经切换为 Open5GS 核心网编排。
 
-## 8. 常见问题
+## 9. 运行数据
 
-### 8.1 后端启动但前端无数据
-- 检查是否已生成拓扑（后端默认不自动加载拓扑）。
-- 检查前端代理是否正确连接 `:8080`。
+- `.run/logs`：后端和前端日志。
+- `.run/pids`：进程 pid。
+- `.run/mysql`：MySQL 容器数据卷。
+- `.deps`：麒麟部署脚本下载/编译的依赖。
 
-### 8.2 ONNX 模型加载失败
-- 确认 `models/exported` 下模型存在。
-- 确认 `backend/config.json` 的模型路径与当前目录结构一致。
+默认关闭 MySQL binlog，并在启动时清理过期事件，避免本地磁盘持续膨胀。
 
-### 8.3 推理结果看起来合理但未训练
-- 后端包含启发式与硬约束兜底，未训练也可能有可行结果。
-- 重新训练可显著提升动态场景下的排序质量、稳定性与时延表现。
+## 10. 常见问题
 
-### 8.4 MySQL 存储增长过快（binlog）
-- 默认已切换为“关闭 binlog”模式（`SFC_MYSQL_DISABLE_BINLOG=1`）。
-- 启动时若发现旧容器仍是 `log_bin=ON`，`dev.sh` 会自动保留数据卷并重建 MySQL 容器，使其切换到 `log_bin=OFF`。
-- 可先确认没有主从复制，再长期关闭 binlog：
+### 后端启动但前端无数据
+
+- 检查后端健康状态：`curl http://127.0.0.1:8080/api/v1/health`
+- 在控制中心生成或导入星座拓扑。
+- 确认前端代理连接后端 `8080`。
+
+### ONNX Runtime 加载失败
 
 ```bash
-docker exec sfc-mysql mysql -uroot -proot123456 -e "SHOW REPLICA STATUS\G; SHOW SLAVE STATUS\G;"
+source .env.kylin
+echo $ONNXRUNTIME_DIR
+ls $ONNXRUNTIME_DIR/lib/libonnxruntime.so
 ```
 
-- 若无输出（空结果），表示未配置主从复制，可安全关闭 binlog（本地单机场景）。
-- 现已在 `dev.sh` 启动链路中自动执行：
-  - 过期业务事件清理（`event_log` / `runtime_events`）。
-  - 若启用了 binlog，则执行过期策略收紧与旧 binlog 清理。
-- 你也可以手动执行一次紧凑清理：
+### Docker 无权限
 
 ```bash
-cd /Users/t1an/Desktop/project/SFC/sfc_deploy
-./scripts/compact_mysql_storage.sh
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+newgrp docker
 ```
 
-- 可通过环境变量调整（示例）：
+### Open5GS 镜像不可用
 
 ```bash
-SFC_MYSQL_DISABLE_BINLOG=1 \
-SFC_MYSQL_BINLOG_KEEP_DAYS=1 \
-SFC_MYSQL_BINLOG_EXPIRE_SECONDS=86400 \
-SFC_MYSQL_MAX_BINLOG_SIZE=67108864 \
-SFC_DB_EVENT_RETENTION_DAYS=7 \
-SFC_DB_RUNTIME_EVENT_RETENTION_DAYS=7 \
-./dev.sh restart
+./scripts/kylin_v10_prepare_images.sh
 ```
 
-## 9. 相关文档
-- 详细设计：`/Users/t1an/Desktop/project/SFC/sfc_deploy/项目总体设计文档.md`
-- 训练与推理说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/算法训练与推理说明.md`
-- 后端说明：`/Users/t1an/Desktop/project/SFC/sfc_deploy/backend/README.md`
-- Open5GS 真实部署与麒麟迁移：`/Users/t1an/Desktop/project/SFC/sfc_deploy/docs/open5gs-real-deployment.md`
-
-## 10. Open5GS 真实部署辅助脚本
-- 多架构镜像构建：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/build_open5gs_multiarch.sh`
-- 手动 UERANSIM 冒烟验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_smoke.sh`
-- 重调度恢复验证：`/Users/t1an/Desktop/project/SFC/sfc_deploy/scripts/verify_ueransim_reschedule_recovery.sh`
-
-UERANSIM 脚本默认启用严格验证（不仅注册成功，还要求 UE 分配到 `uesimtun0` IPv4）。
-
-可选参数示例：
-```bash
-STRICT_UE_IP_ALLOC=1 STRICT_TUN_DEVICE=1 STRICT_PDU_SESSION=1 \
-UE_IP_WAIT_SEC=40 \
-./scripts/verify_ueransim_smoke.sh
-```
+远程镜像不可用时，脚本会尝试使用 `docker/open5gs-satellite.Dockerfile` 本地构建 `sfc-open5gs-satellite:local`。

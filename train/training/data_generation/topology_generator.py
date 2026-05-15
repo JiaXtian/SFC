@@ -1,13 +1,20 @@
 """卫星星座拓扑生成器（增强指标版）"""
 import json
+import math
 from datetime import datetime
 
 import networkx as nx
 import numpy as np
+from sgp4.api import Satrec
+
+try:
+    from training.open5gs_profile import BUSINESS_DIMENSIONS, NODE_FEATURE_DIM, zero_business_load
+except ImportError:  # pragma: no cover - direct script execution from train/training
+    from open5gs_profile import BUSINESS_DIMENSIONS, NODE_FEATURE_DIM, zero_business_load
 
 
 class SatelliteConstellationGenerator:
-    """Walker-Delta LEO 星座生成器，包含节点/链路完整指标。"""
+    """Walker-Delta LEO 星座生成器，使用 SGP4/TLE 两行根数生成节点/链路指标。"""
 
     def __init__(
         self,
@@ -45,7 +52,9 @@ class SatelliteConstellationGenerator:
         self.link_reliability_range = link_reliability_range
 
         self.earth_radius_km = 6371.0
-        self.orbit_radius_km = self.earth_radius_km + self.altitude_km
+        self.sgp4_earth_radius_km = 6378.135
+        self.sgp4_mu_km3_s2 = 398600.8
+        self.orbit_radius_km = self.sgp4_earth_radius_km + self.altitude_km
 
     def generate(self, seed=42):
         np.random.seed(seed)
@@ -61,7 +70,8 @@ class SatelliteConstellationGenerator:
         topology_dict = {
             "metadata": {
                 "timestamp": datetime.now().isoformat(),
-                "constellation_type": "Walker-Delta-Enhanced",
+                "constellation_type": "Walker-Delta-SGP4-Enhanced",
+                "propagation_model": "SGP4",
                 "total_satellites": self.total_sats,
                 "num_planes": self.num_planes,
                 "sats_per_plane": self.sats_per_plane,
@@ -70,21 +80,29 @@ class SatelliteConstellationGenerator:
                 "isl_count": len(links),
                 "feature_schema": {
                     "node": [
+                        "cpu_available/cpu_total",
+                        "mem_available/mem_total",
+                        "disk_available/disk_total",
                         "cpu_total",
                         "cpu_available",
                         "mem_total",
                         "mem_available",
                         "disk_total",
                         "disk_available",
-                        "core_network_load",
+                        "node_reliability",
+                        "degree_norm",
+                        "active_link_ratio",
+                        "avg_bandwidth_available_ratio",
+                        "avg_latency_norm",
                         "core_business_load.signaling_load",
                         "core_business_load.session_load",
                         "core_business_load.user_plane_load",
                         "core_business_load.mobility_load",
                         "core_business_load.policy_load",
                         "core_business_load.auth_load",
-                        "node_reliability",
+                        "deployed_core_nf_count_norm",
                     ],
+                    "node_feature_dim": NODE_FEATURE_DIM,
                     "link": [
                         "link_status",
                         "bandwidth_gbps",
@@ -103,45 +121,126 @@ class SatelliteConstellationGenerator:
     def _generate_satellite_positions(self):
         satellites = []
         phase_diff = 360.0 / self.num_planes
+        epoch = datetime.utcnow()
+        epoch_jd = self._julian_date(epoch)
 
         for plane_idx in range(self.num_planes):
             raan = plane_idx * phase_diff
             for sat_idx in range(self.sats_per_plane):
                 true_anomaly = sat_idx * (360.0 / self.sats_per_plane)
                 sat_id = f"SAT_{plane_idx:03d}_{sat_idx:03d}"
-                coords = self._orbital_to_cartesian(raan, self.inclination_deg, true_anomaly)
+                orbital_params = self._make_sgp4_params(
+                    plane_idx,
+                    sat_idx,
+                    raan,
+                    self.inclination_deg,
+                    true_anomaly,
+                    epoch,
+                    epoch_jd,
+                )
+                coords = self._propagate_sgp4(orbital_params, 0.0)["coordinates"]
                 satellites.append(
                     {
                         "id": sat_id,
-                        "orbital_params": {
-                            "plane": plane_idx,
-                            "position_in_plane": sat_idx,
-                            "raan": raan,
-                            "inclination": self.inclination_deg,
-                            "true_anomaly": true_anomaly,
-                            "altitude_km": self.altitude_km,
-                        },
+                        "orbital_params": orbital_params,
                         "coordinates": coords,
                     }
                 )
         return satellites
 
-    def _orbital_to_cartesian(self, raan, inclination, true_anomaly):
-        raan_rad = np.deg2rad(raan)
-        inc_rad = np.deg2rad(inclination)
-        ta_rad = np.deg2rad(true_anomaly)
+    @staticmethod
+    def _wrap_deg(value):
+        return float(value % 360.0)
 
-        r = self.orbit_radius_km
-        x_orb = r * np.cos(ta_rad)
-        y_orb = r * np.sin(ta_rad)
+    @staticmethod
+    def _julian_date(dt):
+        return 2440587.5 + dt.timestamp() / 86400.0
 
-        x1 = x_orb * np.cos(raan_rad) - y_orb * np.sin(raan_rad)
-        y1 = x_orb * np.sin(raan_rad) + y_orb * np.cos(raan_rad)
+    def _mean_motion_from_altitude(self, altitude_km):
+        semi_major = self.sgp4_earth_radius_km + max(100.0, float(altitude_km))
+        n_rad_s = math.sqrt(self.sgp4_mu_km3_s2 / (semi_major**3))
+        return n_rad_s * 86400.0 / (2.0 * math.pi)
 
-        x2 = x1
-        y2 = y1 * np.cos(inc_rad)
-        z2 = y1 * np.sin(inc_rad)
-        return {"x": float(x2), "y": float(y2), "z": float(z2)}
+    def _semi_major_axis(self, mean_motion_rev_day):
+        n_rad_s = max(1e-9, float(mean_motion_rev_day)) * 2.0 * math.pi / 86400.0
+        return (self.sgp4_mu_km3_s2 / (n_rad_s**2)) ** (1.0 / 3.0)
+
+    def _tle_epoch(self, dt):
+        start = datetime(dt.year, 1, 1)
+        doy = (dt - start).days + 1
+        seconds = dt.hour * 3600 + dt.minute * 60 + dt.second + dt.microsecond / 1_000_000
+        fraction = f"{seconds / 86400.0:.8f}"[1:]
+        return f"{dt.year % 100:02d}{doy:03d}{fraction}"
+
+    def _make_tle(self, satnum, params, epoch):
+        sat = f"{satnum % 100000:05d}"
+        ecc7 = int(round(max(0.0, min(0.9999999, params["eccentricity"])) * 10_000_000))
+        line1 = f"1 {sat}U 26001A   {self._tle_epoch(epoch)}  .00000000  00000-0  5000-4 0  9990"
+        line2 = (
+            f"2 {sat} {params['inclination_deg']:8.4f} {params['raan']:8.4f} "
+            f"{ecc7:07d} {params['argument_of_perigee_deg']:8.4f} "
+            f"{params['mean_anomaly_deg']:8.4f} {params['mean_motion_rev_per_day']:11.8f}00000"
+        )
+        return line1, line2
+
+    def _make_sgp4_params(self, plane_idx, sat_idx, raan, inclination, true_anomaly, epoch, epoch_jd):
+        mean_motion = self._mean_motion_from_altitude(self.altitude_km)
+        semi_major = self._semi_major_axis(mean_motion)
+        params = {
+            "propagation_model": "SGP4",
+            "plane": int(plane_idx),
+            "position_in_plane": int(sat_idx),
+            "raan": self._wrap_deg(raan),
+            "inclination": float(inclination),
+            "inclination_deg": float(inclination),
+            "true_anomaly": self._wrap_deg(true_anomaly),
+            "altitude_km": float(self.altitude_km),
+            "eccentricity": 0.0001,
+            "argument_of_perigee_deg": 0.0,
+            "mean_anomaly_deg": self._wrap_deg(true_anomaly),
+            "mean_motion_rev_per_day": float(mean_motion),
+            "bstar": 0.00005,
+            "epoch_jd": float(epoch_jd),
+            "epoch_iso": epoch.isoformat() + "Z",
+            "propagation_minutes": 0.0,
+            "semi_major_axis_km": float(semi_major),
+            "period_minutes": float(1440.0 / mean_motion),
+        }
+        line1, line2 = self._make_tle(plane_idx * 1000 + sat_idx + 1, params, epoch)
+        params["tle_line1"] = line1
+        params["tle_line2"] = line2
+        return params
+
+    def _propagate_sgp4(self, params, minutes_since_epoch):
+        line1 = str(params.get("tle_line1", "")).strip()
+        line2 = str(params.get("tle_line2", "")).strip()
+        if not line1 or not line2:
+            raise ValueError("SGP4 propagation requires tle_line1 and tle_line2")
+
+        satrec = Satrec.twoline2rv(line1, line2)
+        epoch_jd = float(params.get("epoch_jd", satrec.jdsatepoch + satrec.jdsatepochF))
+        target_jd = epoch_jd + float(minutes_since_epoch) / 1440.0
+        jd_whole = math.floor(target_jd)
+        error, position_km, _velocity_km_s = satrec.sgp4(jd_whole, target_jd - jd_whole)
+        if error != 0:
+            raise ValueError(f"SGP4 propagation failed with code {error}")
+
+        x, y, z = map(float, position_km)
+        radius = math.sqrt(x * x + y * y + z * z)
+
+        return {
+            "coordinates": {
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "lat": float(math.degrees(math.asin(max(-1.0, min(1.0, z / max(1.0, radius)))))),
+                "lon": float(math.degrees(math.atan2(y, x))),
+            },
+            "true_anomaly": self._wrap_deg(float(params.get("mean_anomaly_deg", 0.0))),
+            "raan": self._wrap_deg(float(params.get("raan", 0.0))),
+            "argument_of_perigee_deg": self._wrap_deg(float(params.get("argument_of_perigee_deg", 0.0))),
+            "altitude_km": float(radius - self.sgp4_earth_radius_km),
+        }
 
     @staticmethod
     def _calculate_distance(coords1, coords2):
@@ -222,40 +321,20 @@ class SatelliteConstellationGenerator:
                     "id": sat["id"],
                     "type": "satellite",
                     "orbital_params": sat["orbital_params"],
+                    "coordinates": sat["coordinates"],
                     "cpu_total": round(float(cpu_total), 2),
                     "cpu_available": round(float(cpu_available), 2),
                     "mem_total": round(float(mem_total), 2),
                     "mem_available": round(float(mem_available), 2),
                     "disk_total": round(float(disk_total), 2),
                     "disk_available": round(float(disk_available), 2),
-                    "core_business_load": {
-                        "signaling_load": round(float(np.random.uniform(0.18, 0.78)), 4),
-                        "session_load": round(float(np.random.uniform(0.20, 0.80)), 4),
-                        "user_plane_load": round(float(np.random.uniform(0.24, 0.86)), 4),
-                        "mobility_load": round(float(np.random.uniform(0.16, 0.74)), 4),
-                        "policy_load": round(float(np.random.uniform(0.16, 0.72)), 4),
-                        "auth_load": round(float(np.random.uniform(0.14, 0.70)), 4),
-                    },
+                    "core_business_load": zero_business_load(),
+                    "core_network_load": 0.0,
+                    "deployed_core_nf_count": 0,
                     "node_reliability": round(
                         float(np.random.uniform(*self.node_reliability_range)), 5
                     ),
                 }
-            )
-
-            business = nodes[-1]["core_business_load"]
-            nodes[-1]["core_network_load"] = round(
-                float(
-                    (
-                        business["signaling_load"]
-                        + business["session_load"]
-                        + business["user_plane_load"]
-                        + business["mobility_load"]
-                        + business["policy_load"]
-                        + business["auth_load"]
-                    )
-                    / 6.0
-                ),
-                4,
             )
 
         return nodes
@@ -265,6 +344,9 @@ class SatelliteConstellationGenerator:
 
         for node in nodes:
             business_load = node.get("core_business_load", {})
+            business_values = {
+                dim: float(business_load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS
+            }
             graph.add_node(
                 node["id"],
                 cpu_total=node["cpu_total"],
@@ -273,14 +355,15 @@ class SatelliteConstellationGenerator:
                 mem_available=node["mem_available"],
                 disk_total=node["disk_total"],
                 disk_available=node["disk_available"],
-                core_network_load=node["core_network_load"],
-                core_business_load=business_load,
-                signaling_load=float(business_load.get("signaling_load", node["core_network_load"])),
-                session_load=float(business_load.get("session_load", node["core_network_load"])),
-                user_plane_load=float(business_load.get("user_plane_load", node["core_network_load"])),
-                mobility_load=float(business_load.get("mobility_load", node["core_network_load"])),
-                policy_load=float(business_load.get("policy_load", node["core_network_load"])),
-                auth_load=float(business_load.get("auth_load", node["core_network_load"])),
+                core_network_load=float(node.get("core_network_load", 0.0)),
+                core_business_load=business_values,
+                signaling_load=business_values["signaling_load"],
+                session_load=business_values["session_load"],
+                user_plane_load=business_values["user_plane_load"],
+                mobility_load=business_values["mobility_load"],
+                policy_load=business_values["policy_load"],
+                auth_load=business_values["auth_load"],
+                deployed_core_nf_count=int(node.get("deployed_core_nf_count", 0)),
                 node_reliability=node["node_reliability"],
                 type=node["type"],
             )

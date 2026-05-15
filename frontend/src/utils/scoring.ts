@@ -9,7 +9,6 @@ export type ScoreWeights = {
   resource: number
   reliability: number
   bandwidth: number
-  dispersion: number
 }
 
 export type ScoreBreakdown = {
@@ -17,19 +16,17 @@ export type ScoreBreakdown = {
   resourceScore: number
   reliabilityScore: number
   bandwidthScore: number
-  dispersionScore: number
   total: number
 }
 
 export function normalizeWeights(weights: ScoreWeights): ScoreWeights {
-  const sum = weights.latency + weights.resource + weights.reliability + weights.bandwidth + weights.dispersion
+  const sum = weights.latency + weights.resource + weights.reliability + weights.bandwidth
   const norm = sum > 1e-9 ? sum : 1
   return {
     latency: weights.latency / norm,
     resource: weights.resource / norm,
     reliability: weights.reliability / norm,
     bandwidth: weights.bandwidth / norm,
-    dispersion: weights.dispersion / norm,
   }
 }
 
@@ -69,16 +66,11 @@ export function scoreResource(nodes: any[]): number {
   return clamp01(avg / nodes.length)
 }
 
-export function scoreDispersion(deployedNodeCount: number, vnfCount: number): number {
-  return clamp01(Math.min(1, deployedNodeCount / Math.max(1, vnfCount)))
-}
-
 export function computeScoreBreakdown(args: {
   totalLatencyMs: number
   bottleneckBandwidthGbps: number
   estimatedReliability: number
   deployedNodeIds: string[]
-  vnfCount: number
   constraints: ScoreConstraints
   weights: ScoreWeights
   satellites: any[]
@@ -88,7 +80,6 @@ export function computeScoreBreakdown(args: {
     bottleneckBandwidthGbps,
     estimatedReliability,
     deployedNodeIds,
-    vnfCount,
     constraints,
     weights,
     satellites,
@@ -101,21 +92,18 @@ export function computeScoreBreakdown(args: {
   const bandwidthScore = scoreBandwidth(bottleneckBandwidthGbps, constraints.min_bandwidth_gbps)
   const reliabilityScore = scoreReliability(estimatedReliability, constraints.min_reliability)
   const resourceScore = scoreResource(nodes)
-  const dispersionScore = scoreDispersion(deployedNodeIds?.length || 0, vnfCount)
 
   const total =
     weights.latency * latencyScore +
     weights.resource * resourceScore +
     weights.reliability * reliabilityScore +
-    weights.bandwidth * bandwidthScore +
-    weights.dispersion * dispersionScore
+    weights.bandwidth * bandwidthScore
 
   return {
     latencyScore,
     resourceScore,
     reliabilityScore,
     bandwidthScore,
-    dispersionScore,
     total: clamp01(total),
   }
 }

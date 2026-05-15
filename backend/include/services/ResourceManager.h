@@ -33,6 +33,13 @@ public:
         const DeploymentCandidate& candidate,
         const std::vector<VNF>& vnfs
     );
+
+    // 仅恢复资源占用账本，不再次扣减拓扑资源。用于服务重启后从已持久化部署恢复。
+    bool restore_allocation_snapshot(
+        const std::string& deployment_id,
+        const DeploymentCandidate& candidate,
+        const std::vector<VNF>& vnfs
+    );
     
     // 释放资源（回滚）
     bool release_resources(const std::string& deployment_id);

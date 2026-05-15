@@ -15,6 +15,8 @@ os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "logs", ".mplcon
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,56 +26,82 @@ TRAIN_ROOT = PROJECT_ROOT / "train"
 from training.models.drl_agent import DRLAgent
 from training.models.gnn_encoder import GNNEncoder
 from training.training.trainer import SFCTrainer
+from training.open5gs_profile import (
+    BUSINESS_DIMENSIONS,
+    CONTEXT_FEATURE_DIM,
+    CORE_NF_FEATURE_DIM,
+    GNN_EMBEDDING_DIM,
+    NODE_FEATURE_DIM,
+    CORE_NF_TYPES,
+)
 
 
 class HeuristicPruner:
-    TARGET_TOTAL_HOPS = 25
-    HARD_TOTAL_HOPS = 30
-    MIN_LEG_HOP_CAP = 3
-    MAX_LEG_HOP_CAP = 10
-    RELAXED_LEG_HOP_CAP = 14
-    HOP_PENALTY_MS = 2.5
-    PATH_SOFTENING_EXPONENT = 0.46
-    EXCESS_HOP_RELIABILITY_PENALTY = 0.9988
-    FUTURE_STEP_RELIABILITY_DECAY = 0.9990
+    HOP_PENALTY_MS = 2.0
 
     def __init__(self, top_m=80):
-        self.top_m = top_m
+        self.top_m = int(max(16, top_m))
+        self.fast_prefilter_limit = max(96, self.top_m * 3)
+
+    def _prefilter_limit(self, graph_size, top_m):
+        top_m = int(max(16, top_m))
+        if graph_size >= 4000:
+            return min(self.fast_prefilter_limit, max(top_m + 8, int(top_m * 1.10)))
+        if graph_size >= 2000:
+            return min(self.fast_prefilter_limit, max(top_m + 16, int(top_m * 1.25)))
+        return self.fast_prefilter_limit
 
     @staticmethod
-    def _clamp01(value: float) -> float:
-        return max(0.0, min(1.0, float(value)))
+    def _dependency_anchor_nodes(nf_type, deployed_by_type, dependencies):
+        anchors = []
+        for dep in dependencies or []:
+            src_type = str(dep.get("source", "")).lower()
+            dst_type = str(dep.get("target", "")).lower()
+            if src_type == nf_type and dst_type in deployed_by_type:
+                anchors.append(deployed_by_type[dst_type]["node"])
+            elif dst_type == nf_type and src_type in deployed_by_type:
+                anchors.append(deployed_by_type[src_type]["node"])
+        return anchors
 
-    @classmethod
-    def _softened_path_reliability(cls, raw_reliability: float, hops: int) -> float:
-        if hops <= 0:
-            return 1.0
-        raw = max(1e-9, cls._clamp01(raw_reliability))
-        geometric_mean = raw ** (1.0 / max(1, hops))
-        softened_product = raw ** cls.PATH_SOFTENING_EXPONENT
-        if hops <= 6:
-            blend = 0.7 * softened_product + 0.3 * geometric_mean
-        else:
-            blend = 0.82 * softened_product + 0.18 * geometric_mean
-        excess_hops = max(0, hops - 6)
-        return cls._clamp01(blend * (cls.EXCESS_HOP_RELIABILITY_PENALTY ** excess_hops))
+    @staticmethod
+    def _local_anchor_candidates(G, anchors, fast_by_node, radius=2, limit=192):
+        if not anchors:
+            return []
+        selected = []
+        seen = set()
+        frontier = [node for node in anchors if node in G]
+        for node in frontier:
+            if node in fast_by_node and node not in seen:
+                selected.append(fast_by_node[node])
+                seen.add(node)
+        current = set(frontier)
+        visited = set(frontier)
+        for _depth in range(max(1, int(radius))):
+            nxt = set()
+            for node in current:
+                if node not in G:
+                    continue
+                nxt.update(G.successors(node))
+                nxt.update(G.predecessors(node))
+            nxt -= visited
+            for node in sorted(nxt):
+                if node in fast_by_node and node not in seen:
+                    selected.append(fast_by_node[node])
+                    seen.add(node)
+                    if len(selected) >= limit:
+                        return selected
+            visited.update(nxt)
+            current = nxt
+            if not current:
+                break
+        return selected
 
-    @classmethod
-    def _compute_hop_cap(cls, current_hops: int, current_vnf_idx: int, total_vnfs: int) -> int:
-        remaining_vnfs = max(0, int(total_vnfs) - int(current_vnf_idx))
-        remaining_legs = max(1, remaining_vnfs + 1)
-        remaining_budget = max(cls.MIN_LEG_HOP_CAP, cls.TARGET_TOTAL_HOPS - max(0, int(current_hops)))
-        per_leg = remaining_budget // remaining_legs
-        return max(cls.MIN_LEG_HOP_CAP, min(cls.MAX_LEG_HOP_CAP, per_leg + 2))
-
-    @classmethod
-    def _compute_relaxed_hop_cap(cls, hop_cap: int) -> int:
-        return min(max(hop_cap, cls.MIN_LEG_HOP_CAP) + 3, cls.RELAXED_LEG_HOP_CAP)
+    @staticmethod
+    def _nf_type(vnf: dict) -> str:
+        return str(vnf.get("nf_type", vnf.get("core_nf_type", vnf.get("vnf_type", "")))).lower().replace("-", "_").replace(" ", "_")
 
     @staticmethod
     def _active_graph(G, bw_req=0.0):
-        import networkx as nx
-
         active = nx.DiGraph()
         active.add_nodes_from(G.nodes(data=True))
         for u, v, d in G.edges(data=True):
@@ -85,211 +113,293 @@ class HeuristicPruner:
         return active
 
     @classmethod
-    def _estimate_link_reliability(cls, edge: dict) -> float:
-        if int(edge.get("link_status", 1)) != 1:
-            return 0.0
-        status = str(edge.get("status", "active")).lower()
-        if status == "down":
-            return 0.0
-        bw_total = float(edge.get("bandwidth_gbps", 0.0))
-        bw_avail = float(edge.get("bandwidth_available_gbps", 0.0))
-        bw_ratio = cls._clamp01(bw_avail / bw_total) if bw_total > 1e-9 else 0.0
-        base = cls._clamp01(float(edge.get("link_reliability", edge.get("reliability", 0.98))))
-        bandwidth_factor = 0.98 + 0.02 * bw_ratio
-        status_penalty = 0.985 if status == "congested" else 1.0
-        return cls._clamp01(base * bandwidth_factor * status_penalty)
-
-    @classmethod
     def _dijkstra_constrained(cls, G, source, target, bw_req: float, max_hops: int):
         if source == target:
-            return [source], 0.0, 1.0, 0
+            return [source], 0.0, 0
         if source not in G or target not in G:
-            return [], float("inf"), 0.0, 0
-
+            return [], float("inf"), 0
         dist = {source: 0.0}
         latency = {source: 0.0}
         hops = {source: 0}
-        reliability_raw = {source: 1.0}
         prev = {}
         pq = [(0.0, source)]
-
         while pq:
             cur_cost, u = heapq.heappop(pq)
             if cur_cost > dist.get(u, float("inf")) + 1e-9:
                 continue
             if u == target:
                 break
-
             for v, edge in G[u].items():
                 if int(edge.get("link_status", 1)) != 1:
                     continue
                 if float(edge.get("bandwidth_available_gbps", 0.0)) + 1e-9 < bw_req:
                     continue
-
                 next_hops = hops[u] + 1
                 if max_hops > 0 and next_hops > max_hops:
                     continue
                 next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
                 next_cost = next_latency + cls.HOP_PENALTY_MS * next_hops
-                edge_rel = max(1e-9, cls._estimate_link_reliability(edge))
-                next_rel = reliability_raw[u] * edge_rel
-
-                old_cost = dist.get(v, float("inf"))
-                old_latency = latency.get(v, float("inf"))
-                old_rel = reliability_raw.get(v, 0.0)
-                should_update = (
-                    next_cost + 1e-9 < old_cost
-                    or (
-                        abs(next_cost - old_cost) <= 1e-9
-                        and (
-                            next_latency + 1e-9 < old_latency
-                            or (abs(next_latency - old_latency) <= 1e-9 and next_rel > old_rel + 1e-9)
-                        )
-                    )
-                )
-                if not should_update:
+                if next_cost + 1e-9 >= dist.get(v, float("inf")):
                     continue
-
                 dist[v] = next_cost
                 latency[v] = next_latency
                 hops[v] = next_hops
-                reliability_raw[v] = next_rel
                 prev[v] = u
                 heapq.heappush(pq, (next_cost, v))
-
-        if target not in prev and target != source:
-            return [], float("inf"), 0.0, 0
-
+        if target not in prev:
+            return [], float("inf"), 0
         path = [target]
         while path[-1] != source:
-            nxt = prev.get(path[-1])
-            if nxt is None:
-                return [], float("inf"), 0.0, 0
-            path.append(nxt)
+            p = prev.get(path[-1])
+            if p is None:
+                return [], float("inf"), 0
+            path.append(p)
         path.reverse()
-        hop_count = max(0, len(path) - 1)
-        softened_rel = cls._softened_path_reliability(reliability_raw.get(target, 1.0), hop_count)
-        return path, float(latency.get(target, 0.0)), float(softened_rel), hop_count
+        return path, float(latency.get(target, 0.0)), max(0, len(path) - 1)
 
-    def find_path(
+    @classmethod
+    def _constrained_tree(cls, graph, source, bw_req: float, max_hops: int):
+        if source not in graph:
+            return {}
+        dist = {source: 0.0}
+        latency = {source: 0.0}
+        hops = {source: 0}
+        bottleneck_pressure = {source: 0.0}
+        pq = [(0.0, source)]
+        while pq:
+            cur_cost, u = heapq.heappop(pq)
+            if cur_cost > dist.get(u, float("inf")) + 1e-9:
+                continue
+            for v, edge in graph[u].items():
+                if int(edge.get("link_status", 1)) != 1:
+                    continue
+                available_bw = float(edge.get("bandwidth_available_gbps", 0.0))
+                if available_bw + 1e-9 < bw_req:
+                    continue
+                next_hops = hops[u] + 1
+                if max_hops > 0 and next_hops > max_hops:
+                    continue
+                next_latency = latency[u] + float(edge.get("latency_ms", 0.0))
+                next_cost = next_latency + cls.HOP_PENALTY_MS * next_hops
+                if next_cost + 1e-9 >= dist.get(v, float("inf")):
+                    continue
+                total_bw = max(float(edge.get("bandwidth_gbps", 0.0)), 1e-6)
+                pressure = 1.0 - available_bw / total_bw
+                dist[v] = next_cost
+                latency[v] = next_latency
+                hops[v] = next_hops
+                bottleneck_pressure[v] = max(float(bottleneck_pressure.get(u, 0.0)), float(pressure))
+                heapq.heappush(pq, (next_cost, v))
+        return {
+            node_id: (float(latency[node_id]), int(hops[node_id]), float(bottleneck_pressure.get(node_id, 0.0)))
+            for node_id in dist
+        }
+
+    def _score_dependency_paths(
         self,
         G,
-        source,
-        target,
-        bw_req=0.0,
-        current_hops=0,
-        current_vnf_idx=0,
-        total_vnfs=1,
+        node,
+        nf_type,
+        deployed_by_type,
+        dependencies,
+        max_hops,
+        tree_cache=None,
+        reverse_graph=None,
     ):
-        active_graph = self._active_graph(G, bw_req=float(bw_req))
-        hop_cap = self._compute_hop_cap(current_hops, current_vnf_idx, total_vnfs)
-        path, delay, rel, hops = self._dijkstra_constrained(
-            active_graph, source, target, bw_req=float(bw_req), max_hops=hop_cap
-        )
-        if path:
-            return path, delay, rel, hops
-        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
-        return self._dijkstra_constrained(
-            active_graph, source, target, bw_req=float(bw_req), max_hops=relaxed_cap
-        )
+        total_delay = 0.0
+        total_hops = 0
+        checked = 0
+        worst_bottleneck_pressure = 0.0
+        tree_cache = tree_cache if tree_cache is not None else {}
+        reverse_graph = reverse_graph if reverse_graph is not None else G.reverse(copy=False)
+        for dep in dependencies:
+            src_type = str(dep.get("source", "")).lower()
+            dst_type = str(dep.get("target", "")).lower()
+            bw_req = float(dep.get("bandwidth_required_gbps", 0.0))
+            if src_type == nf_type and dst_type in deployed_by_type:
+                anchor_node = deployed_by_type[dst_type]["node"]
+                graph_for_tree = reverse_graph
+                direction = "rev"
+            elif dst_type == nf_type and src_type in deployed_by_type:
+                anchor_node = deployed_by_type[src_type]["node"]
+                graph_for_tree = G
+                direction = "fwd"
+            else:
+                continue
+
+            hop_cap = int(max_hops)
+            key = (direction, anchor_node, round(float(bw_req), 6), hop_cap)
+            tree = tree_cache.get(key)
+            if tree is None:
+                tree = self._constrained_tree(graph_for_tree, anchor_node, bw_req, hop_cap)
+                tree_cache[key] = tree
+            metrics = tree.get(node)
+            if metrics is None and hop_cap > 0:
+                relaxed_key = (direction, anchor_node, round(float(bw_req), 6), 0)
+                tree = tree_cache.get(relaxed_key)
+                if tree is None:
+                    tree = self._constrained_tree(graph_for_tree, anchor_node, bw_req, 0)
+                    tree_cache[relaxed_key] = tree
+                metrics = tree.get(node)
+            if metrics is None:
+                return None
+            delay, hops, bottleneck_pressure = metrics
+            checked += 1
+            total_delay += delay * float(dep.get("latency_weight", 1.0))
+            total_hops += hops
+            worst_bottleneck_pressure = max(worst_bottleneck_pressure, bottleneck_pressure)
+        return total_delay, total_hops, checked, worst_bottleneck_pressure
 
     def prune(
         self,
         G,
         vnf,
-        prev_node,
-        dest_node,
-        remaining_delay,
+        deployed_by_type=None,
+        dependencies=None,
+        remaining_delay=float("inf"),
         top_m=None,
-        bandwidth_demand_gbps=0.0,
-        current_vnf_idx=0,
-        total_vnfs=1,
-        accumulated_reliability=1.0,
+        current_nf_idx=0,
+        total_core_nfs=12,
+        accumulated_delay=0.0,
         reliability_requirement=0.0,
         accumulated_hops=0,
+        max_dependency_hops=24,
         **_kwargs,
     ):
-        import networkx as nx
-
+        del current_nf_idx, total_core_nfs, accumulated_delay, reliability_requirement, accumulated_hops
         if top_m is None:
             top_m = self.top_m
-
-        bw_req = max(float(vnf.get("bandwidth_required_gbps", 0.0)), float(bandwidth_demand_gbps))
-        active_graph = self._active_graph(G, bw_req=bw_req)
-        candidates = []
-        try:
-            dist_from_prev = nx.single_source_dijkstra_path_length(
-                active_graph, prev_node, weight="latency_ms"
-            )
-            reverse_graph = active_graph.reverse(copy=False)
-            dist_to_dest = nx.single_source_dijkstra_path_length(
-                reverse_graph, dest_node, weight="latency_ms"
-            )
-            hop_from_prev = nx.single_source_shortest_path_length(active_graph, prev_node)
-            hop_to_dest = nx.single_source_shortest_path_length(reverse_graph, dest_node)
-        except Exception:
-            return []
-
+        deployed_by_type = deployed_by_type or {}
+        dependencies = dependencies or []
+        nf_type = self._nf_type(vnf)
         cpu_req = float(vnf.get("cpu_required", 0.0))
         mem_req = float(vnf.get("mem_required", 0.0))
         disk_req = float(vnf.get("disk_required_gb", 0.0))
-        delay_cap = float(remaining_delay)
-        hop_cap = self._compute_hop_cap(accumulated_hops, current_vnf_idx, total_vnfs)
-        relaxed_cap = self._compute_relaxed_hop_cap(hop_cap)
-        remaining_steps = max(0, int(total_vnfs) - int(current_vnf_idx))
-        future_rel = self.FUTURE_STEP_RELIABILITY_DECAY ** remaining_steps
+        business = vnf.get("business_load_demand", {})
+        fast_candidates = []
 
-        valid_nodes = [
-            n
-            for n in G.nodes()
+        for node_id, node in G.nodes(data=True):
             if (
-                G.nodes[n].get("cpu_available", 0.0) >= cpu_req
-                and G.nodes[n].get("mem_available", 0.0) >= mem_req
-                and G.nodes[n].get("disk_available", 0.0) >= disk_req
+                float(node.get("cpu_available", 0.0)) + 1e-9 < cpu_req
+                or float(node.get("mem_available", 0.0)) + 1e-9 < mem_req
+                or float(node.get("disk_available", 0.0)) + 1e-9 < disk_req
+            ):
+                continue
+            cpu_total = max(float(node.get("cpu_total", 1.0)), 1e-6)
+            mem_total = max(float(node.get("mem_total", 1.0)), 1e-6)
+            disk_total = max(float(node.get("disk_total", 1.0)), 1e-6)
+            projected_resource_util = np.mean(
+                [
+                    1.0 - (float(node.get("cpu_available", 0.0)) - cpu_req) / cpu_total,
+                    1.0 - (float(node.get("mem_available", 0.0)) - mem_req) / mem_total,
+                    1.0 - (float(node.get("disk_available", 0.0)) - disk_req) / disk_total,
+                ]
             )
-        ]
+            projected_resource_peak = max(
+                [
+                    1.0 - (float(node.get("cpu_available", 0.0)) - cpu_req) / cpu_total,
+                    1.0 - (float(node.get("mem_available", 0.0)) - mem_req) / mem_total,
+                    1.0 - (float(node.get("disk_available", 0.0)) - disk_req) / disk_total,
+                ]
+            )
+            load = node.get("core_business_load", {})
+            projected_business_max = max(
+                float(load.get(dim, node.get(dim, 0.0))) + float(business.get(dim, 0.0))
+                for dim in BUSINESS_DIMENSIONS
+            )
+            co_location = float(node.get("deployed_core_nf_count", 0))
+            upf_hotspot_penalty = 5.0 * max(0.0, projected_business_max - 0.55) if nf_type == "upf" else 0.0
+            fast_score = (
+                5.0 * projected_business_max
+                + 4.0 * projected_resource_peak
+                + 2.0 * projected_resource_util
+                + 22.0 * max(0.0, projected_business_max - 0.72)
+                + 10.0 * max(0.0, projected_resource_peak - 0.72)
+                + 2.0 * co_location
+                + upf_hotspot_penalty
+                - 0.25 * float(G.out_degree(node_id))
+            )
+            fast_candidates.append(
+                (
+                    node_id,
+                    float(fast_score),
+                    projected_resource_util,
+                    projected_resource_peak,
+                    projected_business_max,
+                    co_location,
+                    upf_hotspot_penalty,
+                )
+            )
 
-        for node in valid_nodes:
-            d1 = dist_from_prev.get(node, float("inf"))
-            d2 = dist_to_dest.get(node, float("inf"))
-            if d1 == float("inf") or d2 == float("inf"):
-                continue
+        if not fast_candidates:
+            return []
+        if not deployed_by_type:
+            best_fast = heapq.nsmallest(int(top_m), fast_candidates, key=lambda item: item[1])
+            return [node for node, *_ in best_fast]
 
-            total_d = d1 + d2
-            if total_d > delay_cap:
+        candidates = []
+        fast_by_node = {item[0]: item for item in fast_candidates}
+        prefilter_limit = min(len(fast_candidates), self._prefilter_limit(len(G), top_m))
+        best_fast = heapq.nsmallest(prefilter_limit, fast_candidates, key=lambda item: item[1])
+        anchors = self._dependency_anchor_nodes(nf_type, deployed_by_type, dependencies)
+        anchor_fast = self._local_anchor_candidates(
+            G,
+            anchors,
+            fast_by_node,
+            radius=2 if len(G) >= 1000 else 1,
+            limit=max(96, int(top_m) * 2),
+        )
+        merged_fast = []
+        seen_nodes = set()
+        for item in best_fast + anchor_fast:
+            if item[0] in seen_nodes:
                 continue
-            h1 = hop_from_prev.get(node, math.inf)
-            h2 = hop_to_dest.get(node, math.inf)
-            if h1 == math.inf or h2 == math.inf:
+            merged_fast.append(item)
+            seen_nodes.add(item[0])
+        tree_cache = {}
+        reverse_graph = G.reverse(copy=False)
+        for (
+            node_id,
+            _fast_score,
+            projected_resource_util,
+            projected_resource_peak,
+            projected_business_max,
+            co_location,
+            upf_hotspot_penalty,
+        ) in merged_fast:
+            dep_score = self._score_dependency_paths(
+                G,
+                node_id,
+                nf_type,
+                deployed_by_type,
+                dependencies,
+                int(max_dependency_hops),
+                tree_cache=tree_cache,
+                reverse_graph=reverse_graph,
+            )
+            if dep_score is None:
                 continue
-            if h1 > relaxed_cap:
+            dep_delay, dep_hops, dep_checked, bottleneck_pressure = dep_score
+            if dep_delay > float(remaining_delay) * 1.08:
                 continue
-            projected_hops = int(accumulated_hops + h1 + max(1, h2))
-            if projected_hops > self.HARD_TOTAL_HOPS:
-                continue
-            if projected_hops > self.TARGET_TOTAL_HOPS + 4:
-                continue
-
-            node_rel = float(G.nodes[node].get("node_reliability", 0.98))
-            optimistic_rel = float(accumulated_reliability) * max(1e-9, min(1.0, node_rel)) * future_rel
-            if optimistic_rel + 1e-9 < float(reliability_requirement) * 0.72:
-                continue
-
-            hop_over = max(0, projected_hops - self.TARGET_TOTAL_HOPS)
-            hop_ratio = float(projected_hops) / max(1.0, float(self.TARGET_TOTAL_HOPS))
-            hop_pressure = max(0.0, hop_ratio - 1.0)
+            dependency_bonus = -2.0 * dep_checked
             score = (
-                total_d
-                + self.HOP_PENALTY_MS * float(h1) / max(1.0, float(hop_cap))
-                + 3.0 * float(hop_over)
-                + 5.0 * float(hop_pressure)
+                dep_delay
+                + 1.7 * dep_hops
+                + 6.0 * projected_business_max
+                + 4.0 * projected_resource_peak
+                + 2.0 * projected_resource_util
+                + 18.0 * max(0.0, projected_business_max - 0.78)
+                + 7.0 * max(0.0, projected_resource_peak - 0.78)
+                + 6.0 * bottleneck_pressure
+                + 2.0 * co_location
+                + upf_hotspot_penalty
+                + dependency_bonus
             )
-            candidates.append((node, score))
-            if len(candidates) >= top_m * 3:
-                break
+            candidates.append((node_id, float(score)))
 
-        candidates.sort(key=lambda x: x[1])
-        return [c[0] for c in candidates[:top_m]]
+        candidates.sort(key=lambda item: item[1])
+        return [node for node, _ in candidates[: int(top_m)]]
 
 
 def save_metrics(history, output_dir="logs"):
@@ -328,10 +438,20 @@ def save_metrics(history, output_dir="logs"):
         axes[0, 0].legend()
         axes[0, 0].grid(alpha=0.3)
 
-        axes[0, 1].plot(epochs, [h["avg_reward"] for h in history], color="#2ca02c")
+        axes[0, 1].plot(epochs, [h["avg_reward"] for h in history], label="Train Reward", color="#2ca02c")
+        if "eval_avg_reward" in history[0]:
+            axes[0, 1].plot(epochs, [h.get("eval_avg_reward", 0.0) for h in history], label="Eval Reward", color="#1f77b4")
+        if "eval_quality_best_so_far" in history[0]:
+            axes[0, 1].plot(
+                epochs,
+                [100.0 * h.get("eval_quality_best_so_far", 0.0) for h in history],
+                label="Eval Quality Best x100",
+                color="#9467bd",
+            )
         axes[0, 1].set_title("Average Reward")
         axes[0, 1].set_xlabel("Epoch")
         axes[0, 1].set_ylabel("Reward")
+        axes[0, 1].legend()
         axes[0, 1].grid(alpha=0.3)
 
         axes[1, 0].plot(epochs, [h["avg_episode_delay_ms"] for h in history], label="Deployment Delay", color="#9467bd")
@@ -342,6 +462,14 @@ def save_metrics(history, output_dir="logs"):
 
         axes[1, 1].plot(epochs, [h["avg_algorithm_latency_ms"] for h in history], label="Avg Algorithm Latency", color="#d62728")
         axes[1, 1].plot(epochs, [h["p95_algorithm_latency_ms"] for h in history], label="P95 Algorithm Latency", color="#8c564b")
+        if "eval_p95_algorithm_latency_ms" in history[0]:
+            axes[1, 1].plot(
+                epochs,
+                [h.get("eval_p95_algorithm_latency_ms", 0.0) for h in history],
+                label="Eval P95 Algorithm Latency",
+                color="#ff7f0e",
+            )
+        axes[1, 1].axhline(500.0, color="#111111", linestyle="--", linewidth=1.0, alpha=0.5)
         axes[1, 1].set_title("Algorithm Processing Latency")
         axes[1, 1].set_xlabel("Epoch")
         axes[1, 1].set_ylabel("ms")
@@ -378,26 +506,16 @@ def _read_request_meta(req_path):
         with open(req_path) as f:
             req = json.load(f)
         meta = req.get("metadata", {})
-        requests = req.get("requests", [])
-        src = None
-        dst = None
-        if requests:
-            src = requests[0].get("source_node")
-            dst = requests[0].get("destination_node")
         return {
             "topology_file": meta.get("topology_file"),
             "generation_seed": meta.get("generation_seed"),
             "topology_scale": meta.get("topology_scale", 0),
-            "first_source": src,
-            "first_destination": dst,
         }
     except Exception:
         return {
             "topology_file": None,
             "generation_seed": None,
             "topology_scale": 0,
-            "first_source": None,
-            "first_destination": None,
         }
 
 
@@ -419,18 +537,11 @@ def _pair_request_to_topology(req_file, topo_files, topo_by_name, topo_nodes_cac
         if mapped:
             return mapped
 
-    src = meta.get("first_source")
-    dst = meta.get("first_destination")
-    if src and dst:
-        for topo_file in topo_files:
-            node_set = topo_nodes_cache[topo_file]
-            if src in node_set and dst in node_set:
-                return topo_file
-
     return topo_files[0] if topo_files else None
 
 
 def _is_request_file_compatible(req_file, topo_nodes, sample_limit=24):
+    del topo_nodes
     try:
         with open(req_file) as f:
             req = json.load(f)
@@ -438,9 +549,12 @@ def _is_request_file_compatible(req_file, topo_nodes, sample_limit=24):
         if not requests:
             return False
         for r in requests[:sample_limit]:
-            src = r.get("source_node")
-            dst = r.get("destination_node")
-            if src not in topo_nodes or dst not in topo_nodes:
+            core_nfs = r.get("core_nfs", r.get("core_nf_sequence", r.get("vnf_sequence", [])))
+            if core_nfs and len(core_nfs) not in {len(CORE_NF_TYPES), 0}:
+                # Older partial-chain files are still usable because the
+                # environment now completes missing open5gs NFs deterministically.
+                continue
+            if not isinstance(r, dict):
                 return False
         return True
     except Exception:
@@ -477,31 +591,119 @@ def _build_scale_balanced_data(train_topos, train_reqs):
             if idx < len(bucket):
                 balanced.append(bucket[idx])
     if skipped > 0:
-        print(f"训练数据过滤: 跳过 {skipped} 个与拓扑不兼容的请求文件")
+        print(f"训练数据过滤: 跳过 {skipped} 个空文件或无法读取的请求文件")
     return balanced
+
+
+def _select_scale_coverage(data_pairs, max_files):
+    if not data_pairs or max_files <= 0:
+        return []
+    by_scale = {}
+    for topo_file, req_file in data_pairs:
+        scale = _read_topology_scale(topo_file)
+        scale_key = int(round(scale / 100.0) * 100) if scale > 0 else 0
+        by_scale.setdefault(scale_key, []).append((topo_file, req_file))
+    selected = []
+    scale_keys = sorted(by_scale.keys())
+    cursor = 0
+    while len(selected) < max_files and scale_keys:
+        progressed = False
+        for scale in scale_keys:
+            bucket = by_scale[scale]
+            if cursor < len(bucket):
+                selected.append(bucket[cursor])
+                progressed = True
+                if len(selected) >= max_files:
+                    break
+        if not progressed:
+            break
+        cursor += 1
+    return selected
+
+
+def _training_quality_score(metrics, prefix=""):
+    """Scale-independent checkpoint score.
+
+    Raw algorithm latency grows with topology size, so using it directly made
+    warmup epochs look better than full-scale epochs.  This score emphasizes
+    deployment quality and only applies a bounded speed term.
+    """
+    success = float(metrics.get(f"{prefix}success_rate", metrics.get("success_rate", 0.0)))
+    full_sla = float(
+        metrics.get(
+            f"{prefix}full_sla_satisfaction_rate",
+            metrics.get(f"{prefix}sla_satisfaction_rate", metrics.get("sla_satisfaction_rate", success)),
+        )
+    )
+    dep = float(metrics.get(f"{prefix}dependency_satisfaction_rate", metrics.get("dependency_satisfaction_rate", 0.0)))
+    quality = 100.0 * float(metrics.get(f"{prefix}avg_quality_score", metrics.get("avg_quality_score", 0.0)))
+    resource = 100.0 * float(
+        metrics.get(
+            f"{prefix}placement_resource_score",
+            metrics.get(f"{prefix}resource_balance_score", metrics.get("resource_balance_score", 0.0)),
+        )
+    )
+    business = 100.0 * float(
+        metrics.get(
+            f"{prefix}placement_business_score",
+            metrics.get(f"{prefix}business_balance_score", metrics.get("business_balance_score", 0.0)),
+        )
+    )
+    future = 100.0 * float(
+        metrics.get(
+            f"{prefix}future_feasibility_score",
+            metrics.get("future_feasibility_score", 0.0),
+        )
+    )
+    link_metric = float(
+        metrics.get(
+            f"{prefix}used_link_congestion_score",
+            metrics.get(f"{prefix}link_congestion_score", metrics.get("link_congestion_score", 0.0)),
+        )
+    )
+    link_good = 100.0 * (1.0 - link_metric)
+    alg_latency = float(metrics.get(f"{prefix}avg_algorithm_latency_ms", metrics.get("avg_algorithm_latency_ms", 0.0)))
+    speed = 100.0 * max(0.0, 1.0 - min(1.0, alg_latency / 500.0))
+    return (
+        0.24 * success
+        + 0.18 * full_sla
+        + 0.10 * dep
+        + 0.18 * quality
+        + 0.10 * resource
+        + 0.07 * future
+        + 0.05 * business
+        + 0.05 * link_good
+        + 0.03 * speed
+    )
 
 
 def main():
     os.chdir(PROJECT_ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=80, help="训练轮次")
+    parser.add_argument("--epochs", type=int, default=60, help="训练轮次")
     parser.add_argument("--device", default="auto", help="训练设备(auto/cpu/cuda/mps)")
-    parser.add_argument("--heuristic_top_m", type=int, default=110, help="候选剪枝上限")
-    parser.add_argument("--max_requests_per_file", type=int, default=20)
+    parser.add_argument("--heuristic_top_m", type=int, default=64, help="候选剪枝上限")
+    parser.add_argument("--max_requests_per_file", type=int, default=12)
     parser.add_argument("--shared_resources_prob", type=float, default=0.4)
-    parser.add_argument("--max_data_files", type=int, default=18, help="每个epoch最多使用的训练文件数，0表示全部")
-    parser.add_argument("--warmup_epochs", type=int, default=15, help="热身轮次，使用更小数据子集加速前期收敛")
-    parser.add_argument("--time_budget_hours", type=float, default=2.5, help="训练时间预算(小时)，0表示不限制")
-    parser.add_argument("--min_epochs", type=int, default=30, help="触发时间预算早停前至少训练轮次")
+    parser.add_argument("--max_data_files", type=int, default=12, help="每个epoch最多使用的训练文件数，0表示全部")
+    parser.add_argument("--warmup_epochs", type=int, default=5, help="热身轮次，使用更小数据子集加速前期收敛")
+    parser.add_argument("--time_budget_hours", type=float, default=0.0, help="保留兼容参数；当前训练不按时间预算早停")
+    parser.add_argument("--min_epochs", type=int, default=0, help="保留兼容参数；当前训练不按时间预算早停")
     parser.add_argument("--rel_curr_start_epoch", type=int, default=1, help="可靠性课程学习起始epoch")
-    parser.add_argument("--rel_curr_end_epoch", type=int, default=60, help="可靠性课程学习结束epoch（到达严格约束）")
+    parser.add_argument("--rel_curr_end_epoch", type=int, default=32, help="可靠性课程学习结束epoch（到达严格约束）")
     parser.add_argument("--rel_curr_min_scale", type=float, default=0.75, help="课程学习初始可靠性缩放系数")
     parser.add_argument("--rel_curr_strict_ratio", type=float, default=0.7, help="课程进度达到该比例后启用严格可靠性硬约束")
     parser.add_argument("--rel_curr_strict_ramp_ratio", type=float, default=0.2, help="严格可靠性从0到1的渐进区间比例")
-    parser.add_argument("--shared_resources_prob_min", type=float, default=0.25, help="训练早期共享资源模式概率")
-    parser.add_argument("--shared_resources_prob_max", type=float, default=0.45, help="训练后期共享资源模式概率")
+    parser.add_argument("--shared_resources_prob_min", type=float, default=0.60, help="训练早期共享资源模式概率")
+    parser.add_argument("--shared_resources_prob_max", type=float, default=0.90, help="训练后期共享资源模式概率")
+    parser.add_argument("--continuous_group_len_min", type=int, default=5, help="训练早期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--continuous_group_len_max", type=int, default=12, help="训练后期每个拓扑连续累加部署的请求数")
+    parser.add_argument("--eval_continuous_group_len", type=int, default=12, help="验证时每个拓扑连续累加部署的请求数")
     parser.add_argument("--adaptive_control", action="store_true", default=True, help="启用自适应训练控制")
     parser.add_argument("--collapse_patience", type=int, default=2, help="连续多少轮劣化后触发回退保护")
+    parser.add_argument("--eval_data_files", type=int, default=6, help="每轮固定验证使用的文件数")
+    parser.add_argument("--eval_requests_per_file", type=int, default=8, help="每个验证文件使用的请求数")
+    parser.add_argument("--no_save_checkpoints", action="store_true", help="调试/smoke test时不写入正式checkpoint")
     parser.add_argument("--init_model_checkpoint", type=str, default="", help="初始化Actor/Critic权重路径")
     parser.add_argument("--init_gnn_checkpoint", type=str, default="", help="初始化GNN权重路径")
     args = parser.parse_args()
@@ -518,10 +720,13 @@ def main():
         "rel_curr_strict_ramp_ratio": args.rel_curr_strict_ramp_ratio,
         "shared_resources_prob_min": args.shared_resources_prob_min,
         "shared_resources_prob_max": args.shared_resources_prob_max,
+        "continuous_group_len_min": args.continuous_group_len_min,
+        "continuous_group_len_max": args.continuous_group_len_max,
+        "eval_continuous_group_len": args.eval_continuous_group_len,
     }
 
     print("=" * 72)
-    print("  SFC智能编排系统 - 训练（增强版）")
+    print("  open5gs星座核心网部署 - 训练")
     print("=" * 72)
 
     if args.device == "auto":
@@ -533,8 +738,13 @@ def main():
             args.device = "cpu"
 
     start_time = time.time()
-    gnn = GNNEncoder(input_dim=14, hidden_dim=192, num_layers=4)
-    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=48, device=args.device)
+    gnn = GNNEncoder(input_dim=NODE_FEATURE_DIM, hidden_dim=GNN_EMBEDDING_DIM, num_layers=4)
+    agent = DRLAgent(
+        node_dim=GNN_EMBEDDING_DIM,
+        vnf_dim=CORE_NF_FEATURE_DIM,
+        context_dim=CONTEXT_FEATURE_DIM,
+        device=args.device,
+    )
     if args.init_model_checkpoint and os.path.exists(args.init_model_checkpoint):
         print(f"加载初始化策略模型: {args.init_model_checkpoint}")
         # 继续训练时仅加载网络权重，不恢复旧优化器状态（参数组可能已变化）。
@@ -552,6 +762,8 @@ def main():
 
     train_topos = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "topologies" / "*.json")))
     train_reqs = sorted(glob.glob(str(TRAIN_ROOT / "data" / "train" / "requests" / "*.json")))
+    val_topos = sorted(glob.glob(str(TRAIN_ROOT / "data" / "val" / "topologies" / "*.json")))
+    val_reqs = sorted(glob.glob(str(TRAIN_ROOT / "data" / "val" / "requests" / "*.json")))
 
     if not train_topos or not train_reqs:
         print("错误: 训练数据未生成，请先运行数据增强")
@@ -562,6 +774,15 @@ def main():
     if not full_train_data:
         full_train_data = list(zip(train_topos * (len(train_reqs) // len(train_topos) + 1), train_reqs))[: len(train_reqs)]
     print(f"训练数据池: {len(full_train_data)} 组 (拓扑: {len(train_topos)}, 请求文件: {len(train_reqs)})")
+    fixed_eval_data = _build_scale_balanced_data(val_topos, val_reqs) if val_topos and val_reqs else []
+    if not fixed_eval_data:
+        fixed_eval_data = _select_scale_coverage(full_train_data, max(1, min(len(full_train_data), args.eval_data_files)))
+    else:
+        fixed_eval_data = _select_scale_coverage(fixed_eval_data, max(1, min(len(fixed_eval_data), args.eval_data_files)))
+    print(
+        f"固定验证集: {len(fixed_eval_data)} 组 × 每组 {args.eval_requests_per_file} 请求 "
+        "(连续部署口径，用于稳定评估reward/quality趋势)"
+    )
 
     os.makedirs("models/checkpoints", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
@@ -569,6 +790,8 @@ def main():
     epsilon = 0.35
     best_score = -1e9
     best_success_rate = 0.0
+    best_eval_quality = 0.0
+    best_eval_reward = -1e9
     history = []
     collapse_count = 0
     reliability_curriculum = {
@@ -581,9 +804,20 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_progress = epoch / max(1, args.epochs)
+        # Early epochs should strongly imitate the robust heuristic teacher so
+        # the actor stops random probing quickly; later epochs lower imitation
+        # and entropy so policy-gradient quality differences can refine choices.
+        agent.imitation_coef = 0.42 - 0.18 * train_progress
+        agent.entropy_coef = max(0.002, 0.012 - 0.010 * train_progress)
         current_shared_resources_prob = (
             args.shared_resources_prob_min
             + (args.shared_resources_prob_max - args.shared_resources_prob_min) * train_progress
+        )
+        current_continuous_group_len = int(
+            round(
+                args.continuous_group_len_min
+                + (args.continuous_group_len_max - args.continuous_group_len_min) * train_progress
+            )
         )
 
         if args.max_data_files > 0:
@@ -599,8 +833,21 @@ def main():
             epoch_files = target_files
             epoch_requests_per_file = args.max_requests_per_file
 
-        random.shuffle(full_train_data)
-        train_data = full_train_data[: min(len(full_train_data), epoch_files)]
+        candidate_pool = full_train_data
+        if epoch <= args.warmup_epochs:
+            warmup_pool = [
+                pair for pair in full_train_data
+                if 0 < _read_topology_scale(pair[0]) <= 1200
+            ]
+            if warmup_pool:
+                candidate_pool = warmup_pool
+
+        if candidate_pool:
+            rotation = ((epoch - 1) * max(1, epoch_files)) % len(candidate_pool)
+            rotated_pool = candidate_pool[rotation:] + candidate_pool[:rotation]
+        else:
+            rotated_pool = []
+        train_data = rotated_pool[: min(len(rotated_pool), epoch_files)]
 
         epoch_metrics = trainer.train_epoch(
             epoch,
@@ -611,39 +858,68 @@ def main():
             max_requests_per_file=epoch_requests_per_file,
             total_epochs=args.epochs,
             reliability_curriculum=reliability_curriculum,
+            continuous_group_len=current_continuous_group_len,
         )
+        eval_metrics = trainer.evaluate_epoch(
+            epoch,
+            fixed_eval_data,
+            heuristic,
+            max_requests_per_file=args.eval_requests_per_file,
+            shared_resources=True,
+            continuous_group_len=args.eval_continuous_group_len,
+        )
+        epoch_metrics.update(eval_metrics)
+        epoch_metrics["imitation_coef"] = float(agent.imitation_coef)
+        epoch_metrics["entropy_coef"] = float(agent.entropy_coef)
+        best_eval_quality = max(best_eval_quality, float(eval_metrics.get("eval_avg_quality_score", 0.0)))
+        best_eval_reward = max(best_eval_reward, float(eval_metrics.get("eval_avg_reward", 0.0)))
+        epoch_metrics["eval_quality_best_so_far"] = best_eval_quality
+        epoch_metrics["eval_reward_best_so_far"] = best_eval_reward
         history.append(epoch_metrics)
 
-        composite_score = (
-            epoch_metrics["success_rate"] * 0.45
-            + epoch_metrics["sla_satisfaction_rate"] * 0.35
-            + epoch_metrics.get("full_sla_satisfaction_rate", 0.0) * 0.25
-            - epoch_metrics["avg_algorithm_latency_ms"] * 0.15
-            - epoch_metrics["avg_episode_delay_ms"] * 0.05
-        )
+        composite_score = _training_quality_score(epoch_metrics)
+        eval_score = _training_quality_score(epoch_metrics, prefix="eval_")
+        if epoch == args.warmup_epochs + 1:
+            best_score = -1e9
+            print("  ℹ 进入完整规模训练阶段，重置最佳模型评分基准")
         total_req = int(epoch_metrics.get("total_requests", 0))
         fail_count = int(max(0, round(total_req * (100.0 - float(epoch_metrics["success_rate"])) / 100.0)))
         print(
-            f"Epoch {epoch} | Score={composite_score:.2f} | Reward={epoch_metrics['avg_reward']:.2f} | "
+            f"Epoch {epoch} | TrainScore={composite_score:.2f} | EvalScore={eval_score:.2f} | "
+            f"Reward={epoch_metrics['avg_reward']:.2f} | "
+            f"Quality={epoch_metrics.get('avg_quality_score', 0.0):.3f} | "
+            f"EvalReward={epoch_metrics.get('eval_avg_reward', 0.0):.2f} | "
+            f"EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f} "
+            f"(Best={epoch_metrics.get('eval_quality_best_so_far', 0.0):.3f}) | "
+            f"PlaceRes={epoch_metrics.get('eval_placement_resource_score', 0.0):.3f} | "
+            f"Future={epoch_metrics.get('eval_future_feasibility_score', 0.0):.3f} | "
+            f"EvalActorHit={epoch_metrics.get('eval_actor_hit_rate', 0.0):.1f}% | "
+            f"EvalFallback={epoch_metrics.get('eval_fallback_count', 0)} | "
             f"Success={epoch_metrics['success_rate']:.2f}% | DepDelay={epoch_metrics['avg_episode_delay_ms']:.2f}ms | "
+            f"AlgP95={epoch_metrics.get('p95_algorithm_latency_ms', 0.0):.2f}ms | "
+            f"ContGroup={current_continuous_group_len} | "
             f"Fail={fail_count}/{total_req} | TopFail={epoch_metrics.get('top_failure_reasons', [])}"
         )
 
-        if composite_score > best_score:
-            best_score = composite_score
+        eligible_for_best = epoch > args.warmup_epochs or best_score <= -1e8
+        if eligible_for_best and eval_score > best_score:
+            best_score = eval_score
             best_success_rate = max(best_success_rate, epoch_metrics["success_rate"])
-            agent.save("models/checkpoints/model_best.pth")
-            torch.save(gnn.state_dict(), "models/checkpoints/gnn_best.pth")
+            if not args.no_save_checkpoints:
+                agent.save("models/checkpoints/model_best.pth")
+                torch.save(gnn.state_dict(), "models/checkpoints/gnn_best.pth")
             print(
                 "  ✓ 新最佳模型: "
-                f"Score={composite_score:.2f}, Success={epoch_metrics['success_rate']:.2f}%"
+                f"EvalScore={eval_score:.2f}, EvalQuality={epoch_metrics.get('eval_avg_quality_score', 0.0):.3f}, "
+                f"Success={epoch_metrics['success_rate']:.2f}%"
             )
             collapse_count = 0
 
         if epoch % 10 == 0:
-            agent.save(f"models/checkpoints/model_epoch_{epoch}.pth")
-            torch.save(gnn.state_dict(), f"models/checkpoints/gnn_epoch_{epoch}.pth")
-            print(f"  ✓ 检查点已保存 (epoch {epoch})")
+            if not args.no_save_checkpoints:
+                agent.save(f"models/checkpoints/model_epoch_{epoch}.pth")
+                torch.save(gnn.state_dict(), f"models/checkpoints/gnn_epoch_{epoch}.pth")
+                print(f"  ✓ 检查点已保存 (epoch {epoch})")
 
         # 自适应控制：抑制中后期性能崩塌，并平衡成功率/SLA/时延
         if args.adaptive_control:
@@ -654,13 +930,32 @@ def main():
             # 1) 失败模式驱动的动作
             top_fails = dict(epoch_metrics.get("top_failure_reasons", []))
             max_step_fail = top_fails.get("max_steps_reached", 0)
+            no_candidate_fail = top_fails.get("no_candidates", 0) + top_fails.get("invalid_candidates", 0)
             if max_step_fail > 0.5 * max(1, epoch_metrics.get("total_requests", 1)):
-                heuristic.top_m = min(120, heuristic.top_m + 5)
+                heuristic.top_m = min(96, heuristic.top_m + 4)
                 epsilon = max(epsilon, 0.22)
+            if no_candidate_fail > 0:
+                heuristic.top_m = min(96, heuristic.top_m + 6)
+                epsilon = max(epsilon, 0.20)
 
             # 2) 时延优化：在成功率较高时收紧候选规模，提高推理速度
-            if epoch_metrics["success_rate"] > 55.0 and epoch_metrics["avg_algorithm_latency_ms"] > 140:
-                heuristic.top_m = max(45, heuristic.top_m - 5)
+            latency_pressure = max(
+                float(epoch_metrics.get("p95_algorithm_latency_ms", 0.0)),
+                float(epoch_metrics.get("eval_p95_algorithm_latency_ms", 0.0)),
+            )
+            if (
+                epoch_metrics["success_rate"] >= 99.0
+                and (
+                    epoch_metrics["avg_algorithm_latency_ms"] > 300
+                    or latency_pressure > 450
+                )
+                and no_candidate_fail == 0
+            ):
+                heuristic.top_m = max(48, heuristic.top_m - 6)
+                trainer.max_probe_candidates = max(4, trainer.max_probe_candidates - 1)
+            elif latency_pressure > 500:
+                heuristic.top_m = max(48, heuristic.top_m - 8)
+                trainer.max_probe_candidates = max(4, trainer.max_probe_candidates - 1)
 
             # 3) 崩塌保护：成功率明显低于历史最佳时触发
             collapse_threshold = max(10.0, best_success_rate * 0.55)
@@ -696,7 +991,7 @@ def main():
 
                 # 增强探索，扩大候选，帮助跳出局部最优
                 epsilon = max(epsilon, 0.28)
-                heuristic.top_m = min(120, heuristic.top_m + 10)
+                heuristic.top_m = min(96, heuristic.top_m + 8)
                 collapse_count = 0
 
             # 4) Full SLA长期为0时，前期保持宽松可靠性目标，避免无效训练
@@ -712,19 +1007,16 @@ def main():
             critic_scheduler.step()
         epsilon = max(0.02, epsilon * 0.985)
 
-        if args.time_budget_hours > 0 and epoch >= args.min_epochs:
-            elapsed_hours = (time.time() - start_time) / 3600.0
-            avg_epoch_hours = elapsed_hours / max(1, epoch)
-            projected_total_hours = avg_epoch_hours * args.epochs
-            if projected_total_hours > args.time_budget_hours * 1.05:
-                print(
-                    f"  ⚠ 触发时间预算早停: 已训练 {epoch} 轮, "
-                    f"预计总耗时 {projected_total_hours:.2f}h 超过预算 {args.time_budget_hours:.2f}h"
-                )
-                break
+    best_actor_path = "models/checkpoints/model_best.pth"
+    best_gnn_path = "models/checkpoints/gnn_best.pth"
+    if not args.no_save_checkpoints and os.path.exists(best_actor_path) and os.path.exists(best_gnn_path):
+        agent.load(best_actor_path, load_optimizer=False)
+        gnn.load_state_dict(torch.load(best_gnn_path, map_location=args.device))
+        print(f"  ✓ 已恢复最佳策略作为最终模型: Score={best_score:.2f}")
 
-    agent.save("models/checkpoints/model_final.pth")
-    torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")
+    if not args.no_save_checkpoints:
+        agent.save("models/checkpoints/model_final.pth")
+        torch.save(gnn.state_dict(), "models/checkpoints/gnn_final.pth")
 
     json_path, csv_path, plot_path = save_metrics(history, output_dir="logs")
     total_time = time.time() - start_time

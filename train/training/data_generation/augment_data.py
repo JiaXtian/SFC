@@ -22,7 +22,7 @@ def _parse_scales(scale_text):
             values.append(int(p))
         except ValueError:
             continue
-    return values or [2500, 6000]
+    return values or [300, 800, 2500, 5000, 6000]
 
 
 def _distribute_counts(total_count, scales, weights_text):
@@ -48,12 +48,12 @@ def _distribute_counts(total_count, scales, weights_text):
 
 def augment_training_data(
     train_topologies=8,
-    train_groups_per_topology=5,
-    train_requests_per_group=700,
-    val_topologies=3,
-    val_requests_per_topology=500,
-    train_scales="2500,6000",
-    scale_distribution="2,4,2",
+    train_groups_per_topology=2,
+    train_requests_per_group=64,
+    val_topologies=4,
+    val_requests_per_topology=48,
+    train_scales="300,800,2500,5000,6000",
+    scale_distribution="2,2,2,1,1",
 ):
     print("=== 数据模拟 ===")
     train_topology_dir = DATA_ROOT / "train" / "topologies"
@@ -65,6 +65,12 @@ def augment_training_data(
     val_topology_dir.mkdir(parents=True, exist_ok=True)
     val_request_dir.mkdir(parents=True, exist_ok=True)
 
+    # Keep each simulation run self-contained.  Stale request/topology JSON from
+    # older scale settings can otherwise be mixed into the next training pool.
+    for output_dir in (train_topology_dir, train_request_dir, val_topology_dir, val_request_dir):
+        for old_file in output_dir.glob("*.json"):
+            old_file.unlink()
+
     print("\n[1/3] 生成训练拓扑...")
     parsed_scales = _parse_scales(train_scales)
     scale_to_count = _distribute_counts(train_topologies, parsed_scales, scale_distribution)
@@ -73,7 +79,6 @@ def augment_training_data(
 
     print("\n[2/3] 生成训练请求...")
     total_train_requests = 0
-    load_profiles = ["low", "medium", "high", "mixed", "mixed"]
 
     for i, topo_file in enumerate(train_topos):
         with open(topo_file) as f:
@@ -84,19 +89,17 @@ def augment_training_data(
         if topo_sat_count <= 1200:
             req_scale = 0.75
         elif topo_sat_count >= 5000:
-            req_scale = 1.35
+            req_scale = 1.10
         else:
             req_scale = 1.0
 
         for j in range(train_groups_per_topology):
-            load_profile = load_profiles[j % len(load_profiles)]
-            req_count = int(max(120, round(train_requests_per_group * req_scale)))
+            req_count = int(max(40, round(train_requests_per_group * req_scale)))
             generate_sfc_requests(
                 num_requests=req_count,
                 node_list=nodes,
                 topology_data=topo,
                 output_file=str(train_request_dir / f"requests_{i:03d}_{j:03d}.json"),
-                load_profile=load_profile,
                 seed=1000 + i * 100 + j,
                 topology_scale=topo_sat_count,
                 topology_file=os.path.basename(topo_file),
@@ -104,7 +107,7 @@ def augment_training_data(
             total_train_requests += req_count
 
     print("\n[3/3] 生成验证集...")
-    val_scales = [scale for scale in parsed_scales if scale > 1200] or parsed_scales
+    val_scales = parsed_scales
     val_scale_plan = _distribute_counts(val_topologies, val_scales, scale_distribution)
     val_topos = generate_scaled_topologies(
         val_scale_plan,
@@ -117,13 +120,11 @@ def augment_training_data(
             topo = json.load(f)
         nodes = [n["id"] for n in topo["topology"]["nodes"]]
 
-        profile = "high" if i % 2 == 0 else "mixed"
         generate_sfc_requests(
             num_requests=val_requests_per_topology,
             node_list=nodes,
             topology_data=topo,
             output_file=str(val_request_dir / f"requests_{i:03d}.json"),
-            load_profile=profile,
             seed=9000 + i,
             topology_scale=int(topo.get("metadata", {}).get("total_satellites", len(nodes))),
             topology_file=os.path.basename(topo_file),
@@ -141,12 +142,12 @@ def augment_training_data(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_topologies", type=int, default=8)
-    parser.add_argument("--train_groups_per_topology", type=int, default=5)
-    parser.add_argument("--train_requests_per_group", type=int, default=700)
-    parser.add_argument("--val_topologies", type=int, default=10)
-    parser.add_argument("--val_requests_per_topology", type=int, default=500)
-    parser.add_argument("--train_scales", type=str, default="2500,6000")
-    parser.add_argument("--scale_distribution", type=str, default="2,4,2")
+    parser.add_argument("--train_groups_per_topology", type=int, default=2)
+    parser.add_argument("--train_requests_per_group", type=int, default=64)
+    parser.add_argument("--val_topologies", type=int, default=4)
+    parser.add_argument("--val_requests_per_topology", type=int, default=48)
+    parser.add_argument("--train_scales", type=str, default="300,800,2500,5000,6000")
+    parser.add_argument("--scale_distribution", type=str, default="2,2,2,1,1")
     args = parser.parse_args()
 
     augment_training_data(

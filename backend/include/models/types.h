@@ -9,12 +9,12 @@ using json = nlohmann::json;
 namespace sfc {
 
 struct CoreBusinessLoad {
-    double signaling_load = 0.5;     // 信令交互负载
-    double session_load = 0.5;       // 会话建立/维护负载
-    double user_plane_load = 0.5;    // 用户面吞吐负载
-    double mobility_load = 0.5;      // 移动性/切换负载
-    double policy_load = 0.5;        // 策略与QoS控制负载
-    double auth_load = 0.5;          // 鉴权与安全负载
+    double signaling_load = 0.0;     // 信令交互负载
+    double session_load = 0.0;       // 会话建立/维护负载
+    double user_plane_load = 0.0;    // 用户面吞吐负载
+    double mobility_load = 0.0;      // 移动性/切换负载
+    double policy_load = 0.0;        // 策略与QoS控制负载
+    double auth_load = 0.0;          // 鉴权与安全负载
 
     static double clamp01(double x) {
         if (x < 0.0) return 0.0;
@@ -57,22 +57,48 @@ struct CoreBusinessLoad {
 
 // 轨道参数
 struct OrbitalParams {
-    int plane;
-    int position_in_plane;
-    double raan;
-    double true_anomaly;
-    double altitude_km;
+    std::string propagation_model = "SGP4";
+    int plane = 0;
+    int position_in_plane = 0;
+    double raan = 0.0;
+    double true_anomaly = 0.0;
+    double altitude_km = 550.0;
     double inclination_deg = 53.0;
+    double eccentricity = 0.0001;
+    double argument_of_perigee_deg = 0.0;
+    double mean_anomaly_deg = 0.0;
+    double mean_motion_rev_per_day = 0.0;
+    double bstar = 0.0;
+    double epoch_jd = 0.0;
+    double propagation_minutes = 0.0;
+    double semi_major_axis_km = 0.0;
+    double period_minutes = 0.0;
+    std::string epoch_iso = "";
+    std::string tle_line1 = "";
+    std::string tle_line2 = "";
     
     json to_json() const {
         return {
+            {"propagation_model", propagation_model},
             {"plane", plane},
             {"position_in_plane", position_in_plane},
             {"raan", raan},
             {"true_anomaly", true_anomaly},
             {"altitude_km", altitude_km},
             {"inclination_deg", inclination_deg},
-            {"inclination", inclination_deg}
+            {"inclination", inclination_deg},
+            {"eccentricity", eccentricity},
+            {"argument_of_perigee_deg", argument_of_perigee_deg},
+            {"mean_anomaly_deg", mean_anomaly_deg},
+            {"mean_motion_rev_per_day", mean_motion_rev_per_day},
+            {"bstar", bstar},
+            {"epoch_jd", epoch_jd},
+            {"epoch_iso", epoch_iso},
+            {"propagation_minutes", propagation_minutes},
+            {"semi_major_axis_km", semi_major_axis_km},
+            {"period_minutes", period_minutes},
+            {"tle_line1", tle_line1},
+            {"tle_line2", tle_line2}
         };
     }
 };
@@ -134,7 +160,7 @@ struct Satellite {
     double mem_available;
     double disk_total;
     double disk_available;
-    double core_network_load = 0.5;
+    double core_network_load = 0.0;
     CoreBusinessLoad core_business_load;
     double node_reliability = 0.98;
     std::string status = "active";  // active, down
@@ -319,6 +345,29 @@ struct VNF {
     CoreBusinessLoad business_load_demand;
 };
 
+// 核心网网元功能依赖
+struct CoreNFDependency {
+    std::string source;
+    std::string target;
+    double criticality = 1.0;
+    double bandwidth_scale = 0.5;
+    double latency_weight = 1.0;
+    double reliability_weight = 1.0;
+    double bandwidth_required_gbps = 0.0;
+
+    json to_json() const {
+        return {
+            {"source", source},
+            {"target", target},
+            {"criticality", criticality},
+            {"bandwidth_scale", bandwidth_scale},
+            {"latency_weight", latency_weight},
+            {"reliability_weight", reliability_weight},
+            {"bandwidth_required_gbps", bandwidth_required_gbps}
+        };
+    }
+};
+
 // SFC请求
 struct SFCRequest {
     std::string request_id;
@@ -328,8 +377,15 @@ struct SFCRequest {
     std::string destination_node;
     std::string priority = "medium";
     std::vector<VNF> vnfs;
+    std::vector<CoreNFDependency> core_nf_dependencies;
+    std::vector<std::vector<std::string>> custom_nf_bindings;
+    std::vector<std::string> independent_core_nfs;
     struct {
         double max_latency_ms;
+        double registration_latency_ms = 120.0;
+        double registration_access_latency_ms = 8.0;
+        double pdu_session_latency_ms = 100.0;
+        double pdu_access_latency_ms = 10.0;
         double min_bandwidth_gbps;
         double min_reliability;
     } constraints;
@@ -341,12 +397,12 @@ struct SFCRequest {
     bool realtime_mode = false;
     int max_planning_attempts = 0;
     double planning_time_budget_ms = 0.0;
+    std::string inference_profile = "fast";  // fast, balanced, quality
     struct {
         double latency = -1.0;
         double resource = -1.0;
         double reliability = -1.0;
         double bandwidth = -1.0;
-        double dispersion = -1.0;
     } score_weights;
 };
 
@@ -381,9 +437,13 @@ struct DeploymentCandidate {
     };
     std::vector<PerVNF> per_vnf;
     double total_latency_ms;
+    double registration_latency_ms = 0.0;
+    double pdu_session_latency_ms = 0.0;
     struct LinkDetail {
         std::string src;
         std::string dst;
+        std::string dependency_source_nf;
+        std::string dependency_target_nf;
         double latency_ms;
         double bandwidth_gbps;
         double bandwidth_available_gbps;
@@ -392,9 +452,11 @@ struct DeploymentCandidate {
         double reliability;
         
         json to_json() const {
-            return {
+            json out = {
                 {"src", src},
                 {"dst", dst},
+                {"dependency_source_nf", dependency_source_nf},
+                {"dependency_target_nf", dependency_target_nf},
                 {"latency_ms", latency_ms},
                 {"bandwidth_gbps", bandwidth_gbps},
                 {"bandwidth_available_gbps", bandwidth_available_gbps},
@@ -402,6 +464,13 @@ struct DeploymentCandidate {
                 {"status", status},
                 {"reliability", reliability}
             };
+            if (!dependency_source_nf.empty() || !dependency_target_nf.empty()) {
+                out["core_nf_dependency"] = {
+                    {"source", dependency_source_nf},
+                    {"target", dependency_target_nf}
+                };
+            }
+            return out;
         }
     };
     std::vector<LinkDetail> link_details;
@@ -427,6 +496,8 @@ struct DeploymentCandidate {
             {"per_vnf", per_vnf_json},
             {"per_core_nf", per_vnf_json},
             {"total_latency_ms", total_latency_ms},
+            {"registration_latency_ms", registration_latency_ms},
+            {"pdu_session_latency_ms", pdu_session_latency_ms},
             {"link_details", link_details_json},
             {"estimated_reliability", estimated_reliability},
             {"bottleneck_bandwidth_gbps", bottleneck_bandwidth_gbps},

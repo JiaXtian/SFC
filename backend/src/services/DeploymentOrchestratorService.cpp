@@ -283,6 +283,8 @@ void DeploymentOrchestratorService::enqueue_deployment(
         {"per_vnf", candidate_json.value("per_vnf", nlohmann::json::array())},
         {"per_core_nf", candidate_json.value("per_core_nf", nlohmann::json::array())},
         {"total_latency_ms", candidate_json.value("total_latency_ms", 0.0)},
+        {"registration_latency_ms", candidate_json.value("registration_latency_ms", 0.0)},
+        {"pdu_session_latency_ms", candidate_json.value("pdu_session_latency_ms", 0.0)},
         {"link_details", candidate_json.value("link_details", nlohmann::json::array())},
         {"estimated_reliability", candidate_json.value("estimated_reliability", 0.0)},
         {"bottleneck_bandwidth_gbps", candidate_json.value("bottleneck_bandwidth_gbps", 0.0)},
@@ -434,15 +436,23 @@ void DeploymentOrchestratorService::worker_loop() {
 
 void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) {
     const std::string now = iso_now();
+    const auto unique_nodes = unique_nf_types(task.candidate.deployed_nodes);
+    const std::unordered_set<std::string> new_node_set(unique_nodes.begin(), unique_nodes.end());
+    const bool partial_redeploy =
+        task.trigger == "partial_node_redeploy" ||
+        task.trigger == "partial_node_redeploy_success";
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "stopping_old"},
-        {"orchestration_progress", 12},
+        {"orchestration_progress", partial_redeploy ? 34 : 12},
         {"last_error", ""},
         {"last_update_at", now}
     }, true);
 
     std::vector<std::string> old_nodes;
     std::vector<std::string> old_containers;
+    std::unordered_map<std::string, std::string> old_container_by_node;
+    std::unordered_map<std::string, std::string> old_container_state_by_node;
+    std::unordered_map<std::string, std::unordered_set<std::string>> old_nfs_by_node;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = deployment_runtime_.find(task.deployment_id);
@@ -450,25 +460,81 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             old_nodes = it->second.active_nodes;
             old_containers = it->second.active_containers;
         }
+        for (size_t i = 0; i < old_nodes.size() && i < old_containers.size(); ++i) {
+            old_container_by_node[old_nodes[i]] = old_containers[i];
+        }
+        for (const auto& kv : node_runtime_) {
+            if (kv.second.container_name.empty()) continue;
+            old_container_by_node.emplace(kv.first, kv.second.container_name);
+            old_container_state_by_node[kv.first] = kv.second.container_state;
+            for (const auto& nf : kv.second.running_core_nf_types) {
+                old_nfs_by_node[kv.first].insert(normalize_nf_type(nf));
+            }
+        }
     }
-    for (const auto& c : old_containers) {
-        (void)stop_container(c);
+    if (partial_redeploy) {
+        for (size_t i = 0; i < old_nodes.size() && i < old_containers.size(); ++i) {
+            if (new_node_set.find(old_nodes[i]) == new_node_set.end()) {
+                (void)stop_container(old_containers[i]);
+            }
+        }
+    } else {
+        for (const auto& c : old_containers) {
+            (void)stop_container(c);
+        }
     }
     if (old_containers.empty()) {
         for (const auto& node : old_nodes) {
+            if (partial_redeploy && new_node_set.find(node) != new_node_set.end()) continue;
             const std::string c = node_to_container_name(task.deployment_id, node);
             (void)stop_container(c);
             (void)stop_container(legacy_node_container_name(node));
         }
     }
-    clear_nodes_for_deployment(old_nodes);
+    if (partial_redeploy) {
+        std::vector<std::string> removed_nodes;
+        for (const auto& node : old_nodes) {
+            if (new_node_set.find(node) == new_node_set.end()) removed_nodes.push_back(node);
+        }
+        clear_nodes_for_deployment(removed_nodes);
+    } else {
+        clear_nodes_for_deployment(old_nodes);
+    }
 
-    const auto unique_nodes = unique_nf_types(task.candidate.deployed_nodes);
     std::unordered_map<std::string, std::vector<std::string>> nfs_by_node;
+    std::unordered_map<std::string, std::string> new_node_by_nf;
     for (const auto& pv : task.candidate.per_vnf) {
         if (pv.node.empty()) continue;
-        nfs_by_node[pv.node].push_back(normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type));
+        const std::string nf = normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type);
+        nfs_by_node[pv.node].push_back(nf);
+        if (!nf.empty()) new_node_by_nf[nf] = pv.node;
     }
+
+    std::unordered_map<std::string, std::string> old_node_by_nf;
+    for (const auto& kv : old_nfs_by_node) {
+        for (const auto& nf : kv.second) {
+            if (!nf.empty() && old_node_by_nf.find(nf) == old_node_by_nf.end()) {
+                old_node_by_nf[nf] = kv.first;
+            }
+        }
+    }
+    const auto critical_moved = [&](const std::string& nf) {
+        const auto old_it = old_node_by_nf.find(nf);
+        const auto new_it = new_node_by_nf.find(nf);
+        return old_it != old_node_by_nf.end() && new_it != new_node_by_nf.end() && old_it->second != new_it->second;
+    };
+    const bool restart_all_core_nfs =
+        !partial_redeploy ||
+        critical_moved("nrf") ||
+        critical_moved("scp") ||
+        critical_moved("smf") ||
+        critical_moved("upf");
+    const std::unordered_set<std::string> old_node_set(old_nodes.begin(), old_nodes.end());
+    auto progress_value = [](double base, double span, int done, int total) {
+        if (total <= 0) return static_cast<int>(std::round(base + span));
+        const double ratio = std::max(0.0, std::min(1.0, static_cast<double>(done) / static_cast<double>(total)));
+        return static_cast<int>(std::round(base + span * ratio));
+    };
 
     auto fail_deployment = [&](const std::string& reason) {
         update_deployment_runtime_state(task.deployment_id, {
@@ -518,19 +584,38 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }
     const std::string platform = default_satellite_platform();
 
+    int containers_running = partial_redeploy
+        ? static_cast<int>(std::count_if(unique_nodes.begin(), unique_nodes.end(), [&](const std::string& node) {
+            const auto state_it = old_container_state_by_node.find(node);
+            return old_node_set.find(node) != old_node_set.end() &&
+                state_it != old_container_state_by_node.end() &&
+                state_it->second == "running";
+        }))
+        : 0;
+    int containers_failed = 0;
+    int core_nfs_running = partial_redeploy && !restart_all_core_nfs
+        ? static_cast<int>(std::count_if(task.candidate.per_vnf.begin(), task.candidate.per_vnf.end(), [&](const auto& pv) {
+            const std::string nf = normalize_nf_type(pv.nf_type.empty() ? pv.vnf : pv.nf_type);
+            const auto it = old_nfs_by_node.find(pv.node);
+            return it != old_nfs_by_node.end() && it->second.find(nf) != it->second.end();
+        }))
+        : 0;
+    int core_nfs_failed = 0;
+    const int containers_total = static_cast<int>(unique_nodes.size());
+    const int core_nfs_total = static_cast<int>(task.candidate.per_vnf.size());
+
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "starting_containers"},
-        {"orchestration_progress", 28},
-        {"containers_total", static_cast<int>(unique_nodes.size())},
-        {"core_nfs_total", static_cast<int>(task.candidate.per_vnf.size())},
+        {"orchestration_progress", progress_value(partial_redeploy ? 36.0 : 18.0, partial_redeploy ? 18.0 : 22.0, containers_running, containers_total)},
+        {"containers_total", containers_total},
+        {"containers_running", containers_running},
+        {"containers_failed", containers_failed},
+        {"core_nfs_total", core_nfs_total},
+        {"core_nfs_running", core_nfs_running},
+        {"core_nfs_failed", core_nfs_failed},
         {"last_error", ""},
         {"last_update_at", iso_now()}
     }, true);
-
-    int containers_running = 0;
-    int containers_failed = 0;
-    int core_nfs_running = 0;
-    int core_nfs_failed = 0;
 
     std::vector<std::string> active_nodes;
     std::vector<std::string> active_containers;
@@ -542,6 +627,10 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
 
     for (const auto& node : unique_nodes) {
         const std::string container_name = node_to_container_name(task.deployment_id, node);
+        const bool retained_running_container =
+            partial_redeploy &&
+            old_node_set.find(node) != old_node_set.end() &&
+            old_container_state_by_node[node] == "running";
         NodeRuntimeSnapshot node_state;
         node_state.node_id = node;
         node_state.container_name = container_name;
@@ -549,7 +638,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         node_state.deployed = true;
         update_node_runtime_state(node, node_state);
 
-        const bool container_ready = ensure_satellite_container(container_name, satellite_image, platform);
+        const bool container_ready = retained_running_container || ensure_satellite_container(container_name, satellite_image, platform);
         if (!container_ready) {
             node_state.container_state = "failed";
             node_state.service_probe_ok = false;
@@ -560,6 +649,17 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             containers_failed += 1;
             core_nfs_failed += static_cast<int>(nfs_by_node[node].size());
             errors.push_back("container_start_failed:" + node);
+            update_deployment_runtime_state(task.deployment_id, {
+                {"orchestration_phase", "starting_containers"},
+                {"orchestration_progress", progress_value(partial_redeploy ? 36.0 : 18.0, partial_redeploy ? 18.0 : 22.0, containers_running + containers_failed, containers_total)},
+                {"containers_total", containers_total},
+                {"containers_running", containers_running},
+                {"containers_failed", containers_failed},
+                {"core_nfs_total", core_nfs_total},
+                {"core_nfs_running", core_nfs_running},
+                {"core_nfs_failed", core_nfs_failed},
+                {"last_update_at", iso_now()}
+            }, true);
             continue;
         }
 
@@ -575,10 +675,21 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
             core_nfs_failed += static_cast<int>(nfs_by_node[node].size());
             errors.push_back("container_ip_unavailable:" + node);
             (void)stop_container(container_name);
+            update_deployment_runtime_state(task.deployment_id, {
+                {"orchestration_phase", "starting_containers"},
+                {"orchestration_progress", progress_value(partial_redeploy ? 36.0 : 18.0, partial_redeploy ? 18.0 : 22.0, containers_running + containers_failed, containers_total)},
+                {"containers_total", containers_total},
+                {"containers_running", containers_running},
+                {"containers_failed", containers_failed},
+                {"core_nfs_total", core_nfs_total},
+                {"core_nfs_running", core_nfs_running},
+                {"core_nfs_failed", core_nfs_failed},
+                {"last_update_at", iso_now()}
+            }, true);
             continue;
         }
 
-        containers_running += 1;
+        if (!retained_running_container) containers_running += 1;
         node_state.container_state = "running";
         node_state.service_probe_ok = false;
         node_state.running_core_nf_types.clear();
@@ -589,6 +700,17 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         node_container_by_id[node] = container_name;
         active_nodes.push_back(node);
         active_containers.push_back(container_name);
+        update_deployment_runtime_state(task.deployment_id, {
+            {"orchestration_phase", "starting_containers"},
+            {"orchestration_progress", progress_value(partial_redeploy ? 36.0 : 18.0, partial_redeploy ? 18.0 : 22.0, containers_running + containers_failed, containers_total)},
+            {"containers_total", containers_total},
+            {"containers_running", containers_running},
+            {"containers_failed", containers_failed},
+            {"core_nfs_total", core_nfs_total},
+            {"core_nfs_running", core_nfs_running},
+            {"core_nfs_failed", core_nfs_failed},
+            {"last_update_at", iso_now()}
+        }, true);
     }
 
     std::string nrf_node;
@@ -624,6 +746,17 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         : ("http://" + scp_ip + ":" + std::to_string(sbi_port_for_nf_type("scp")));
 
     std::unordered_set<std::string> started_nfs_set;
+    update_deployment_runtime_state(task.deployment_id, {
+        {"orchestration_phase", "starting_core_nfs"},
+        {"orchestration_progress", progress_value(partial_redeploy ? 58.0 : 44.0, partial_redeploy ? 28.0 : 42.0, core_nfs_running + core_nfs_failed, core_nfs_total)},
+        {"containers_total", containers_total},
+        {"containers_running", containers_running},
+        {"containers_failed", containers_failed},
+        {"core_nfs_total", core_nfs_total},
+        {"core_nfs_running", core_nfs_running},
+        {"core_nfs_failed", core_nfs_failed},
+        {"last_update_at", iso_now()}
+    }, true);
     for (const auto& node : unique_nodes) {
         const auto ip_it = node_ip_by_id.find(node);
         if (ip_it == node_ip_by_id.end()) continue;
@@ -634,6 +767,26 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
 
         std::vector<std::string> running_nfs;
         for (const auto& nf : nfs_by_node[node]) {
+            const bool already_running =
+                partial_redeploy &&
+                !restart_all_core_nfs &&
+                old_nfs_by_node[node].find(nf) != old_nfs_by_node[node].end();
+            if (already_running) {
+                running_nfs.push_back(nf);
+                started_nfs_set.insert(nf);
+                update_deployment_runtime_state(task.deployment_id, {
+                    {"orchestration_phase", "starting_core_nfs"},
+                    {"orchestration_progress", progress_value(partial_redeploy ? 58.0 : 44.0, partial_redeploy ? 28.0 : 42.0, core_nfs_running + core_nfs_failed, core_nfs_total)},
+                    {"containers_total", containers_total},
+                    {"containers_running", containers_running},
+                    {"containers_failed", containers_failed},
+                    {"core_nfs_total", core_nfs_total},
+                    {"core_nfs_running", core_nfs_running},
+                    {"core_nfs_failed", core_nfs_failed},
+                    {"last_update_at", iso_now()}
+                }, true);
+                continue;
+            }
             const std::string cfg = render_nf_config(
                 nf,
                 local_ip,
@@ -651,6 +804,17 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
                 core_nfs_failed += 1;
                 errors.push_back("nf_start_failed:" + nf + "@" + node);
             }
+            update_deployment_runtime_state(task.deployment_id, {
+                {"orchestration_phase", "starting_core_nfs"},
+                {"orchestration_progress", progress_value(partial_redeploy ? 58.0 : 44.0, partial_redeploy ? 28.0 : 42.0, core_nfs_running + core_nfs_failed, core_nfs_total)},
+                {"containers_total", containers_total},
+                {"containers_running", containers_running},
+                {"containers_failed", containers_failed},
+                {"core_nfs_total", core_nfs_total},
+                {"core_nfs_running", core_nfs_running},
+                {"core_nfs_failed", core_nfs_failed},
+                {"last_update_at", iso_now()}
+            }, true);
         }
 
         NodeRuntimeSnapshot node_state;
@@ -671,6 +835,17 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }
 
     bool registration_ok = true;
+    update_deployment_runtime_state(task.deployment_id, {
+        {"orchestration_phase", "health_check"},
+        {"orchestration_progress", 92},
+        {"containers_total", containers_total},
+        {"containers_running", containers_running},
+        {"containers_failed", containers_failed},
+        {"core_nfs_total", core_nfs_total},
+        {"core_nfs_running", core_nfs_running},
+        {"core_nfs_failed", core_nfs_failed},
+        {"last_update_at", iso_now()}
+    }, true);
     if (!nrf_node.empty()) {
         if (nrf_ip.empty()) {
             registration_ok = false;

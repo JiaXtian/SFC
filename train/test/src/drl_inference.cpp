@@ -225,6 +225,7 @@ bool DRLInference::load_models(const std::string& gnn_path, const std::string& a
         if (!gnn_ok) {
             std::vector<int64_t> node_candidates;
             push_unique(node_candidates, node_feature_dim_);
+            push_unique(node_candidates, 18);
             push_unique(node_candidates, 8);
             push_unique(node_candidates, 14);
             for (int64_t candidate : node_candidates) {
@@ -251,9 +252,11 @@ bool DRLInference::load_models(const std::string& gnn_path, const std::string& a
             push_unique(emb_candidates, embedding_dim_);
             push_unique(emb_candidates, 192);
             push_unique(vnf_candidates, vnf_feature_dim_);
+            push_unique(vnf_candidates, 24);
             push_unique(vnf_candidates, 8);
             push_unique(vnf_candidates, 4);
             push_unique(ctx_candidates, context_feature_dim_);
+            push_unique(ctx_candidates, 32);
             push_unique(ctx_candidates, 48);
             for (int64_t emb_dim : emb_candidates) {
                 bool found = false;
@@ -327,6 +330,7 @@ std::vector<float> DRLInference::encode_graph(
 
         std::vector<int64_t> node_dim_candidates;
         push_unique(node_dim_candidates, node_feature_dim_);
+        push_unique(node_dim_candidates, 18);
         push_unique(node_dim_candidates, 14);
         push_unique(node_dim_candidates, 8);
 
@@ -434,9 +438,11 @@ int DRLInference::select_action(
         push_unique(emb_candidates, embedding_dim_);
         push_unique(emb_candidates, 192);
         push_unique(vnf_candidates, vnf_feature_dim_);
+        push_unique(vnf_candidates, 24);
         push_unique(vnf_candidates, 8);
         push_unique(vnf_candidates, 4);
         push_unique(ctx_candidates, context_feature_dim_);
+        push_unique(ctx_candidates, 32);
         push_unique(ctx_candidates, 48);
 
         std::vector<int64_t> candidates_int64(candidate_indices.begin(), candidate_indices.end());

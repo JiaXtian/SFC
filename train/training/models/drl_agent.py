@@ -1,4 +1,4 @@
-"""DRL Agent（A2C，支持扩展输入特征）"""
+"""DRL Agent（A2C，open5gs核心网部署输入特征）"""
 from typing import List, Tuple
 
 import torch
@@ -8,9 +8,14 @@ from torch.distributions import Categorical
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, node_dim=192, vnf_dim=8, context_dim=48, hidden_dim=384):
+    def __init__(self, node_dim=192, vnf_dim=24, context_dim=32, hidden_dim=384):
         super().__init__()
-        combined_dim = node_dim + vnf_dim + context_dim
+        # Candidate order is produced by the heuristic pruner and carries
+        # dynamic resource/path information that is not present in the static
+        # GNN embedding.  Encoding rank keeps the ONNX input signature stable
+        # while making the hybrid "heuristic pruning + DRL" policy learnable.
+        self.rank_feature_dim = 4
+        combined_dim = node_dim + vnf_dim + context_dim + self.rank_feature_dim
         self.fc = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -29,7 +34,14 @@ class ActorNetwork(nn.Module):
 
         vnf_expanded = vnf_features.unsqueeze(0).expand(m, -1)
         context_expanded = context_features.unsqueeze(0).expand(m, -1)
-        combined = torch.cat([candidate_embs, vnf_expanded, context_expanded], dim=1)
+        rank = torch.arange(m, device=node_emb.device, dtype=candidate_embs.dtype)
+        denom = torch.clamp(torch.tensor(float(max(m - 1, 1)), device=node_emb.device, dtype=candidate_embs.dtype), min=1.0)
+        rank_norm = rank / denom
+        rank_inv = 1.0 - rank_norm
+        rank_decay = 1.0 / (rank + 1.0)
+        top_band = (rank < 8.0).to(candidate_embs.dtype)
+        rank_features = torch.stack([rank_norm, rank_inv, rank_decay, top_band], dim=1)
+        combined = torch.cat([candidate_embs, vnf_expanded, context_expanded, rank_features], dim=1)
 
         logits = self.fc(combined).squeeze(-1)
         probs = F.softmax(logits, dim=0)
@@ -60,12 +72,13 @@ class DRLAgent:
     def __init__(
         self,
         node_dim=192,
-        vnf_dim=8,
-        context_dim=48,
+        vnf_dim=24,
+        context_dim=32,
         actor_lr=1e-4,
         critic_lr=3e-4,
         gamma=0.99,
-        entropy_coef=0.01,
+        entropy_coef=0.008,
+        imitation_coef=0.35,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         device="cpu",
@@ -73,6 +86,7 @@ class DRLAgent:
         self.device = device
         self.gamma = gamma
         self.entropy_coef = entropy_coef
+        self.imitation_coef = imitation_coef
         self.value_loss_coef = value_loss_coef
         self.max_grad_norm = max_grad_norm
         self.node_dim = node_dim
@@ -160,12 +174,21 @@ class DRLAgent:
         next_states_tensor = torch.stack(next_states)
         dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
+        del next_states_tensor
         values = self.critic(states_tensor)
-        with torch.no_grad():
-            next_values = self.critic(next_states_tensor)
-            targets = rewards_tensor + self.gamma * next_values * (1 - dones_tensor)
+        returns = []
+        running_return = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        for reward, done in zip(reversed(rewards_tensor), reversed(dones_tensor)):
+            running_return = reward + self.gamma * running_return * (1.0 - done)
+            returns.append(running_return)
+        returns.reverse()
+        targets = torch.stack(returns).detach()
 
         advantages = targets - values
+        if advantages.numel() > 1:
+            actor_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-6)
+        else:
+            actor_advantages = advantages
         critic_loss = F.mse_loss(values, targets)
 
         self.critic_optimizer.zero_grad()
@@ -193,11 +216,15 @@ class DRLAgent:
             if action < 0 or action >= len(candidates):
                 continue
 
-            advantage = advantages[i].detach()
+            advantage = actor_advantages[i].detach()
             actor_loss = -log_probs[action] * advantage
+            imitation_weight = self.imitation_coef
+            if int(traj.get("actor_action", action)) != int(action):
+                imitation_weight *= 1.35
+            imitation_loss = -log_probs[action]
 
             entropy = Categorical(probs).entropy()
-            actor_loss_total += actor_loss - self.entropy_coef * entropy
+            actor_loss_total += actor_loss + imitation_weight * imitation_loss - self.entropy_coef * entropy
             entropy_total += entropy.item()
             valid_count += 1
 

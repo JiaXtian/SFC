@@ -1,4 +1,5 @@
 #include "services/RuntimeStateService.h"
+#include "utils/Sgp4Propagator.h"
 
 #include <algorithm>
 #include <array>
@@ -422,6 +423,20 @@ bool RuntimeStateService::parse_topology_json(const nlohmann::json& root, Topolo
                 op,
                 "inclination_deg",
                 json_number(op, "inclination", parsed.metadata.inclination_deg));
+            sat.orbital_params.propagation_model = json_string(op, "propagation_model", "SGP4");
+            sat.orbital_params.eccentricity = json_number(op, "eccentricity", 0.0001);
+            sat.orbital_params.argument_of_perigee_deg = json_number(op, "argument_of_perigee_deg", 0.0);
+            sat.orbital_params.mean_anomaly_deg = json_number(op, "mean_anomaly_deg", sat.orbital_params.true_anomaly);
+            sat.orbital_params.mean_motion_rev_per_day = json_number(op, "mean_motion_rev_per_day", 0.0);
+            sat.orbital_params.bstar = json_number(op, "bstar", 0.0);
+            sat.orbital_params.epoch_jd = json_number(op, "epoch_jd", 0.0);
+            sat.orbital_params.epoch_iso = json_string(op, "epoch_iso", "");
+            sat.orbital_params.propagation_minutes = json_number(op, "propagation_minutes", 0.0);
+            sat.orbital_params.semi_major_axis_km = json_number(op, "semi_major_axis_km", 0.0);
+            sat.orbital_params.period_minutes = json_number(op, "period_minutes", 0.0);
+            sat.orbital_params.tle_line1 = json_string(op, "tle_line1", "");
+            sat.orbital_params.tle_line2 = json_string(op, "tle_line2", "");
+            sgp4::ensure_sgp4_defaults(sat.orbital_params, parsed.metadata.altitude_km, parsed.metadata.inclination_deg);
 
             const auto coord = n.contains("coordinates") && n["coordinates"].is_object()
                                    ? n["coordinates"]
@@ -431,6 +446,12 @@ bool RuntimeStateService::parse_topology_json(const nlohmann::json& root, Topolo
             sat.coordinates.z = json_number(coord, "z", 0.0);
             sat.coordinates.lat = json_number(coord, "lat", 0.0);
             sat.coordinates.lon = json_number(coord, "lon", 0.0);
+            if (!n.contains("coordinates") || !n["coordinates"].is_object()) {
+                sat.coordinates = sgp4::propagate(
+                    sat.orbital_params,
+                    sat.orbital_params.propagation_minutes
+                ).coordinates;
+            }
 
             sat.cpu_total = json_number(n, "cpu_total", 0.0);
             sat.cpu_available = json_number(n, "cpu_available", sat.cpu_total);

@@ -1,4 +1,5 @@
 """训练器（完整指标统计 + 阶段性能日志）"""
+from __future__ import annotations
 import json
 import logging
 import os
@@ -11,6 +12,15 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from training.open5gs_profile import (
+    BUSINESS_DIMENSIONS,
+    CONTEXT_FEATURE_DIM,
+    CORE_NF_FEATURE_DIM,
+    CORE_NF_INDEX,
+    NODE_FEATURE_DIM,
+    zero_business_load,
+)
+
 
 class SFCTrainer:
     def __init__(
@@ -19,10 +29,13 @@ class SFCTrainer:
         agent,
         device="cpu",
         log_dir="logs",
-        context_dim=48,
+        context_dim=CONTEXT_FEATURE_DIM,
         history_window=0,
         backend_align_context=True,
-        max_probe_candidates=24,
+        max_probe_candidates=5,
+        max_decision_ms=260.0,
+        teacher_probe_candidates=12,
+        teacher_rescue_candidates=20,
     ):
         self.gnn = gnn.to(device)
         self.agent = agent
@@ -30,7 +43,10 @@ class SFCTrainer:
         self.context_dim = int(context_dim)
         self.history_window = int(max(0, history_window))
         self.backend_align_context = bool(backend_align_context)
-        self.max_probe_candidates = int(max(6, max_probe_candidates))
+        self.max_probe_candidates = int(max(4, max_probe_candidates))
+        self.max_decision_ms = float(max(120.0, max_decision_ms))
+        self.teacher_probe_candidates = int(max(6, teacher_probe_candidates))
+        self.teacher_rescue_candidates = int(max(8, teacher_rescue_candidates))
 
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
@@ -74,8 +90,8 @@ class SFCTrainer:
                 cpu_available = 0.0
                 mem_available = 0.0
                 disk_available = 0.0
-            business_load = node.get("core_business_load", {}) if isinstance(node, dict) else {}
-            fallback_load = float(node.get("core_network_load", 0.5))
+            business_load = node.get("core_business_load", zero_business_load()) if isinstance(node, dict) else zero_business_load()
+            business_values = {dim: float(business_load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS}
             graph.add_node(
                 node["id"],
                 cpu_total=node.get("cpu_total", 0.0),
@@ -84,14 +100,15 @@ class SFCTrainer:
                 mem_available=mem_available,
                 disk_total=node.get("disk_total", 256.0),
                 disk_available=disk_available,
-                core_network_load=node.get("core_network_load", 0.5),
-                core_business_load=business_load,
-                signaling_load=float(business_load.get("signaling_load", fallback_load)),
-                session_load=float(business_load.get("session_load", fallback_load)),
-                user_plane_load=float(business_load.get("user_plane_load", fallback_load)),
-                mobility_load=float(business_load.get("mobility_load", fallback_load)),
-                policy_load=float(business_load.get("policy_load", fallback_load)),
-                auth_load=float(business_load.get("auth_load", fallback_load)),
+                core_network_load=float(node.get("core_network_load", 0.0)),
+                core_business_load=business_values,
+                signaling_load=business_values["signaling_load"],
+                session_load=business_values["session_load"],
+                user_plane_load=business_values["user_plane_load"],
+                mobility_load=business_values["mobility_load"],
+                policy_load=business_values["policy_load"],
+                auth_load=business_values["auth_load"],
+                deployed_core_nf_count=int(node.get("deployed_core_nf_count", 0)),
                 node_reliability=node.get("node_reliability", 0.98),
                 type=node.get("type", "satellite"),
                 status=node_status,
@@ -120,92 +137,99 @@ class SFCTrainer:
         return graph
 
     def _build_context_features(self, state, history_stats: Sequence[Dict] | None = None):
+        del history_stats
         ctx = torch.zeros(self.context_dim)
-        total_vnfs = max(1, state.get("total_vnfs", 1))
-        business_load = state.get("core_business_load", {}) if isinstance(state, dict) else {}
-        business_index = float(
-            (
-                float(business_load.get("signaling_load", 0.5))
-                + float(business_load.get("session_load", 0.5))
-                + float(business_load.get("user_plane_load", 0.5))
-                + float(business_load.get("mobility_load", 0.5))
-                + float(business_load.get("policy_load", 0.5))
-                + float(business_load.get("auth_load", 0.5))
-            )
-            / 6.0
-        )
+        total_nfs = max(1, int(state.get("total_core_nfs", state.get("total_vnfs", 12))))
+        current_idx = int(state.get("current_nf_idx", state.get("current_vnf_idx", 0)))
+        deployed_count = len(state.get("deployed_nfs", []))
+        dep_total = max(1, int(state.get("total_dependencies", 1)))
+        dep_done = int(state.get("satisfied_dependencies", 0))
+        latency_target = max(float(state.get("latency_requirement_ms", 120.0)), 1e-6)
+        graph = state.get("topology")
+        resource_util = {"cpu_utilization": 0.0, "mem_utilization": 0.0, "disk_utilization": 0.0}
+        avg_bw_util = 0.0
+        max_business_load = 0.0
+        avg_business_load = 0.0
+        if graph is not None:
+            sampled_nodes = self._sampled_graph_nodes(graph)
+            sampled_edges = self._sampled_graph_edges(graph)
+            cpu_total = sum(float(node.get("cpu_total", 0.0)) for _, node in sampled_nodes)
+            cpu_used = sum(float(node.get("cpu_total", 0.0)) - float(node.get("cpu_available", 0.0)) for _, node in sampled_nodes)
+            mem_total = sum(float(node.get("mem_total", 0.0)) for _, node in sampled_nodes)
+            mem_used = sum(float(node.get("mem_total", 0.0)) - float(node.get("mem_available", 0.0)) for _, node in sampled_nodes)
+            disk_total = sum(float(node.get("disk_total", 0.0)) for _, node in sampled_nodes)
+            disk_used = sum(float(node.get("disk_total", 0.0)) - float(node.get("disk_available", 0.0)) for _, node in sampled_nodes)
+            resource_util = {
+                "cpu_utilization": cpu_used / cpu_total if cpu_total > 0 else 0.0,
+                "mem_utilization": mem_used / mem_total if mem_total > 0 else 0.0,
+                "disk_utilization": disk_used / disk_total if disk_total > 0 else 0.0,
+            }
+            bw_ratios = []
+            node_business = []
+            for _, _, edge in sampled_edges:
+                total = float(edge.get("bandwidth_gbps", 0.0))
+                if total > 1e-9:
+                    bw_ratios.append(1.0 - float(edge.get("bandwidth_available_gbps", 0.0)) / total)
+            for _, node in sampled_nodes:
+                load = node.get("core_business_load", {})
+                node_business.append(max(float(load.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS))
+            avg_bw_util = float(np.mean(bw_ratios)) if bw_ratios else 0.0
+            max_business_load = float(max(node_business)) if node_business else 0.0
+            avg_business_load = float(np.mean(node_business)) if node_business else 0.0
 
-        remaining_delay = float(state.get("remaining_delay", 0.0))
-        accumulated_delay = float(state.get("accumulated_delay", 0.0))
-        reliability_req = float(state.get("reliability_requirement", 0.97))
-        accumulated_reliability = float(state.get("accumulated_reliability", 1.0))
-
-        topology_version = float(state.get("topology_version", 0.0))
-        sim_time_flag = 1.0 if str(state.get("sim_time", "")).strip() else 0.0
-        active_node_ratio = float(state.get("active_node_ratio", 1.0))
-        active_link_ratio = float(state.get("active_link_ratio", 1.0))
-        avg_latency_ms = float(state.get("avg_latency_ms", 0.0))
-        avg_bw_util = float(state.get("avg_bandwidth_utilization", 0.0))
-
-        # Backend-aligned layout:
-        # [0..11] exactly match backend/src/services/InferenceEngine.cpp::build_context_features
-        # [12..15] dynamic topology health stats (also injected in backend runtime now).
+        current_nf = state.get("core_nf", state.get("vnf", {}))
+        current_nf_type = str(current_nf.get("nf_type", current_nf.get("core_nf_type", ""))).lower()
+        current_nf_business = current_nf.get("business_load_demand", {})
+        business_demand = state.get("business_demand", zero_business_load())
         base_features = [
-            remaining_delay / 300.0,
-            float(state.get("current_vnf_idx", 0)) / total_vnfs,
-            business_index,
-            float(state.get("bandwidth_demand_gbps", 0.1)) / 10.0,
-            reliability_req,
-            accumulated_reliability,
-            0.0,
-            0.0,
-            accumulated_delay / 300.0,
-            accumulated_reliability - reliability_req,
-            topology_version / 10000.0,
-            sim_time_flag,
-            active_node_ratio,
-            active_link_ratio,
-            avg_latency_ms / 80.0,
+            current_idx / total_nfs,
+            max(0, total_nfs - current_idx) / total_nfs,
+            deployed_count / total_nfs,
+            dep_done / dep_total,
+            float(state.get("accumulated_dependency_delay", 0.0)) / latency_target,
+            float(state.get("max_dependency_delay", 0.0)) / latency_target,
+            (float(state.get("accumulated_dependency_delay", 0.0)) / max(1, dep_done)) / latency_target,
+            float(state.get("min_dependency_reliability", 1.0)),
+            float(state.get("accumulated_hops", 0)) / 80.0,
+            float(np.mean(list(resource_util.values()))),
+            resource_util["cpu_utilization"],
+            resource_util["mem_utilization"],
+            resource_util["disk_utilization"],
             avg_bw_util,
-            float(state.get("core_business_load", {}).get("signaling_load", business_index)),
-            float(state.get("core_business_load", {}).get("session_load", business_index)),
-            float(state.get("core_business_load", {}).get("user_plane_load", business_index)),
-            float(state.get("core_business_load", {}).get("mobility_load", business_index)),
-            float(state.get("core_business_load", {}).get("policy_load", business_index)),
-            float(state.get("core_business_load", {}).get("auth_load", business_index)),
+            max_business_load,
+            avg_business_load,
+            *[float(business_demand.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS],
+            float(state.get("open_dependencies_for_current", 0)) / 6.0,
+            float(state.get("critical_open_dependencies_for_current", 0)) / 6.0,
+            1.0 if current_nf_type == "upf" else 0.0,
+            float(np.mean([float(current_nf_business.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS])) if current_nf_business else 0.0,
+            float(state.get("remaining_delay", latency_target)) / latency_target,
+            float(state.get("reliability_requirement", 0.82)),
+            0.0,
+            0.0,
+            0.0,
         ]
         for idx, value in enumerate(base_features):
             if idx >= self.context_dim:
                 break
             ctx[idx] = float(value)
-
-        if self.backend_align_context:
-            return ctx
-
-        if (not history_stats) or self.history_window <= 0:
-            return ctx
-
-        offset = len(base_features)
-        recent_history = list(history_stats)[-self.history_window :]
-        for hist in recent_history:
-            history_features = [
-                float(hist.get("active_node_ratio", 1.0)),
-                float(hist.get("active_link_ratio", 1.0)),
-                float(hist.get("avg_latency_ms", 0.0)) / 80.0,
-                float(hist.get("avg_bandwidth_utilization", 0.0)),
-                float(hist.get("down_node_ratio", 0.0)),
-                float(hist.get("down_link_ratio", 0.0)),
-                float(hist.get("congested_link_ratio", 0.0)),
-                float(hist.get("topology_version_norm", 0.0)),
-            ]
-            for value in history_features:
-                if offset >= self.context_dim:
-                    break
-                ctx[offset] = float(value)
-                offset += 1
-            if offset >= self.context_dim:
-                break
         return ctx
+
+    @staticmethod
+    def _sample_view(items, limit):
+        values = list(items)
+        if len(values) <= limit:
+            return values
+        stride = max(1, len(values) // limit)
+        return values[::stride][:limit]
+
+    @classmethod
+    def _sampled_graph_nodes(cls, graph, limit=768):
+        return cls._sample_view(graph.nodes(data=True), limit)
+
+    @classmethod
+    def _sampled_graph_edges(cls, graph, limit=1536):
+        return cls._sample_view(graph.edges(data=True), limit)
 
     @staticmethod
     def _build_vnf_features(vnf):
@@ -215,21 +239,23 @@ class SFCTrainer:
                 vnf.get("nf_type", vnf.get("vnf_type", vnf.get("name", ""))),
             )
         ).lower().replace("-", "_").replace(" ", "_")
+        one_hot = [0.0] * len(CORE_NF_INDEX)
+        if nf_type in CORE_NF_INDEX:
+            one_hot[CORE_NF_INDEX[nf_type]] = 1.0
         is_user_plane = 1.0 if nf_type == "upf" else 0.0
-        is_control_plane = 0.0 if is_user_plane > 0.5 else 1.0
         stateful = 1.0 if bool(vnf.get("stateful", True)) else 0.0
-        processing_weight = float(vnf.get("processing_weight", 1.0))
+        business = vnf.get("business_load_demand", {})
         return torch.tensor(
-            [
-                float(vnf.get("cpu_required", 0.0)),
-                float(vnf.get("mem_required", 0.0)),
-                float(vnf.get("bandwidth_required_gbps", 0.0)),
-                float(vnf.get("disk_required_gb", 0.0)),
+            one_hot
+            + [
+                float(vnf.get("cpu_required", 0.0)) / 8.0,
+                float(vnf.get("mem_required", 0.0)) / 16.0,
+                float(vnf.get("disk_required_gb", 0.0)) / 64.0,
+                float(vnf.get("bandwidth_required_gbps", 0.0)) / 4.0,
                 is_user_plane,
-                is_control_plane,
                 stateful,
-                processing_weight,
-            ],
+                *[float(business.get(dim, 0.0)) for dim in BUSINESS_DIMENSIONS],
+            ][:CORE_NF_FEATURE_DIM],
             dtype=torch.float32,
         )
 
@@ -277,6 +303,7 @@ class SFCTrainer:
     def _get_graph_data(self, graph):
         nodes = list(graph.nodes())
         node_index = {n: i for i, n in enumerate(nodes)}
+        max_degree = max([graph.out_degree(n) for n in nodes] or [1])
 
         node_features = []
         for n in nodes:
@@ -312,17 +339,19 @@ class SFCTrainer:
                     cpu_ratio,
                     mem_ratio,
                     disk_ratio,
-                    float(node_data.get("core_network_load", 0.5)),
+                    min(float(node_data.get("cpu_available", 0.0)) / 64.0, 4.0),
+                    min(float(node_data.get("mem_available", 0.0)) / 128.0, 4.0),
+                    min(float(node_data.get("disk_available", 0.0)) / 1024.0, 4.0),
                     float(node_data.get("node_reliability", 0.98)),
+                    float(graph.out_degree(n)) / max(1.0, float(max_degree)),
                     active_ratio,
                     bw_ratio,
                     min(latency_norm, 5.0),
-                    float(node_data.get("signaling_load", node_data.get("core_network_load", 0.5))),
-                    float(node_data.get("session_load", node_data.get("core_network_load", 0.5))),
-                    float(node_data.get("user_plane_load", node_data.get("core_network_load", 0.5))),
-                    float(node_data.get("mobility_load", node_data.get("core_network_load", 0.5))),
-                    float(node_data.get("policy_load", node_data.get("core_network_load", 0.5))),
-                    float(node_data.get("auth_load", node_data.get("core_network_load", 0.5))),
+                    *[
+                        float(node_data.get("core_business_load", {}).get(dim, node_data.get(dim, 0.0)))
+                        for dim in BUSINESS_DIMENSIONS
+                    ],
+                    min(1.0, float(node_data.get("deployed_core_nf_count", 0)) / 12.0),
                 ]
             )
 
@@ -340,39 +369,44 @@ class SFCTrainer:
             node_index,
         )
 
-    def _train_episode(self, env, graph, request, epsilon, heuristic_pruner, reset_resources=True):
+    def _train_episode(
+        self,
+        env,
+        graph,
+        request,
+        epsilon,
+        heuristic_pruner,
+        reset_resources=True,
+        update_model=True,
+        deterministic_policy=False,
+        execution_mode="teacher",
+    ):
+        del graph
         state = env.reset(request, reset_resources=reset_resources)
         trajectories = []
 
         episode_reward = 0.0
         failure_reason = None
         decision_latencies_ms = []
+        actor_hit_count = 0
+        fallback_count = 0
         info = {}
 
         def finish_episode(success, failure_reason_local, info_obj=None):
             did_update = False
-            if trajectories:
+            if update_model and trajectories:
                 self.agent.update(trajectories)
                 did_update = True
 
             if info_obj is None:
                 info_obj = {}
 
-            episode_delay_ms_local = float(
-                info_obj.get("accumulated_delay", state.get("accumulated_delay", 0.0))
-            )
-            sla_delay_local = float(
-                info_obj.get("sla_latency_target", request.get("max_latency_ms", 1e9))
-            )
-            sla_rel_local = float(
-                info_obj.get("sla_reliability_target", request.get("reliability_requirement", 0.0))
-            )
-            base_sla_rel_local = float(
-                info_obj.get("sla_reliability_target_base", request.get("reliability_requirement", 0.0))
-            )
-            final_rel_local = float(
-                info_obj.get("accumulated_reliability", state.get("accumulated_reliability", 0.0))
-            )
+            episode_delay_ms_local = float(info_obj.get("accumulated_dependency_delay", 0.0))
+            sla_delay_local = float(request.get("sla", {}).get("latency_requirement_ms", request.get("max_latency_ms", 1e9)))
+            final_rel_local = float(info_obj.get("min_dependency_reliability", 1.0))
+            sla_rel_local = float(request.get("sla", {}).get("reliability_requirement", request.get("reliability_requirement", 0.0)))
+            dep_done = int(info_obj.get("satisfied_dependencies", 0))
+            dep_total = max(1, int(info_obj.get("total_dependencies", len(request.get("core_nf_dependencies", [])) or 1)))
 
             return {
                 "episode_reward": episode_reward,
@@ -382,107 +416,177 @@ class SFCTrainer:
                 "episode_delay_ms": episode_delay_ms_local,
                 "decision_latency_ms_mean": float(np.mean(decision_latencies_ms)) if decision_latencies_ms else 0.0,
                 "decision_latency_ms_p95": float(np.percentile(decision_latencies_ms, 95)) if decision_latencies_ms else 0.0,
-                "sla_met": bool(success and episode_delay_ms_local <= sla_delay_local and final_rel_local >= sla_rel_local),
-                "full_sla_met": bool(success and episode_delay_ms_local <= sla_delay_local and final_rel_local >= base_sla_rel_local),
+                "sla_met": bool(success and episode_delay_ms_local <= sla_delay_local and final_rel_local >= sla_rel_local * 0.92),
+                "full_sla_met": bool(success and episode_delay_ms_local <= sla_delay_local and final_rel_local >= sla_rel_local),
                 "updated": did_update,
+                "quality_score": float(info_obj.get("quality_score", 0.0)),
+                "dependency_satisfaction_rate": 100.0 * dep_done / dep_total,
+                "resource_balance": float(info_obj.get("resource_balance", 0.0)),
+                "link_congestion": float(info_obj.get("link_congestion", 0.0)),
+                "business_balance": float(info_obj.get("business_balance", 0.0)),
+                "placement_resource": float(info_obj.get("placement_resource", 0.0)),
+                "placement_business": float(info_obj.get("placement_business", 0.0)),
+                "future_feasibility": float(info_obj.get("future_feasibility", 0.0)),
+                "used_link_congestion": float(info_obj.get("used_link_congestion", 0.0)),
+                "max_dependency_delay": float(info_obj.get("max_dependency_delay", 0.0)),
+                "actor_hit_rate": 100.0 * actor_hit_count / max(1, len(trajectories)),
+                "fallback_count": int(fallback_count),
             }
 
-        max_steps = max(12, len(request.get("vnf_sequence", request.get("core_nf_sequence", []))) + 2)
+        node_features, edge_index, nodes_list, node_index = self._get_graph_data(env.topology)
+        if update_model:
+            node_embeddings = self.gnn(node_features, edge_index)
+        else:
+            with torch.no_grad():
+                node_embeddings = self.gnn(node_features, edge_index)
+        max_steps = max(12, len(request.get("core_nfs", [])))
 
         for step in range(max_steps):
-            vnf = state.get("vnf")
-            prev_node = state.get("prev_node")
-            dest_node = state.get("dest_node")
-            remaining_delay = state.get("remaining_delay", float("inf"))
+            vnf = state.get("core_nf", state.get("vnf"))
+            if vnf is None:
+                break
 
             t0 = time.perf_counter()
             candidates = heuristic_pruner.prune(
                 env.topology,
                 vnf,
-                prev_node,
-                dest_node,
-                remaining_delay,
-                bandwidth_demand_gbps=float(state.get("bandwidth_demand_gbps", 0.0)),
-                current_vnf_idx=int(state.get("current_vnf_idx", 0)),
-                total_vnfs=int(state.get("total_vnfs", 1)),
-                accumulated_reliability=float(state.get("accumulated_reliability", 1.0)),
+                deployed_by_type=state.get("deployed_by_type", {}),
+                dependencies=state.get("dependencies", []),
+                remaining_delay=float(state.get("remaining_delay", float("inf"))),
+                current_nf_idx=int(state.get("current_nf_idx", 0)),
+                total_core_nfs=int(state.get("total_core_nfs", 12)),
+                accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
                 reliability_requirement=float(state.get("reliability_requirement", 0.0)),
                 accumulated_hops=int(state.get("accumulated_hops", 0)),
+                max_dependency_hops=int(state.get("max_dependency_hops", 24)),
             )
 
             if not candidates:
-                failure_reason = "no_candidates"
-                return finish_episode(False, failure_reason)
+                candidates = heuristic_pruner.prune(
+                    env.topology,
+                    vnf,
+                    deployed_by_type=state.get("deployed_by_type", {}),
+                    dependencies=state.get("dependencies", []),
+                    remaining_delay=float("inf"),
+                    top_m=max(heuristic_pruner.top_m, 128),
+                    current_nf_idx=int(state.get("current_nf_idx", 0)),
+                    total_core_nfs=int(state.get("total_core_nfs", 12)),
+                    accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
+                    reliability_requirement=float(state.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(state.get("accumulated_hops", 0)),
+                    max_dependency_hops=max(32, int(state.get("max_dependency_hops", 24))),
+                )
+                if not candidates:
+                    failure_reason = "no_candidates"
+                    return finish_episode(False, failure_reason)
 
-            node_features, edge_index, nodes_list, node_index = self._get_graph_data(env.topology)
             candidate_indices = [node_index[c] for c in candidates if c in node_index]
             if not candidate_indices:
                 failure_reason = "invalid_candidates"
                 return finish_episode(False, failure_reason)
 
-            node_embeddings = self.gnn(node_features, edge_index)
-
             vnf_feat = self._build_vnf_features(vnf).to(self.device)
             ctx_feat = self._build_context_features(state).to(self.device)
 
-            if random.random() < epsilon:
-                action_idx = random.randint(0, len(candidate_indices) - 1)
-            else:
-                action_idx, _ = self.agent.select_action(
+            if deterministic_policy:
+                actor_action_idx, _ = self.agent.select_action(
                     node_embeddings,
                     candidate_indices,
                     vnf_feat,
                     ctx_feat,
                     deterministic=True,
                 )
+            elif random.random() < epsilon:
+                actor_action_idx = random.randint(0, len(candidate_indices) - 1)
+            else:
+                actor_action_idx, _ = self.agent.select_action(
+                    node_embeddings,
+                    candidate_indices,
+                    vnf_feat,
+                    ctx_feat,
+                    deterministic=False,
+                )
 
-            action_idx = int(max(0, min(action_idx, len(candidate_indices) - 1)))
-            bw_req = max(
-                float(vnf.get("bandwidth_required_gbps", 0.0)),
-                float(state.get("bandwidth_demand_gbps", 0.0)),
-            )
-            probe_order = [action_idx] + [idx for idx in range(len(candidate_indices)) if idx != action_idx]
+            actor_action_idx = int(max(0, min(actor_action_idx, len(candidate_indices) - 1)))
+            if execution_mode == "teacher":
+                probe_order = list(range(len(candidate_indices)))
+            else:
+                probe_order = [actor_action_idx] + [idx for idx in range(len(candidate_indices)) if idx != actor_action_idx]
             max_probe = min(self.max_probe_candidates, len(probe_order))
+            if execution_mode == "teacher":
+                max_probe = min(max(self.teacher_probe_candidates, max_probe), len(probe_order))
             probe_candidates = []
             selected = None
-            path = []
-            delay = 0.0
-            acc_hops = int(state.get("accumulated_hops", 0))
-            target_hops = int(state.get("max_total_hops", 25))
-            remain_vnfs_after_step = max(
-                0,
-                int(state.get("total_vnfs", 1)) - int(state.get("current_vnf_idx", 0)) - 1,
-            )
+            selected_plan = None
             for probe_idx in probe_order[:max_probe]:
+                if probe_candidates and (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
+                    break
                 selected_node = nodes_list[candidate_indices[probe_idx]]
-                try:
-                    p, d, _, h = heuristic_pruner.find_path(
-                        env.topology,
-                        prev_node,
-                        selected_node,
-                        bw_req=bw_req,
-                        current_hops=int(state.get("accumulated_hops", 0)),
-                        current_vnf_idx=int(state.get("current_vnf_idx", 0)),
-                        total_vnfs=int(state.get("total_vnfs", 1)),
-                    )
-                except Exception:
-                    p = []
-                    d = 0.0
-                    h = 0
-                if p:
-                    path_hops = int(max(h, len(p) - 1))
-                    projected_hops = acc_hops + path_hops + 1 + remain_vnfs_after_step * 2
-                    hop_over_penalty = max(0, projected_hops - target_hops)
-                    probe_score = float(d) + 2.2 * float(path_hops) + 6.0 * float(hop_over_penalty)
-                    probe_candidates.append((probe_score, probe_idx, selected_node, p, float(d)))
+                plan = env.plan_candidate(selected_node)
+                if plan:
+                    probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
+                    if execution_mode == "actor":
+                        break
+            if not probe_candidates:
+                extra_fallback = 12 if execution_mode == "actor" else 16
+                fallback_limit = min(max_probe + extra_fallback, len(probe_order))
+                for probe_idx in probe_order[max_probe:fallback_limit]:
+                    if (time.perf_counter() - t0) * 1000.0 >= self.max_decision_ms:
+                        break
+                    selected_node = nodes_list[candidate_indices[probe_idx]]
+                    plan = env.plan_candidate(selected_node)
+                    if plan:
+                        probe_candidates.append((float(plan.get("score", 0.0)), probe_idx, selected_node, plan))
+                        break
+            if not probe_candidates and execution_mode == "teacher":
+                rescue_candidates = heuristic_pruner.prune(
+                    env.topology,
+                    vnf,
+                    deployed_by_type=state.get("deployed_by_type", {}),
+                    dependencies=state.get("dependencies", []),
+                    remaining_delay=float(state.get("remaining_delay", float("inf"))),
+                    top_m=max(heuristic_pruner.top_m, 128),
+                    current_nf_idx=int(state.get("current_nf_idx", 0)),
+                    total_core_nfs=int(state.get("total_core_nfs", 12)),
+                    accumulated_delay=float(state.get("accumulated_dependency_delay", 0.0)),
+                    reliability_requirement=float(state.get("reliability_requirement", 0.0)),
+                    accumulated_hops=int(state.get("accumulated_hops", 0)),
+                    max_dependency_hops=max(32, int(state.get("max_dependency_hops", 24))),
+                )
+                rescue_seen = set()
+                for node_id in rescue_candidates[: self.teacher_rescue_candidates]:
+                    if node_id in rescue_seen or node_id not in node_index:
+                        continue
+                    rescue_seen.add(node_id)
+                    plan = env.plan_candidate(node_id)
+                    if plan:
+                        node_idx = node_index[node_id]
+                        if node_idx in candidate_indices:
+                            candidate_pos = candidate_indices.index(node_idx)
+                        else:
+                            candidate_pos = len(candidate_indices)
+                            candidate_indices.append(node_idx)
+                        probe_candidates.append(
+                            (
+                                float(plan.get("score", 0.0)),
+                                candidate_pos,
+                                node_id,
+                                plan,
+                            )
+                        )
             if probe_candidates:
-                probe_candidates.sort(key=lambda x: x[0])
-                _score, action_idx, selected, path, delay = probe_candidates[0]
-            if not path or selected is None:
-                failure_reason = "path_error"
+                if execution_mode == "teacher":
+                    probe_candidates.sort(key=lambda x: x[0])
+                _score, action_idx, selected, selected_plan = probe_candidates[0]
+                if action_idx == actor_action_idx:
+                    actor_hit_count += 1
+                else:
+                    fallback_count += 1
+            if selected is None or selected_plan is None:
+                failure_reason = "candidate_infeasible"
                 return finish_episode(False, failure_reason)
 
-            next_state, reward, done, info = env.step(selected, path, delay)
+            next_state, reward, done, info = env.step(selected, selected_plan)
             episode_reward += float(reward)
 
             step_elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -496,30 +600,16 @@ class SFCTrainer:
                 "action": action_idx,
                 "reward": float(reward),
                 "done": done,
+                "actor_action": actor_action_idx,
             }
 
-            if not done and next_state is not None and next_state.get("vnf") is not None:
-                # 速度优化：复用当前步图嵌入作为bootstrap近似，避免每步二次GNN前向。
-                traj["next_node_embeddings"] = node_embeddings.detach()
-                traj["next_vnf_features"] = self._build_vnf_features(next_state["vnf"]).to(self.device)
+            if update_model and not done and next_state is not None and next_state.get("core_nf") is not None:
+                # The current agent uses Monte-Carlo returns and detaches the
+                # next-state branch, so re-running expensive pruning for
+                # next_candidate_indices does not affect gradients.  Avoiding
+                # that second prune saves a large amount of shortest-path work.
+                traj["next_vnf_features"] = self._build_vnf_features(next_state["core_nf"]).to(self.device)
                 traj["next_context_features"] = self._build_context_features(next_state).to(self.device)
-                _, _, _, next_node_index = self._get_graph_data(env.topology)
-                next_candidates = heuristic_pruner.prune(
-                    env.topology,
-                    next_state["vnf"],
-                    next_state.get("prev_node"),
-                    next_state.get("dest_node"),
-                    next_state.get("remaining_delay", float("inf")),
-                    bandwidth_demand_gbps=float(next_state.get("bandwidth_demand_gbps", 0.0)),
-                    current_vnf_idx=int(next_state.get("current_vnf_idx", 0)),
-                    total_vnfs=int(next_state.get("total_vnfs", 1)),
-                    accumulated_reliability=float(next_state.get("accumulated_reliability", 1.0)),
-                    reliability_requirement=float(next_state.get("reliability_requirement", 0.0)),
-                    accumulated_hops=int(next_state.get("accumulated_hops", 0)),
-                )
-                traj["next_candidate_indices"] = [
-                    next_node_index[c] for c in next_candidates if c in next_node_index
-                ]
 
             trajectories.append(traj)
 
@@ -544,6 +634,7 @@ class SFCTrainer:
         max_requests_per_file=100,
         total_epochs=1,
         reliability_curriculum=None,
+        continuous_group_len=3,
     ):
         from training.environment.sfc_env import SFCEnvironment
 
@@ -560,9 +651,21 @@ class SFCTrainer:
         episode_delays = []
         decision_lat_means = []
         decision_lat_p95s = []
+        quality_scores = []
+        dependency_rates = []
+        resource_balance_scores = []
+        link_congestion_scores = []
+        business_balance_scores = []
+        placement_resource_scores = []
+        placement_business_scores = []
+        future_feasibility_scores = []
+        used_link_congestion_scores = []
+        actor_hit_rates = []
+        fallback_counts = []
         reliability_scale, strict_reliability_prob = self._resolve_reliability_curriculum(
             epoch, total_epochs, reliability_curriculum
         )
+        continuous_group_len = int(max(1, continuous_group_len))
 
         pbar = tqdm(train_data, desc=f"Epoch {epoch}")
         for topo_idx, (topo_file, req_file) in enumerate(pbar):
@@ -573,7 +676,8 @@ class SFCTrainer:
             with open(req_file) as f:
                 req_data = json.load(f)
 
-            use_shared = random.random() < shared_resources_prob
+            shared_gate = ((epoch * 997 + topo_idx * 37) % 1000) / 1000.0
+            use_shared = shared_gate < shared_resources_prob
             env = SFCEnvironment(graph, self.device, shared_resources=use_shared)
 
             requests = req_data.get("requests", [])[:max_requests_per_file]
@@ -581,7 +685,8 @@ class SFCTrainer:
                 total_requests += 1
                 request_for_train = dict(request)
                 request_for_train["reliability_scale"] = reliability_scale
-                request_for_train["strict_reliability"] = random.random() < strict_reliability_prob
+                strict_gate = ((epoch * 991 + topo_idx * 53 + req_idx * 17) % 1000) / 1000.0
+                request_for_train["strict_reliability"] = strict_gate < strict_reliability_prob
 
                 episode_result = self._train_episode(
                     env,
@@ -589,13 +694,25 @@ class SFCTrainer:
                     request_for_train,
                     epsilon,
                     heuristic_pruner,
-                    reset_resources=(not use_shared),
+                    reset_resources=(not use_shared) or (req_idx % continuous_group_len == 0),
+                    execution_mode="teacher",
                 )
 
                 rewards.append(episode_result["episode_reward"])
                 episode_delays.append(episode_result["episode_delay_ms"])
                 decision_lat_means.append(episode_result["decision_latency_ms_mean"])
                 decision_lat_p95s.append(episode_result["decision_latency_ms_p95"])
+                quality_scores.append(float(episode_result.get("quality_score", 0.0)))
+                dependency_rates.append(float(episode_result.get("dependency_satisfaction_rate", 0.0)))
+                resource_balance_scores.append(float(episode_result.get("resource_balance", 0.0)))
+                link_congestion_scores.append(float(episode_result.get("link_congestion", 0.0)))
+                business_balance_scores.append(float(episode_result.get("business_balance", 0.0)))
+                placement_resource_scores.append(float(episode_result.get("placement_resource", 0.0)))
+                placement_business_scores.append(float(episode_result.get("placement_business", 0.0)))
+                future_feasibility_scores.append(float(episode_result.get("future_feasibility", 0.0)))
+                used_link_congestion_scores.append(float(episode_result.get("used_link_congestion", 0.0)))
+                actor_hit_rates.append(float(episode_result.get("actor_hit_rate", 0.0)))
+                fallback_counts.append(int(episode_result.get("fallback_count", 0)))
 
                 if episode_result["success"]:
                     success_count += 1
@@ -630,19 +747,41 @@ class SFCTrainer:
         avg_ep_delay = float(np.mean(episode_delays)) if episode_delays else 0.0
         avg_alg_delay = float(np.mean(decision_lat_means)) if decision_lat_means else 0.0
         p95_alg_delay = float(np.percentile(decision_lat_p95s, 95)) if decision_lat_p95s else 0.0
+        avg_quality = float(np.mean(quality_scores)) if quality_scores else 0.0
+        avg_dependency_rate = float(np.mean(dependency_rates)) if dependency_rates else 0.0
+        avg_resource_balance = float(np.mean(resource_balance_scores)) if resource_balance_scores else 0.0
+        avg_link_congestion = float(np.mean(link_congestion_scores)) if link_congestion_scores else 0.0
+        avg_business_balance = float(np.mean(business_balance_scores)) if business_balance_scores else 0.0
+        avg_placement_resource = float(np.mean(placement_resource_scores)) if placement_resource_scores else 0.0
+        avg_placement_business = float(np.mean(placement_business_scores)) if placement_business_scores else 0.0
+        avg_future_feasibility = float(np.mean(future_feasibility_scores)) if future_feasibility_scores else 0.0
+        avg_used_link_congestion = float(np.mean(used_link_congestion_scores)) if used_link_congestion_scores else 0.0
 
         metrics = {
             "epoch": epoch,
             "avg_reward": avg_reward,
+            "avg_quality_score": avg_quality,
             "success_rate": success_rate,
+            "complete_core_deployment_rate": success_rate,
             "sla_satisfaction_rate": sla_rate,
             "full_sla_satisfaction_rate": full_sla_rate,
+            "dependency_satisfaction_rate": avg_dependency_rate,
+            "resource_balance_score": avg_resource_balance,
+            "link_congestion_score": avg_link_congestion,
+            "business_balance_score": avg_business_balance,
+            "placement_resource_score": avg_placement_resource,
+            "placement_business_score": avg_placement_business,
+            "future_feasibility_score": avg_future_feasibility,
+            "used_link_congestion_score": avg_used_link_congestion,
+            "random_baseline_win_rate": 0.0,
             "avg_episode_delay_ms": avg_ep_delay,
             "avg_algorithm_latency_ms": avg_alg_delay,
             "p95_algorithm_latency_ms": p95_alg_delay,
             "resource_fail_count": resource_fail_count,
             "total_requests": total_requests,
             "updated_episodes": updated_episodes,
+            "actor_hit_rate": float(np.mean(actor_hit_rates)) if actor_hit_rates else 0.0,
+            "fallback_count": int(sum(fallback_counts)),
             "epoch_time_s": epoch_time,
             "epsilon": float(epsilon),
             "reliability_scale": reliability_scale,
@@ -664,3 +803,109 @@ class SFCTrainer:
             metrics["top_failure_reasons"],
         )
         return metrics
+
+    def evaluate_epoch(
+        self,
+        epoch,
+        eval_data,
+        heuristic_pruner,
+        max_requests_per_file=4,
+        shared_resources=False,
+        continuous_group_len=4,
+    ):
+        from training.environment.sfc_env import SFCEnvironment
+
+        total_requests = 0
+        success_count = 0
+        rewards = []
+        quality_scores = []
+        episode_delays = []
+        decision_lat_means = []
+        decision_lat_p95s = []
+        dependency_rates = []
+        resource_balance_scores = []
+        link_congestion_scores = []
+        business_balance_scores = []
+        placement_resource_scores = []
+        placement_business_scores = []
+        future_feasibility_scores = []
+        used_link_congestion_scores = []
+        actor_hit_rates = []
+        fallback_counts = []
+        failure_reason_counts = {}
+        continuous_group_len = int(max(1, continuous_group_len))
+
+        was_training = self.gnn.training
+        self.gnn.eval()
+        self.agent.actor.eval()
+        self.agent.critic.eval()
+
+        for topo_file, req_file in eval_data:
+            with open(topo_file) as f:
+                topo_data = json.load(f)
+            graph = self._build_graph_from_json(topo_data)
+            with open(req_file) as f:
+                req_data = json.load(f)
+            env = SFCEnvironment(graph, self.device, shared_resources=shared_resources)
+            for req_idx, request in enumerate(req_data.get("requests", [])[:max_requests_per_file]):
+                total_requests += 1
+                result = self._train_episode(
+                    env,
+                    graph,
+                    request,
+                    epsilon=0.0,
+                    heuristic_pruner=heuristic_pruner,
+                    reset_resources=(not shared_resources) or (req_idx % continuous_group_len == 0),
+                    update_model=False,
+                    deterministic_policy=True,
+                    execution_mode="actor",
+                )
+                rewards.append(result["episode_reward"])
+                quality_scores.append(float(result.get("quality_score", 0.0)))
+                episode_delays.append(result["episode_delay_ms"])
+                decision_lat_means.append(result["decision_latency_ms_mean"])
+                decision_lat_p95s.append(result["decision_latency_ms_p95"])
+                dependency_rates.append(float(result.get("dependency_satisfaction_rate", 0.0)))
+                resource_balance_scores.append(float(result.get("resource_balance", 0.0)))
+                link_congestion_scores.append(float(result.get("link_congestion", 0.0)))
+                business_balance_scores.append(float(result.get("business_balance", 0.0)))
+                placement_resource_scores.append(float(result.get("placement_resource", 0.0)))
+                placement_business_scores.append(float(result.get("placement_business", 0.0)))
+                future_feasibility_scores.append(float(result.get("future_feasibility", 0.0)))
+                used_link_congestion_scores.append(float(result.get("used_link_congestion", 0.0)))
+                actor_hit_rates.append(float(result.get("actor_hit_rate", 0.0)))
+                fallback_counts.append(int(result.get("fallback_count", 0)))
+                if result["success"]:
+                    success_count += 1
+                failure_reason = str(result.get("failure_reason", ""))
+                if not result["success"] and failure_reason and failure_reason.lower() != "none":
+                    failure_reason_counts[failure_reason] = failure_reason_counts.get(failure_reason, 0) + 1
+
+        if was_training:
+            self.gnn.train()
+            self.agent.actor.train()
+            self.agent.critic.train()
+
+        return {
+            "eval_epoch": epoch,
+            "eval_avg_reward": float(np.mean(rewards)) if rewards else 0.0,
+            "eval_avg_quality_score": float(np.mean(quality_scores)) if quality_scores else 0.0,
+            "eval_success_rate": 100.0 * success_count / max(1, total_requests),
+            "eval_dependency_satisfaction_rate": float(np.mean(dependency_rates)) if dependency_rates else 0.0,
+            "eval_resource_balance_score": float(np.mean(resource_balance_scores)) if resource_balance_scores else 0.0,
+            "eval_link_congestion_score": float(np.mean(link_congestion_scores)) if link_congestion_scores else 0.0,
+            "eval_business_balance_score": float(np.mean(business_balance_scores)) if business_balance_scores else 0.0,
+            "eval_placement_resource_score": float(np.mean(placement_resource_scores)) if placement_resource_scores else 0.0,
+            "eval_placement_business_score": float(np.mean(placement_business_scores)) if placement_business_scores else 0.0,
+            "eval_future_feasibility_score": float(np.mean(future_feasibility_scores)) if future_feasibility_scores else 0.0,
+            "eval_used_link_congestion_score": float(np.mean(used_link_congestion_scores)) if used_link_congestion_scores else 0.0,
+            "eval_avg_episode_delay_ms": float(np.mean(episode_delays)) if episode_delays else 0.0,
+            "eval_avg_algorithm_latency_ms": float(np.mean(decision_lat_means)) if decision_lat_means else 0.0,
+            "eval_p95_algorithm_latency_ms": float(np.percentile(decision_lat_p95s, 95)) if decision_lat_p95s else 0.0,
+            "eval_total_requests": total_requests,
+            "eval_actor_hit_rate": float(np.mean(actor_hit_rates)) if actor_hit_rates else 0.0,
+            "eval_fallback_count": int(sum(fallback_counts)),
+            "eval_top_failure_reasons": sorted(
+                failure_reason_counts.items(), key=lambda kv: kv[1], reverse=True
+            )[:5],
+        }

@@ -27,10 +27,10 @@ public:
     );
     
 private:
-    static constexpr int64_t kDefaultNodeFeatureDim = 14;
+    static constexpr int64_t kDefaultNodeFeatureDim = 18;
     static constexpr int64_t kDefaultEmbeddingDim = 192;
-    static constexpr int64_t kDefaultVnfFeatureDim = 8;
-    static constexpr int64_t kDefaultContextFeatureDim = 48;
+    static constexpr int64_t kDefaultVnfFeatureDim = 24;
+    static constexpr int64_t kDefaultContextFeatureDim = 32;
 
     std::vector<float> align_flat_features(
         const std::vector<float>& features,

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { apiClient } from '@/api/client'
 import { useStore, type Deployment } from '@/store/useStore'
+import { clearSfcIdentityRegistry } from '@/utils/sfcLabel'
 
 function toNumber(v: any, fallback = 0) {
   const n = Number(v)
@@ -19,6 +20,8 @@ function normalizeDeployment(raw: any): Deployment {
   return {
     deployment_id: deploymentId,
     backend_deployment_id: backendId,
+    core_network_id: raw?.core_network_id ? String(raw.core_network_id) : undefined,
+    core_network_label: raw?.core_network_label ? String(raw.core_network_label) : undefined,
     request_id: String(raw?.request_id ?? ''),
     sfc_name: String(raw?.sfc_name ?? raw?.request_id ?? deploymentId),
     candidate_index: toNumber(raw?.candidate_index ?? 0, 0),
@@ -38,7 +41,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_breakdown?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_breakdown?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_breakdown?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_breakdown?.dispersion ?? 0, 0),
         }
       : undefined,
     score_weights: raw?.score_weights && typeof raw.score_weights === 'object'
@@ -47,7 +49,6 @@ function normalizeDeployment(raw: any): Deployment {
           resource: toNumber(raw?.score_weights?.resource ?? 0, 0),
           reliability: toNumber(raw?.score_weights?.reliability ?? 0, 0),
           bandwidth: toNumber(raw?.score_weights?.bandwidth ?? 0, 0),
-          dispersion: toNumber(raw?.score_weights?.dispersion ?? 0, 0),
         }
       : undefined,
     score_constraints: raw?.score_constraints && typeof raw.score_constraints === 'object'
@@ -119,6 +120,7 @@ export function useBootstrapRuntime() {
       }
 
       if (deploymentsRes.status === 'fulfilled' && Array.isArray(deploymentsRes.value)) {
+        if (deploymentsRes.value.length === 0) clearSfcIdentityRegistry()
         const deployments = deploymentsRes.value.map(normalizeDeployment)
         setDeployments(deployments)
       }
@@ -138,8 +140,8 @@ export function useBootstrapRuntime() {
       if (configRes.status === 'fulfilled') {
         const cfg = configRes.value ?? {}
         setAutoDynamics({
-          resource_update_sec: Math.max(10, Math.min(30, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
-          time_scale: Math.max(0.1, Math.min(20, toNumber(cfg?.simulation_speed ?? 1, 1))),
+          resource_update_sec: Math.max(10, Math.min(120, toNumber(cfg?.resource_sampling_interval_sec ?? 15, 15))),
+          time_scale: Math.max(0.1, Math.min(8, toNumber(cfg?.simulation_speed ?? 1, 1))),
         })
       }
     })()

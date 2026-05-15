@@ -109,8 +109,8 @@ class APIClient {
     link_id?: string
     link_ids?: string[]
     fault_type?: string
-    ttl_ticks?: number
-    delta_ttl_ticks?: number
+    duration_sec?: number
+    duration_seconds?: number
     delta_seconds?: number
     batch_count?: number
     only_active?: boolean
@@ -145,7 +145,12 @@ class APIClient {
     request_id: string; 
     candidate_index: number;
     candidate: any; // 完整的候选方案
+    core_nf_dependencies?: any[];
     custom_nf_bindings?: string[][];
+    independent_core_nfs?: string[];
+    custom_nf_independent?: string[];
+    core_network_id?: string;
+    core_network_label?: string;
     sfc_name?: string;
     source_node?: string;
     destination_node?: string;
@@ -164,6 +169,21 @@ class APIClient {
   }
   
   async getDeployments() { return (await http.get('/deployments')).data }
+  async getUERANSIMDeployments() {
+    return (await http.get('/ueransim/deployments')).data as { items: any[] }
+  }
+  async startUERANSIMVerification(p: { deployment_id: string; mode?: 'smoke' | 'reschedule'; flow?: 'smoke' | 'reschedule' }) {
+    return (await http.post('/ueransim/verification/start', p, { timeout: 30000 })).data as { job: any }
+  }
+  async getUERANSIMVerification(jobId: string) {
+    return (await http.get(`/ueransim/verification/${encodeURIComponent(jobId)}`, { timeout: 30000 })).data as { job: any }
+  }
+  async sendUERANSIMMessage(jobId: string, p: { from: 'ue1' | 'ue2'; to: 'ue1' | 'ue2'; message: string }) {
+    return (await http.post(`/ueransim/verification/${encodeURIComponent(jobId)}/messages`, p, { timeout: 30000 })).data as { job: any; transport: string }
+  }
+  async stopUERANSIMVerification(jobId: string) {
+    return (await http.post(`/ueransim/verification/${encodeURIComponent(jobId)}/stop`, {}, { timeout: 30000 })).data as { job: any }
+  }
   async healthCheck() { return (await http.get('/health')).data }
 }
 

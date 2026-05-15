@@ -22,6 +22,8 @@ public:
         int ttl_ticks = 0;
         std::string fault_type;
         std::string injection_mode; // random/manual
+        double duration_sec = 0.0;
+        std::chrono::steady_clock::time_point expires_at;
     };
 
     DynamicSimulationService(
@@ -42,6 +44,7 @@ public:
     bool is_running() const;
 
     TopologySnapshot step_once();
+    TopologySnapshot refresh_current_snapshot(bool emit_events = false);
     TopologySnapshot get_latest_snapshot() const;
 
     nlohmann::json status_json() const;
@@ -61,13 +64,12 @@ private:
     std::string current_sim_time_iso_locked() const;
 
     static std::string iso_time_from_system_clock(const std::chrono::system_clock::time_point& tp);
-    static void update_satellite_position(
-        Satellite& sat,
-        double inclination_deg,
-        double dt_sec
-    );
+    static void update_satellite_position(Satellite& sat, double elapsed_sec);
     static double link_distance_km(const Coordinates& a, const Coordinates& b);
     static double max_isl_range_km(double altitude_km);
+    static double practical_isl_range_km(double r1_km, double r2_km, const std::string& link_type);
+    static bool has_line_of_sight(const Coordinates& a, const Coordinates& b);
+    static double coord_norm_km(const Coordinates& c);
     static double clamp(double v, double lo, double hi);
     static const std::vector<std::string>& node_fault_catalog();
     static const std::vector<std::string>& link_fault_catalog();

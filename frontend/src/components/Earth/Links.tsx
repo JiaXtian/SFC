@@ -24,8 +24,39 @@ function isNodeFault(sat: any): boolean {
   return status === 'down' || status === 'fault' || status === 'failed' || faultTag.length > 0
 }
 
+function isRenderableLinkFault(tag: any): boolean {
+  const faultTag = String(tag ?? '').trim()
+  return faultTag.length > 0 &&
+    faultTag !== 'endpoint_node_fault' &&
+    faultTag !== 'line_of_sight_loss' &&
+    faultTag !== 'topology_inconsistent'
+}
+
 function toXYZ(x: number, y: number, z: number): [number, number, number] {
   return [x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U]
+}
+
+function bulgedLinkPoints(
+  a: [number, number, number],
+  b: [number, number, number],
+): [number, number, number][] {
+  const va = new THREE.Vector3(a[0], a[1], a[2])
+  const vb = new THREE.Vector3(b[0], b[1], b[2])
+  const delta = new THREE.Vector3().subVectors(vb, va)
+  const length = delta.length()
+  if (length < 1e-6) return [a, b]
+
+  const start = va.clone().addScaledVector(delta, 0.055)
+  const end = vb.clone().addScaledVector(delta, -0.055)
+  const mid = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5)
+  const outward = mid.clone().normalize()
+  const bulge = Math.max(0.018, Math.min(0.11, length * 0.028))
+  mid.addScaledVector(outward, bulge)
+  return [
+    [start.x, start.y, start.z],
+    [mid.x, mid.y, mid.z],
+    [end.x, end.y, end.z],
+  ]
 }
 
 function createGeometry(segments: Array<{ a: [number, number, number]; b: [number, number, number] }>) {
@@ -111,10 +142,8 @@ export default function Links() {
       const key = `${link.source}|${link.target}`
       const isSelected = selectedKey.has(key)
       const status = String(link?.status ?? 'active')
-      const faultTag = String(link?.fault_tag ?? '').trim()
-      const hasFaultTag = faultTag.length > 0
-      const showAsFaultLink = hasFaultTag && faultTag !== 'endpoint_node_fault'
-      if (status === 'down' && !hasFaultTag) continue
+      const showAsFaultLink = isRenderableLinkFault(link?.fault_tag)
+      if (status === 'down' && !showAsFaultLink) continue
       if (!display.showLinks && !isSelected) continue
 
       if (isSelected) selected.push(link)
@@ -123,8 +152,19 @@ export default function Links() {
       else normalInter.push(link)
     }
 
-    return { normalIntra, normalInter, fault, selected }
-  }, [links, satMap, display.showLinks, selectedKey])
+    const sample = (items: RenderLink[]) => {
+      if (satellites.length < 5000 || items.length <= 9000) return items
+      const stride = Math.max(1, Math.ceil(items.length / 9000))
+      return items.filter((_, idx) => idx % stride === 0)
+    }
+
+    return {
+      normalIntra: sample(normalIntra),
+      normalInter: sample(normalInter),
+      fault,
+      selected,
+    }
+  }, [links, satMap, display.showLinks, selectedKey, satellites.length])
 
   const meshes = useMemo(() => {
     const make = (items: RenderLink[]) => {
@@ -191,15 +231,15 @@ export default function Links() {
         if (!a || !b) return
         out.push({
           key: `hl-cur-${dep.deployment_id}-${l.src}-${l.dst}-${i}`,
-          points: [
+          points: bulgedLinkPoints(
             toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z),
             toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
-          ],
+          ),
           link: l,
-          color: '#ffffff',
-          glowColor: '#e2f1ff',
-          lineWidth: 3.6,
-          opacity: 0.95,
+          color: '#22d3ee',
+          glowColor: '#fbbf24',
+          lineWidth: 1.85,
+          opacity: 0.9,
           isGhost: false,
         })
       })
@@ -271,6 +311,7 @@ export default function Links() {
     const pt = new THREE.Vector3()
     const endpoint = new THREE.Vector3()
     let best: RenderLink | null = null
+    let bestEndpointSat: any = null
     let bestD = Number.POSITIVE_INFINITY
     let bestEndpointD = Number.POSITIVE_INFINITY
     const cam = ray.origin
@@ -292,11 +333,17 @@ export default function Links() {
         endpoint.set(pb[0], pb[1], pb[2])
         const dB = ray.distanceSqToPoint(endpoint)
         bestEndpointD = Math.min(dA, dB)
+        bestEndpointSat = dA <= dB ? s : t
       }
     }
     // Prioritize node picking when user clicks near a satellite endpoint.
-    const endpointThreshold = satellites.length >= 5000 ? 0.028 : 0.036
-    if (Number.isFinite(bestEndpointD) && Math.sqrt(bestEndpointD) <= endpointThreshold) return
+    const endpointThreshold = satellites.length >= 5000 ? 0.04 : 0.052
+    if (bestEndpointSat && Number.isFinite(bestEndpointD) && Math.sqrt(bestEndpointD) <= endpointThreshold) {
+      e.stopPropagation()
+      setSelectedSatellite(bestEndpointSat)
+      setSelectedLink(null)
+      return
+    }
     // Keep threshold tight to prioritize satellite picking when near nodes.
     const clickThreshold = satellites.length >= 5000 ? 0.028 : 0.024
     if (!Number.isFinite(bestD) || Math.sqrt(bestD) > clickThreshold) return
@@ -364,34 +411,33 @@ export default function Links() {
         </group>
       ))}
 
-      {/* Deployed SFC links: static white thick glow */}
+      {/* Deployed core-network dependency links */}
       {highlightedLines.map(item => (
         <group key={item.key}>
           <Line
             points={item.points}
             color={item.color}
-            lineWidth={heavyHighlightMode ? Math.max(2.1, item.lineWidth - 1.1) : item.lineWidth}
+            lineWidth={heavyHighlightMode ? 0.95 : 1.25}
             transparent
-            opacity={heavyHighlightMode ? Math.max(0.7, item.opacity * 0.88) : item.opacity}
+            opacity={heavyHighlightMode ? Math.max(0.62, item.opacity * 0.78) : item.opacity}
+            depthWrite={false}
             raycast={() => null}
           />
-          {!heavyHighlightMode && (
-            <Line
-              points={item.points}
-              color={item.glowColor}
-              lineWidth={item.isGhost ? 6.2 : 8.5}
-              transparent
-              opacity={item.isGhost ? Math.max(0.08, item.opacity * 0.55) : 0.24}
-              raycast={() => null}
-            />
-          )}
+          <Line
+            points={item.points}
+            color={item.glowColor}
+            lineWidth={heavyHighlightMode ? 1.7 : 2.6}
+            transparent
+            opacity={heavyHighlightMode ? 0.1 : 0.13}
+            depthWrite={false}
+            raycast={() => null}
+          />
         </group>
       ))}
 
       {selectedLines.map(item => {
         const linkType = String((item.link as any)?.link_type ?? 'inter_orbit')
-        const faultTag = String((item.link as any)?.fault_tag ?? '').trim()
-        const hasFaultTag = faultTag.length > 0 && faultTag !== 'endpoint_node_fault'
+        const hasFaultTag = isRenderableLinkFault((item.link as any)?.fault_tag)
         const selectedCore = hasFaultTag
           ? '#fde047'
           : (linkType === 'intra_orbit' ? '#6ee7b7' : '#c4b5fd')
@@ -403,7 +449,7 @@ export default function Links() {
           <Line
             points={item.points}
             color={selectedCore}
-            lineWidth={4.5}
+            lineWidth={2.8}
             transparent
             opacity={1}
             raycast={() => null}
@@ -411,9 +457,9 @@ export default function Links() {
           <Line
             points={item.points}
             color={selectedGlow}
-            lineWidth={10.5}
+            lineWidth={5.8}
             transparent
-            opacity={0.3}
+            opacity={0.22}
             raycast={() => null}
           />
         </group>

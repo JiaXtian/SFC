@@ -1,4 +1,4 @@
-"""ONNX模型导出（扩展输入维度）"""
+"""ONNX模型导出（open5gs核心网部署输入维度）"""
 import argparse
 import os
 import sys
@@ -12,6 +12,12 @@ TRAIN_ROOT = PROJECT_ROOT / "train"
 
 from training.models.drl_agent import DRLAgent
 from training.models.gnn_encoder import GNNEncoder
+from training.open5gs_profile import (
+    CONTEXT_FEATURE_DIM,
+    CORE_NF_FEATURE_DIM,
+    GNN_EMBEDDING_DIM,
+    NODE_FEATURE_DIM,
+)
 
 
 def _resolve_checkpoint(*candidates):
@@ -32,7 +38,7 @@ def _resolve_checkpoint(*candidates):
     return candidates[0] if candidates else None
 
 
-def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", context_dim=48):
+def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", context_dim=CONTEXT_FEATURE_DIM):
     output_dir_path = Path(output_dir)
     if not output_dir_path.is_absolute():
         output_dir_path = PROJECT_ROOT / output_dir_path
@@ -62,11 +68,11 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
         sys.exit(1)
 
     print("\n[1/2] 导出GNN编码器...")
-    gnn = GNNEncoder(input_dim=14, hidden_dim=192, num_layers=4)
+    gnn = GNNEncoder(input_dim=NODE_FEATURE_DIM, hidden_dim=GNN_EMBEDDING_DIM, num_layers=4)
     gnn.load_state_dict(torch.load(gnn_path, map_location="cpu"))
     gnn.eval()
 
-    dummy_x = torch.randn(120, 14)
+    dummy_x = torch.randn(120, NODE_FEATURE_DIM)
     dummy_edge = torch.randint(0, 120, (2, 320), dtype=torch.long)
 
     torch.onnx.export(
@@ -87,13 +93,18 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print(f"  ✓ GNN导出完成: {os.path.join(output_dir, 'gnn_encoder.onnx')}")
 
     print("\n[2/2] 导出Actor网络...")
-    agent = DRLAgent(node_dim=192, vnf_dim=8, context_dim=context_dim, device="cpu")
+    agent = DRLAgent(
+        node_dim=GNN_EMBEDDING_DIM,
+        vnf_dim=CORE_NF_FEATURE_DIM,
+        context_dim=context_dim,
+        device="cpu",
+    )
     agent.load(agent_path, load_optimizer=False)
     agent.actor.eval()
 
-    dummy_emb = torch.randn(120, 192)
+    dummy_emb = torch.randn(120, GNN_EMBEDDING_DIM)
     dummy_cand = torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.long)
-    dummy_vnf = torch.randn(8)
+    dummy_vnf = torch.randn(CORE_NF_FEATURE_DIM)
     dummy_ctx = torch.randn(context_dim)
 
     torch.onnx.export(
@@ -117,19 +128,19 @@ def export_models(gnn_path=None, agent_path=None, output_dir="models/exported", 
     print("\n" + "=" * 60)
     print("   ONNX导出完成")
     print("=" * 60)
-    print("节点输入维度: 14")
-    print("核心网网元输入维度: 8")
+    print(f"节点输入维度: {NODE_FEATURE_DIM}")
+    print(f"核心网网元输入维度: {CORE_NF_FEATURE_DIM}")
     print(f"上下文输入维度: {context_dim}")
-    if int(context_dim) != 48:
-        print("⚠ 警告: 当前后端默认按 context=48 构造输入，导出维度不为48可能导致在线推理不匹配。")
+    if int(context_dim) != CONTEXT_FEATURE_DIM:
+        print(f"警告: 当前C++测试默认按 context={CONTEXT_FEATURE_DIM} 构造输入。")
 
     with open(os.path.join(output_dir, "model_io_meta.json"), "w") as f:
         f.write(
             "{\n"
-            '  "node_feature_dim": 14,\n'
-            '  "vnf_feature_dim": 8,\n'
+            f'  "node_feature_dim": {NODE_FEATURE_DIM},\n'
+            f'  "vnf_feature_dim": {CORE_NF_FEATURE_DIM},\n'
             f'  "context_feature_dim": {int(context_dim)},\n'
-            '  "gnn_output_dim": 192\n'
+            f'  "gnn_output_dim": {GNN_EMBEDDING_DIM}\n'
             "}\n"
         )
 
@@ -140,7 +151,7 @@ def export():
     parser.add_argument("--gnn-checkpoint", default=None)
     parser.add_argument("--actor-checkpoint", default=None)
     parser.add_argument("--output-dir", default="models/exported")
-    parser.add_argument("--context-dim", type=int, default=48)
+    parser.add_argument("--context-dim", type=int, default=CONTEXT_FEATURE_DIM)
     args = parser.parse_args()
 
     export_models(

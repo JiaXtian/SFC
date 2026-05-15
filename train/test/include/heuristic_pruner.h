@@ -20,8 +20,8 @@ public:
     std::vector<std::string> get_candidate_nodes(
         const NetworkGraph& graph,
         const VNFRequirement& vnf,
-        const std::string& prev_node,
-        const std::string& dest_node,
+        const std::unordered_map<std::string, std::string>& deployed_by_type,
+        const std::vector<CoreDependency>& dependencies,
         float remaining_delay
     );
     
@@ -36,8 +36,9 @@ private:
     float compute_score(
         const Node& node,
         const VNFRequirement& vnf,
-        float dist_from_prev,
-        float dist_to_dest
+        float dependency_delay,
+        float dependency_hops,
+        float dependency_count
     ) const;
 };
 

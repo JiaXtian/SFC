@@ -12,15 +12,6 @@ function satToVec3(x: number, y: number, z: number): THREE.Vector3 {
   return new THREE.Vector3(x * KM_TO_U, z * KM_TO_U, -y * KM_TO_U)
 }
 
-function blendColors(colors: string[]): string {
-  if (colors.length === 0) return '#39ff6a'
-  const c = colors.map(hex => new THREE.Color(hex))
-  const out = new THREE.Color(0, 0, 0)
-  c.forEach(col => out.add(col))
-  out.multiplyScalar(1 / c.length)
-  return `#${out.getHexString()}`
-}
-
 function isNodeFault(sat: any): boolean {
   const status = String(sat?.status ?? 'active').toLowerCase()
   const faultTag = String(sat?.fault_tag ?? '').trim()
@@ -28,11 +19,12 @@ function isNodeFault(sat: any): boolean {
 }
 
 export default function Satellites() {
-  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
+  const { satellites, selectedSatellite, deployments, highlightedDeploymentIds, snapVisualToken, setSelectedSatellite, setSelectedLink } = useStore((s) => ({
     satellites: s.satellites,
     selectedSatellite: s.selectedSatellite,
     deployments: s.deployments,
     highlightedDeploymentIds: s.highlightedDeploymentIds,
+    snapVisualToken: s.autoDynamics.snap_visual_token,
     setSelectedSatellite: s.setSelectedSatellite,
     setSelectedLink: s.setSelectedLink,
   }), shallow)
@@ -44,6 +36,7 @@ export default function Satellites() {
   const currentPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
   const targetPosMapRef = useRef<Map<string, THREE.Vector3>>(new Map())
   const meshDirtyRef = useRef(true)
+  const lastSnapTokenRef = useRef(snapVisualToken)
 
   const vnfHighlightSet = useMemo(() => {
     if (highlightedDeploymentIds.length === 0) return new Set<string>()
@@ -55,19 +48,6 @@ export default function Satellites() {
       dep.deployed_nodes.forEach(nodeId => nodes.add(nodeId))
     })
     return nodes
-  }, [deployments, highlightedDeploymentIds])
-
-  const endpointSets = useMemo(() => {
-    const ingress = new Set<string>()
-    const egress = new Set<string>()
-    if (highlightedDeploymentIds.length === 0) return { ingress, egress }
-    const active = new Set(highlightedDeploymentIds)
-    deployments.forEach(dep => {
-      if (!active.has(dep.deployment_id)) return
-      if ((dep as any).source_node) ingress.add((dep as any).source_node)
-      if ((dep as any).destination_node) egress.add((dep as any).destination_node)
-    })
-    return { ingress, egress }
   }, [deployments, highlightedDeploymentIds])
 
   const satelliteIndexById = useMemo(() => {
@@ -102,6 +82,16 @@ export default function Satellites() {
     return { targetPositions, colours }
   }, [satellites, selectedSatellite, vnfHighlightSet])
 
+  const colourSignature = useMemo(() => {
+    const highlighted = Array.from(vnfHighlightSet).sort().join(',')
+    const faults = satellites
+      .filter((sat: any) => isNodeFault(sat))
+      .map((sat: any) => String(sat.id))
+      .sort()
+      .join(',')
+    return `${selectedSatellite?.id ?? ''}|${highlighted}|${faults}`
+  }, [satellites, selectedSatellite?.id, vnfHighlightSet])
+
   const sphereDetail = useMemo(() => {
     if (satellites.length >= 5000) return { r: 0.055, seg: 6 }
     if (satellites.length >= 3000) return { r: 0.06, seg: 8 }
@@ -112,18 +102,47 @@ export default function Satellites() {
     const current = currentPosMapRef.current
     const target = targetPosMapRef.current
     const liveIds = new Set<string>()
+    let positionChanged = target.size !== satellites.length
     satellites.forEach((sat, idx) => {
       liveIds.add(sat.id)
       const t = targetPositions[idx] ?? satToVec3(sat.coordinates.x, sat.coordinates.y, sat.coordinates.z)
+      const prevTarget = target.get(sat.id)
+      if (!prevTarget || prevTarget.distanceToSquared(t) > 1e-12) {
+        positionChanged = true
+      }
       target.set(sat.id, t.clone())
       if (!current.has(sat.id)) {
         current.set(sat.id, t.clone())
+        positionChanged = true
       }
     })
-    Array.from(current.keys()).forEach((id) => { if (!liveIds.has(id)) current.delete(id) })
-    Array.from(target.keys()).forEach((id) => { if (!liveIds.has(id)) target.delete(id) })
-    meshDirtyRef.current = true
+    Array.from(current.keys()).forEach((id) => {
+      if (!liveIds.has(id)) {
+        current.delete(id)
+        positionChanged = true
+      }
+    })
+    Array.from(target.keys()).forEach((id) => {
+      if (!liveIds.has(id)) {
+        target.delete(id)
+        positionChanged = true
+      }
+    })
+    if (positionChanged) meshDirtyRef.current = true
   }, [satellites, targetPositions])
+
+  useEffect(() => {
+    meshDirtyRef.current = true
+  }, [colourSignature])
+
+  useEffect(() => {
+    if (lastSnapTokenRef.current === snapVisualToken) return
+    lastSnapTokenRef.current = snapVisualToken
+    targetPosMapRef.current.forEach((pos, id) => {
+      currentPosMapRef.current.set(id, pos.clone())
+    })
+    meshDirtyRef.current = true
+  }, [snapVisualToken])
 
   const getDisplayPosition = (idx: number) => {
     const sat = satellites[idx]
@@ -136,7 +155,8 @@ export default function Satellites() {
   useFrame((_, delta) => {
     const mesh = instanceRef.current
     if (!mesh || satellites.length === 0 || !meshDirtyRef.current) return
-    const lerpAlpha = Math.min(1, Math.max(0.14, delta * 5.5))
+    const safeDelta = Math.min(Math.max(0, delta), satellites.length >= 3000 ? 0.04 : 0.06)
+    const lerpAlpha = Math.min(1, Math.max(satellites.length >= 3000 ? 0.08 : 0.12, safeDelta * 4.5))
     let keepAnimating = false
     const n = Math.min(satellites.length, mesh.count)
     for (let i = 0; i < n; i++) {
@@ -208,10 +228,8 @@ export default function Satellites() {
   const markedSatIds = useMemo(() => {
     const ids = new Set<string>()
     vnfHighlightSet.forEach((id) => ids.add(id))
-    endpointSets.ingress.forEach((id) => ids.add(id))
-    endpointSets.egress.forEach((id) => ids.add(id))
     return Array.from(ids)
-  }, [vnfHighlightSet, endpointSets])
+  }, [vnfHighlightSet])
 
   const faultSatIds = useMemo(() => {
     const out: string[] = []
@@ -271,22 +289,15 @@ export default function Satellites() {
         </group>
       )}
 
-      {/* Static bulging overlays for deployed nodes (VNF / ingress / egress) */}
+      {/* Static bulging overlays for deployed core-network nodes */}
       {highlightedDeploymentIds.length > 0 && markedSatIds.map((satId) => {
         const idx = satelliteIndexById.get(satId)
         if (idx == null || idx < 0) return null
         const p = getDisplayPosition(idx)
         if (!p) return null
         const isVnf = vnfHighlightSet.has(satId)
-        const isIngress = endpointSets.ingress.has(satId)
-        const isEgress = endpointSets.egress.has(satId)
-        if (!isVnf && !isIngress && !isEgress) return null
-
-        const roleColors: string[] = []
-        if (isVnf) roleColors.push('#f5f9f7')
-        if (isIngress) roleColors.push('#0097fb')
-        if (isEgress) roleColors.push('#f67904')
-        const core = blendColors(roleColors)
+        if (!isVnf) return null
+        const core = '#f5f9f7'
 
         return (
           <group key={`mark-${satId}`} position={vecToTuple(p)}>
@@ -326,10 +337,11 @@ export default function Satellites() {
         <group position={vecToTuple(hovPos)}>
           <Html distanceFactor={10} zIndexRange={[200, 0]} style={{ pointerEvents: 'none' }}>
             <div style={{
-              transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 10,
-              background: 'linear-gradient(135deg, rgba(15,23,42,0.97), rgba(30,41,59,0.97))',
+              transform: 'translate(12px,-50%)', padding: '8px 12px', borderRadius: 8,
+              background: 'linear-gradient(135deg, rgba(15,23,42,0.34), rgba(30,41,59,0.26))',
               border: '1px solid rgba(0,255,136,0.4)', fontSize: 11, whiteSpace: 'nowrap',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.7)', fontFamily: '"IBM Plex Mono", monospace',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.45)', fontFamily: '"IBM Plex Mono", monospace',
+              backdropFilter: 'blur(6px)',
             }}>
               <div style={{ color: '#00ff88', fontWeight: 700, marginBottom: 5 }}>{hov.id}</div>
               <div style={{ color: '#cbd5e1', fontSize: 10 }}>

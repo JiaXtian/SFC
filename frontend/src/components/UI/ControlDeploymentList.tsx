@@ -3,21 +3,6 @@ import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
 
-function phaseLabel(raw: string): string {
-  const v = String(raw ?? '').trim().toLowerCase()
-  const map: Record<string, string> = {
-    queued: '排队中',
-    pending: '等待中',
-    starting: '启动中',
-    running: '运行中',
-    degraded: '降级运行',
-    ready: '已就绪',
-    rolled_back: '已回滚',
-    failed: '失败',
-  }
-  return map[v] ?? (raw || '-')
-}
-
 function statusLabel(raw: string): string {
   const v = String(raw ?? '').trim().toLowerCase()
   const map: Record<string, string> = {
@@ -101,8 +86,8 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     >
       <div className="flex items-center justify-between mb-2 gap-2">
         <div>
-          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold">已部署SFC详情</div>
-          <div className="text-[10px] text-slate-400 mt-0.5">展示运行态、SLA相关参数、编排进度及会话信息</div>
+          <div className="text-[13px] uppercase tracking-wide text-cyan-100 font-semibold">已部署核心网详情</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">展示运行态、SLA参数与路径重算结果</div>
         </div>
         <button
           onClick={refresh}
@@ -117,20 +102,17 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
         <table className="w-full text-[10px]">
           <thead className="sticky top-0 z-10 bg-slate-900/95 text-slate-300">
             <tr>
-              <th className="px-2 py-2 text-left min-w-[90px]">SFC</th>
+              <th className="px-2 py-2 text-left min-w-[90px]">核心网</th>
               <th className="px-2 py-2 text-left">状态</th>
-              <th className="px-2 py-2 text-left min-w-[150px]">入口 → 出口</th>
+              <th className="px-2 py-2 text-left min-w-[150px]">网元/依赖</th>
               <th className="px-2 py-2 text-left">节点</th>
-              <th className="px-2 py-2 text-left min-w-[95px]">编排阶段</th>
               <th className="px-2 py-2 text-left">容器启动</th>
               <th className="px-2 py-2 text-left">网元运行</th>
               <th className="px-2 py-2 text-left min-w-[120px]">服务状态</th>
               <th className="px-2 py-2 text-left">评分</th>
               <th className="px-2 py-2 text-left">可靠性</th>
               <th className="px-2 py-2 text-left">带宽瓶颈</th>
-              <th className="px-2 py-2 text-left min-w-[105px]">会话/重算</th>
-              <th className="px-2 py-2 text-left min-w-[80px]">触发</th>
-              <th className="px-2 py-2 text-left">链路时延</th>
+              <th className="px-2 py-2 text-left min-w-[95px]">路径重算次数</th>
               <th className="px-2 py-2 text-left">最后更新</th>
               <th className="px-2 py-2 text-left">操作</th>
             </tr>
@@ -142,8 +124,6 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
                 sessionId: String(dep?.session_id ?? ''),
                 requestId: String(dep?.request_id ?? ''),
               })
-              const phase = String(dep?.orchestration_phase ?? '-')
-              const progress = Number(dep?.orchestration_progress ?? 0)
               const cTotal = Number(dep?.containers_total ?? 0)
               const cRunning = Number(dep?.containers_running ?? 0)
               const cFailed = Number(dep?.containers_failed ?? 0)
@@ -156,25 +136,17 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
               const reliability = Number(dep?.estimated_reliability ?? 0)
               const bottleneck = Number(dep?.bottleneck_bandwidth_gbps ?? 0)
               const recompute = Number(dep?.path_recompute_count ?? 0)
-              const trigger = String(dep?.decision_trigger ?? dep?.orchestration_trigger ?? '-')
               const updatedAt = String(dep?.last_update_at ?? dep?.deployed_at ?? '-').replace('T', ' ').slice(0, 19)
               return (
                 <tr key={String(dep?.deployment_id ?? Math.random())} className="border-t border-slate-800/80 text-slate-200">
                   <td className="px-2 py-2 font-medium">{label}</td>
                   <td className="px-2 py-2">{statusLabel(String(dep?.status ?? 'completed'))}</td>
                   <td className="px-2 py-2 font-mono">
-                    <span>{String(dep?.source_node ?? '-')}</span>
-                    <span className="text-slate-500 mx-1">→</span>
-                    <span>{String(dep?.destination_node ?? '-')}</span>
+                    <span>{Array.isArray(dep?.per_vnf) ? dep.per_vnf.length : nTotal || 0}/12 NF</span>
+                    <span className="text-slate-500 mx-1">·</span>
+                    <span>{Array.isArray(dep?.core_nf_dependencies) ? dep.core_nf_dependencies.length : 20} edges</span>
                   </td>
                   <td className="px-2 py-2">{Array.isArray(dep?.deployed_nodes) ? dep.deployed_nodes.length : 0}</td>
-                  <td className="px-2 py-2">
-                    <div>{phaseLabel(phase)}</div>
-                    <div className="text-[9px] text-slate-400">{progress}%</div>
-                    {String(dep?.last_error ?? '').trim() && (
-                      <div className="text-[9px] text-rose-300">{String(dep.last_error)}</div>
-                    )}
-                  </td>
                   <td className="px-2 py-2">
                     <div>{cRunning}/{cTotal}</div>
                     {cFailed > 0 && <div className="text-[9px] text-rose-300">失败 {cFailed}</div>}
@@ -196,12 +168,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
                   <td className="px-2 py-2 font-mono">{score.toFixed(3)}</td>
                   <td className="px-2 py-2 font-mono">{(reliability * 100).toFixed(2)}%</td>
                   <td className="px-2 py-2 font-mono">{bottleneck.toFixed(2)}Gbps</td>
-                  <td className="px-2 py-2">
-                    <div>{String(dep?.session_id ? '连续会话' : '单次部署')}</div>
-                    <div className="text-[9px] text-slate-400">路径重算 {recompute} 次</div>
-                  </td>
-                  <td className="px-2 py-2 text-slate-300">{trigger || '-'}</td>
-                  <td className="px-2 py-2 font-mono">{Number(dep?.total_latency_ms ?? 0).toFixed(2)}ms</td>
+                  <td className="px-2 py-2 font-mono text-violet-200">{recompute}</td>
                   <td className="px-2 py-2">{updatedAt}</td>
                   <td className="px-2 py-2">
                     <button
@@ -217,7 +184,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
             })}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={16} className="px-3 py-8 text-center text-slate-500">当前无已部署 SFC</td>
+                <td colSpan={13} className="px-3 py-8 text-center text-slate-500">当前无已部署核心网</td>
               </tr>
             )}
           </tbody>
