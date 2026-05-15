@@ -113,17 +113,19 @@ ensure_mysql_ready() {
 
   create_mysql_container() {
     local data_dir="$1"
-    mkdir -p "${data_dir}"
+
     docker network inspect "${mysql_network}" >/dev/null 2>&1 || docker network create "${mysql_network}" >/dev/null
     if [[ "${MYSQL_DISABLE_BINLOG}" == "1" ]]; then
       docker run -d \
         --name "${mysql_container}" \
         --network "${mysql_network}" \
+        --privileged \
+        --security-opt label=disable \
         -e MYSQL_ROOT_PASSWORD=root123456 \
         -e MYSQL_DATABASE=sfc_runtime \
         -e MYSQL_USER=sfc \
         -e MYSQL_PASSWORD=sfc123456 \
-        -v "${data_dir}:/var/lib/mysql" \
+        -v "sfc-mysql-data:/var/lib/mysql" \
         mysql:8.0 \
         --skip-log-bin \
         --character-set-server=utf8mb4 \
@@ -132,11 +134,13 @@ ensure_mysql_ready() {
       docker run -d \
         --name "${mysql_container}" \
         --network "${mysql_network}" \
+        --privileged \
+        --security-opt label=disable \
         -e MYSQL_ROOT_PASSWORD=root123456 \
         -e MYSQL_DATABASE=sfc_runtime \
         -e MYSQL_USER=sfc \
         -e MYSQL_PASSWORD=sfc123456 \
-        -v "${data_dir}:/var/lib/mysql" \
+        -v "sfc-mysql-data:/var/lib/mysql" \
         mysql:8.0 \
         --binlog-expire-logs-seconds="${MYSQL_BINLOG_EXPIRE_SECONDS}" \
         --max-binlog-size="${MYSQL_MAX_BINLOG_SIZE}" \
