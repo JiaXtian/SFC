@@ -209,6 +209,9 @@ export default function CandidateModal() {
         core_nf_dependencies: Array.isArray((requestPayload as any)?.core_nf_dependencies)
           ? (requestPayload as any).core_nf_dependencies
           : [],
+        core_nfs: Array.isArray((requestPayload as any)?.core_nfs)
+          ? (requestPayload as any).core_nfs
+          : [],
         custom_nf_bindings: Array.isArray((requestPayload as any)?.custom_nf_bindings)
           ? (requestPayload as any).custom_nf_bindings
           : [],
@@ -217,6 +220,11 @@ export default function CandidateModal() {
           : [],
         custom_nf_independent: Array.isArray((requestPayload as any)?.custom_nf_independent)
           ? (requestPayload as any).custom_nf_independent
+          : [],
+        custom_core_graph: Boolean((requestPayload as any)?.custom_core_graph),
+        allow_partial_core_nfs: Boolean((requestPayload as any)?.allow_partial_core_nfs),
+        active_core_nf_types: Array.isArray((requestPayload as any)?.active_core_nf_types)
+          ? (requestPayload as any).active_core_nf_types
           : [],
         sfc_name: coreLabel,
         inference_latency_ms: Number(inferenceTime ?? 0),

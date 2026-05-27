@@ -149,6 +149,10 @@ class APIClient {
     custom_nf_bindings?: string[][];
     independent_core_nfs?: string[];
     custom_nf_independent?: string[];
+    custom_core_graph?: boolean;
+    allow_partial_core_nfs?: boolean;
+    active_core_nf_types?: string[];
+    core_nfs?: any[];
     core_network_id?: string;
     core_network_label?: string;
     sfc_name?: string;

@@ -161,22 +161,167 @@ std::string deployment_dedupe_key(const nlohmann::json& dep) {
     return "request_id:" + dep.value("request_id", std::string(""));
 }
 
+bool json_field_has_value(const nlohmann::json& obj, const std::string& key) {
+    if (!obj.is_object() || !obj.contains(key) || obj[key].is_null()) return false;
+    if (obj[key].is_string()) return !obj[key].get<std::string>().empty();
+    if (obj[key].is_array() || obj[key].is_object()) return !obj[key].empty();
+    return true;
+}
+
+void add_deployment_identity_key(
+    std::vector<std::string>* keys,
+    std::unordered_set<std::string>* seen,
+    const std::string& prefix,
+    const std::string& value
+) {
+    if (!keys || !seen || value.empty()) return;
+    const std::string key = prefix + ":" + value;
+    if (seen->insert(key).second) keys->push_back(key);
+}
+
+std::vector<std::string> deployment_identity_keys(const nlohmann::json& dep) {
+    std::vector<std::string> keys;
+    std::unordered_set<std::string> seen;
+    std::string label = extract_core_label(dep.value("core_network_label", std::string("")));
+    if (label.empty()) label = extract_core_label(dep.value("sfc_name", std::string("")));
+    if (label.empty()) label = extract_core_label(dep.value("name", std::string("")));
+    if (label.empty()) label = extract_core_label(dep.value("deployment_id", std::string("")));
+    if (label.empty()) label = extract_core_label(dep.value("backend_deployment_id", std::string("")));
+    add_deployment_identity_key(&keys, &seen, "label", label);
+    add_deployment_identity_key(&keys, &seen, "core", dep.value("core_network_id", std::string("")));
+    add_deployment_identity_key(&keys, &seen, "session", dep.value("session_id", std::string("")));
+    add_deployment_identity_key(&keys, &seen, "backend", dep.value("backend_deployment_id", std::string("")));
+    add_deployment_identity_key(&keys, &seen, "deployment", dep.value("deployment_id", std::string("")));
+    add_deployment_identity_key(&keys, &seen, "request", dep.value("request_id", std::string("")));
+    return keys;
+}
+
+bool deployment_records_overlap(const nlohmann::json& a, const nlohmann::json& b) {
+    std::unordered_set<std::string> left;
+    for (const auto& key : deployment_identity_keys(a)) left.insert(key);
+    if (left.empty()) return deployment_dedupe_key(a) == deployment_dedupe_key(b);
+    for (const auto& key : deployment_identity_keys(b)) {
+        if (left.find(key) != left.end()) return true;
+    }
+    return false;
+}
+
+bool deployment_matches_id(const nlohmann::json& dep, const std::string& id) {
+    if (id.empty()) return false;
+    const std::string dep_id = dep.value("deployment_id", std::string(""));
+    const std::string backend_id = dep.value("backend_deployment_id", dep_id);
+    const std::string session_id = dep.value("session_id", std::string(""));
+    return dep_id == id ||
+        backend_id == id ||
+        dep.value("core_network_id", std::string("")) == id ||
+        dep.value("request_id", std::string("")) == id ||
+        session_id == id ||
+        (!session_id.empty() && ("sess-deploy-" + session_id) == id);
+}
+
+nlohmann::json merge_deployment_records(const nlohmann::json& current, const nlohmann::json& incoming) {
+    const bool incoming_latest = deployment_timestamp_key(incoming) >= deployment_timestamp_key(current);
+    const nlohmann::json& older = incoming_latest ? current : incoming;
+    const nlohmann::json& latest = incoming_latest ? incoming : current;
+    const nlohmann::json& runtime_source = prefer_deployment_record(incoming, current) ? incoming : current;
+    nlohmann::json merged = older;
+    for (auto it = latest.begin(); it != latest.end(); ++it) {
+        merged[it.key()] = it.value();
+    }
+    for (const auto& key : {
+        "runtime_enabled",
+        "orchestration_phase",
+        "orchestration_progress",
+        "orchestration_mode",
+        "orchestration_trigger",
+        "containers_total",
+        "containers_running",
+        "containers_failed",
+        "core_nfs_total",
+        "core_nfs_running",
+        "core_nfs_failed",
+        "service_ready",
+        "ready_for_ueransim",
+        "last_error",
+        "last_update_at"
+    }) {
+        if (json_field_has_value(runtime_source, key)) {
+            merged[key] = runtime_source[key];
+        }
+    }
+    const std::string newest_ts = std::max(deployment_timestamp_key(current), deployment_timestamp_key(incoming));
+    if (!newest_ts.empty()) {
+        merged["last_update_at"] = newest_ts;
+    }
+
+    auto fill_identity = [&](const std::string& key) {
+        if (json_field_has_value(merged, key)) return;
+        if (json_field_has_value(current, key)) {
+            merged[key] = current[key];
+        } else if (json_field_has_value(incoming, key)) {
+            merged[key] = incoming[key];
+        }
+    };
+    for (const auto& key : {
+        "deployment_id",
+        "backend_deployment_id",
+        "core_network_id",
+        "core_network_label",
+        "request_id",
+        "session_id",
+        "sfc_name"
+    }) {
+        fill_identity(key);
+    }
+
+    const std::string label = [&]() {
+        const std::string from_core = extract_core_label(merged.value("core_network_label", std::string("")));
+        if (!from_core.empty()) return from_core;
+        const std::string from_name = extract_core_label(merged.value("sfc_name", std::string("")));
+        if (!from_name.empty()) return from_name;
+        return extract_core_label(merged.value("name", std::string("")));
+    }();
+    if (!label.empty()) {
+        merged["core_network_label"] = label;
+        merged["sfc_name"] = label;
+    }
+    if (!json_field_has_value(merged, "backend_deployment_id") && json_field_has_value(merged, "deployment_id")) {
+        const std::string dep_id = merged.value("deployment_id", std::string(""));
+        if (dep_id.rfind("sess-deploy-", 0) != 0) {
+            merged["backend_deployment_id"] = dep_id;
+        }
+    }
+    if (json_field_has_value(merged, "backend_deployment_id")) {
+        const std::string dep_id = merged.value("deployment_id", std::string(""));
+        const std::string backend_id = merged.value("backend_deployment_id", std::string(""));
+        if (!backend_id.empty() && (dep_id.empty() || dep_id.rfind("sess-deploy-", 0) == 0)) {
+            merged["deployment_id"] = backend_id;
+        }
+    }
+    if (!json_field_has_value(merged, "core_network_id")) {
+        merged["core_network_id"] = stable_core_network_id(
+            merged.value("backend_deployment_id", merged.value("deployment_id", std::string(""))),
+            merged.value("request_id", std::string(""))
+        );
+    }
+    return merged;
+}
+
 bool dedupe_deployments_locked() {
     std::vector<nlohmann::json> deduped;
-    std::unordered_map<std::string, size_t> index_by_key;
     bool changed = false;
     for (const auto& dep : g_deployments) {
-        const std::string key = deployment_dedupe_key(dep);
-        auto it = index_by_key.find(key);
-        if (it == index_by_key.end()) {
-            index_by_key[key] = deduped.size();
-            deduped.push_back(dep);
-            continue;
+        nlohmann::json merged = dep;
+        for (size_t i = 0; i < deduped.size();) {
+            if (!deployment_records_overlap(merged, deduped[i])) {
+                ++i;
+                continue;
+            }
+            merged = merge_deployment_records(deduped[i], merged);
+            deduped.erase(deduped.begin() + static_cast<std::ptrdiff_t>(i));
+            changed = true;
         }
-        changed = true;
-        if (prefer_deployment_record(dep, deduped[it->second])) {
-            deduped[it->second] = dep;
-        }
+        deduped.push_back(std::move(merged));
     }
     if (changed) {
         g_deployments = std::move(deduped);
@@ -373,22 +518,33 @@ bool patch_deployment_record(
     if (deployment_id.empty() || !patch.is_object()) return false;
     std::lock_guard<std::mutex> lock(g_deployments_mutex);
     sync_deployments_from_db_locked();
+    bool patched = false;
     for (auto& dep : g_deployments) {
-        const std::string dep_id = dep.value("deployment_id", std::string(""));
-        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
-        if (dep_id != deployment_id && backend_id != deployment_id) continue;
+        if (!deployment_matches_id(dep, deployment_id)) continue;
 
         for (auto it = patch.begin(); it != patch.end(); ++it) {
             dep[it.key()] = it.value();
         }
-        if (dep.value("backend_deployment_id", "").empty() && !dep_id.empty()) {
+        const std::string dep_id = dep.value("deployment_id", std::string(""));
+        if (dep.value("backend_deployment_id", "").empty() && !dep_id.empty() && dep_id.rfind("sess-deploy-", 0) != 0) {
             dep["backend_deployment_id"] = dep_id;
         }
-        persist_deployments_locked();
-        if (merged_out) *merged_out = dep;
-        return true;
+        patched = true;
+        break;
     }
-    return false;
+    if (!patched) return false;
+
+    dedupe_deployments_locked();
+    persist_deployments_locked();
+    if (merged_out) {
+        for (const auto& dep : g_deployments) {
+            if (deployment_matches_id(dep, deployment_id)) {
+                *merged_out = dep;
+                break;
+            }
+        }
+    }
+    return true;
 }
 
 nlohmann::json list_deployment_records() {
@@ -484,9 +640,7 @@ static bool find_deployment_record_by_id(const std::string& deployment_id, nlohm
     if (!records.is_array()) return false;
     for (const auto& dep : records) {
         if (!dep.is_object()) continue;
-        const std::string dep_id = dep.value("deployment_id", std::string(""));
-        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
-        if (dep_id == deployment_id || backend_id == deployment_id) {
+        if (deployment_matches_id(dep, deployment_id)) {
             if (out) *out = dep;
             return true;
         }
@@ -838,7 +992,7 @@ static VNF make_default_core_nf(
     return vnf;
 }
 
-static void complete_open5gs_core_request(SFCRequest* request) {
+static void complete_open5gs_core_request(SFCRequest* request, bool fill_missing_core_nfs) {
     if (!request) return;
 
     std::unordered_map<std::string, VNF> by_type;
@@ -850,19 +1004,19 @@ static void complete_open5gs_core_request(SFCRequest* request) {
     }
 
     std::vector<VNF> ordered;
-    ordered.reserve(open5gs_core_nf_types().size());
+    ordered.reserve(fill_missing_core_nfs ? open5gs_core_nf_types().size() : request->vnfs.size());
     for (const auto& nf_type : open5gs_core_nf_types()) {
         auto it = by_type.find(nf_type);
         if (it != by_type.end()) {
             ordered.push_back(it->second);
-        } else {
+        } else if (fill_missing_core_nfs) {
             ordered.push_back(make_default_core_nf(nf_type, request->request_id, request->core_business_load));
         }
     }
     request->vnfs = std::move(ordered);
 }
 
-static void finalize_dependency_bandwidths(SFCRequest* request) {
+static void finalize_dependency_bandwidths(SFCRequest* request, bool apply_default_dependencies) {
     if (!request) return;
     std::unordered_set<std::string> nf_types;
     std::unordered_map<std::string, double> bw_by_type;
@@ -876,7 +1030,7 @@ static void finalize_dependency_bandwidths(SFCRequest* request) {
         request_bw = std::max(request_bw, bw);
     }
 
-    if (request->core_nf_dependencies.empty()) {
+    if (request->core_nf_dependencies.empty() && apply_default_dependencies) {
         request->core_nf_dependencies = default_open5gs_dependencies();
     }
 
@@ -901,6 +1055,113 @@ static void finalize_dependency_bandwidths(SFCRequest* request) {
         filtered.push_back(dep);
     }
     request->core_nf_dependencies = std::move(filtered);
+}
+
+static const std::vector<std::string>& ue_validation_required_nf_types() {
+    static const std::vector<std::string> types = {
+        "nrf", "amf", "smf", "upf", "ausf", "udm", "udr", "pcf"
+    };
+    return types;
+}
+
+static std::string join_tokens(const std::vector<std::string>& values, const std::string& sep = ",") {
+    std::string out;
+    for (const auto& value : values) {
+        if (!out.empty()) out += sep;
+        out += value;
+    }
+    return out;
+}
+
+static std::vector<std::string> validate_custom_core_graph(const SFCRequest& request) {
+    std::vector<std::string> errors;
+    if (!request.custom_core_graph) return errors;
+
+    std::unordered_set<std::string> nf_types;
+    std::vector<std::string> ordered_types;
+    for (const auto& vnf : request.vnfs) {
+        const std::string nf = normalize_nf_type(vnf.nf_type.empty() ? vnf.name : vnf.nf_type);
+        if (nf.empty()) continue;
+        if (nf_types.insert(nf).second) ordered_types.push_back(nf);
+    }
+
+    if (ordered_types.empty()) {
+        errors.push_back("custom_core_nfs_empty");
+        return errors;
+    }
+    if (ordered_types.size() > open5gs_core_nf_types().size()) {
+        errors.push_back("custom_core_nfs_exceed_12");
+    }
+
+    std::vector<std::string> missing_required;
+    for (const auto& nf : ue_validation_required_nf_types()) {
+        if (nf_types.find(nf) == nf_types.end()) missing_required.push_back(nf);
+    }
+    if (!missing_required.empty()) {
+        errors.push_back("missing_ueransim_required_core_nfs:" + join_tokens(missing_required));
+    }
+
+    if (request.core_nf_dependencies.empty()) {
+        errors.push_back("custom_core_dependencies_empty");
+        return errors;
+    }
+
+    std::unordered_map<std::string, std::unordered_set<std::string>> adj;
+    for (const auto& nf : ordered_types) adj[nf] = {};
+    std::unordered_set<std::string> seen_edges;
+    for (const auto& dep : request.core_nf_dependencies) {
+        const std::string src = normalize_nf_type(dep.source);
+        const std::string dst = normalize_nf_type(dep.target);
+        if (src.empty() || dst.empty()) {
+            errors.push_back("dependency_endpoint_empty");
+            continue;
+        }
+        if (src == dst) {
+            errors.push_back("dependency_self_loop:" + src);
+            continue;
+        }
+        if (nf_types.find(src) == nf_types.end() || nf_types.find(dst) == nf_types.end()) {
+            errors.push_back("dependency_endpoint_not_in_custom_core:" + src + "->" + dst);
+            continue;
+        }
+        const std::string key = src + "->" + dst;
+        if (!seen_edges.insert(key).second) {
+            errors.push_back("dependency_duplicate:" + key);
+            continue;
+        }
+        adj[src].insert(dst);
+        adj[dst].insert(src);
+    }
+
+    std::vector<std::string> isolated;
+    for (const auto& nf : ordered_types) {
+        if (adj[nf].empty()) isolated.push_back(nf);
+    }
+    if (!isolated.empty()) {
+        errors.push_back("dependency_graph_isolated_core_nfs:" + join_tokens(isolated));
+    }
+
+    if (!ordered_types.empty()) {
+        std::unordered_set<std::string> visited;
+        std::vector<std::string> stack{ordered_types.front()};
+        visited.insert(ordered_types.front());
+        while (!stack.empty()) {
+            const std::string cur = stack.back();
+            stack.pop_back();
+            for (const auto& next : adj[cur]) {
+                if (visited.insert(next).second) stack.push_back(next);
+            }
+        }
+        if (visited.size() != ordered_types.size()) {
+            std::vector<std::string> disconnected;
+            for (const auto& nf : ordered_types) {
+                if (visited.find(nf) == visited.end()) disconnected.push_back(nf);
+            }
+            errors.push_back("dependency_graph_disconnected:" + join_tokens(disconnected));
+        }
+    }
+
+    return errors;
 }
 
 static CoreNFProfile get_core_nf_profile(const std::string& nf_type_raw) {
@@ -1200,6 +1461,8 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.max_planning_attempts = json.get("max_planning_attempts", 0).asInt();
     request.planning_time_budget_ms = json.get("planning_time_budget_ms", 0.0).asDouble();
     request.inference_profile = json.get("inference_profile", "fast").asString();
+    request.custom_core_graph = json.get("custom_core_graph", false).asBool();
+    request.allow_partial_core_nfs = json.get("allow_partial_core_nfs", request.custom_core_graph).asBool();
     if (json.isMember("inference")) {
         const auto& inference = json["inference"];
         request.realtime_mode = inference.get("realtime_mode", request.realtime_mode).asBool();
@@ -1289,7 +1552,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
 
     request.topk = std::max(1, std::min(5, request.topk));
     request.core_business_load.normalize_inplace();
-    complete_open5gs_core_request(&request);
+    complete_open5gs_core_request(&request, !request.allow_partial_core_nfs);
     request.inference_profile = normalize_nf_type(request.inference_profile);
     if (request.inference_profile != "balanced" && request.inference_profile != "quality") {
         request.inference_profile = "fast";
@@ -1309,7 +1572,7 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.constraints.pdu_access_latency_ms = std::max(0.0, request.constraints.pdu_access_latency_ms);
     request.constraints.min_bandwidth_gbps = std::max(0.01, request.constraints.min_bandwidth_gbps);
     request.constraints.min_reliability = std::max(0.45, std::min(0.995, request.constraints.min_reliability));
-    finalize_dependency_bandwidths(&request);
+    finalize_dependency_bandwidths(&request, !request.custom_core_graph);
 
     double reliability_cap = 0.995;
     if (request.constraints.min_reliability > reliability_cap) {
@@ -1352,6 +1615,19 @@ void SFCController::plan(
             error["code"] = 400;
             error["message"] = "Invalid core-network request";
             error["details"] = "core_nfs/core_nf_sequence (or vnfs/vnf_sequence) must not be empty";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+        const auto graph_errors = validate_custom_core_graph(sfc_request);
+        if (!graph_errors.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid custom core dependency graph";
+            Json::Value details(Json::arrayValue);
+            for (const auto& item : graph_errors) details.append(item);
+            error["details"] = details;
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -1719,6 +1995,42 @@ void SFCController::deploy(
                 return;
             }
         }
+        const bool custom_core_graph = (*json).get("custom_core_graph", false).asBool();
+        const bool allow_partial_core_nfs = (*json).get("allow_partial_core_nfs", custom_core_graph).asBool();
+        if (custom_core_graph) {
+            SFCRequest deployment_graph_request;
+            deployment_graph_request.request_id = request_id;
+            deployment_graph_request.custom_core_graph = true;
+            deployment_graph_request.allow_partial_core_nfs = allow_partial_core_nfs;
+            deployment_graph_request.vnfs = vnfs;
+            if (json->isMember("core_nf_dependencies") && (*json)["core_nf_dependencies"].isArray()) {
+                for (const auto& item : (*json)["core_nf_dependencies"]) {
+                    if (!item.isObject()) continue;
+                    CoreNFDependency edge;
+                    edge.source = item.get("source", item.get("src", "")).asString();
+                    edge.target = item.get("target", item.get("dst", "")).asString();
+                    edge.criticality = item.get("criticality", 1.0).asDouble();
+                    edge.bandwidth_scale = item.get("bandwidth_scale", 0.5).asDouble();
+                    edge.latency_weight = item.get("latency_weight", 1.0).asDouble();
+                    edge.reliability_weight = item.get("reliability_weight", 1.0).asDouble();
+                    edge.bandwidth_required_gbps = item.get("bandwidth_required_gbps", 0.0).asDouble();
+                    deployment_graph_request.core_nf_dependencies.push_back(edge);
+                }
+            }
+            const auto graph_errors = validate_custom_core_graph(deployment_graph_request);
+            if (!graph_errors.empty()) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "Invalid custom core dependency graph";
+                Json::Value details(Json::arrayValue);
+                for (const auto& item : graph_errors) details.append(item);
+                error["details"] = details;
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+        }
 
         const Topology deploy_topology = current_planning_topology();
         std::string topology_reason;
@@ -1792,6 +2104,8 @@ void SFCController::deploy(
         dep_json["estimated_reliability"] = candidate.estimated_reliability;
         dep_json["strategy_mode"] = "single_request";
         dep_json["custom_nf_bindings"] = nlohmann::json::array();
+        dep_json["custom_core_graph"] = custom_core_graph;
+        dep_json["allow_partial_core_nfs"] = allow_partial_core_nfs;
         dep_json["sfc_name"] = !core_label.empty() ? core_label : incoming_sfc_name;
         dep_json["source_node"] = (*json).get("source_node", "").asString();
         dep_json["destination_node"] = (*json).get("destination_node", "").asString();
@@ -1876,6 +2190,13 @@ void SFCController::deploy(
         }
         dep_json["per_vnf"] = per_vnf_json;
         dep_json["per_core_nf"] = per_vnf_json;
+        nlohmann::json active_nf_types = nlohmann::json::array();
+        for (const auto& pv : candidate.per_vnf) {
+            const std::string core_nf = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+            const std::string nf_type = normalize_nf_type(pv.nf_type.empty() ? core_nf : pv.nf_type);
+            if (!nf_type.empty()) active_nf_types.push_back(nf_type);
+        }
+        dep_json["active_core_nf_types"] = std::move(active_nf_types);
         if (!custom_bindings.empty()) {
             nlohmann::json groups_json = nlohmann::json::array();
             for (const auto& group : custom_bindings) {
@@ -1931,18 +2252,13 @@ void SFCController::deploy(
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
             sync_deployments_from_db_locked();
-            const std::string new_core_label = dep_json.value("core_network_label", std::string(""));
-            const std::string new_core_id = dep_json.value("core_network_id", std::string(""));
             g_deployments.erase(
                 std::remove_if(
                     g_deployments.begin(),
                     g_deployments.end(),
                     [&](const nlohmann::json& dep) {
-                        const std::string existing_label = dep.value("core_network_label", std::string(""));
-                        const std::string existing_core_id = dep.value("core_network_id", std::string(""));
-                        return dep.value("deployment_id", "") == deployment_id ||
-                            (!new_core_label.empty() && existing_label == new_core_label) ||
-                            (!new_core_id.empty() && existing_core_id == new_core_id);
+                        return deployment_matches_id(dep, deployment_id) ||
+                            deployment_records_overlap(dep, dep_json);
                     }),
                 g_deployments.end()
             );
@@ -1955,6 +2271,8 @@ void SFCController::deploy(
             runtime_request.request_id = request_id;
             runtime_request.service_type = "open5gs_core";
             runtime_request.network_domain = "open5gs";
+            runtime_request.custom_core_graph = custom_core_graph;
+            runtime_request.allow_partial_core_nfs = allow_partial_core_nfs;
             runtime_request.priority = "medium";
             runtime_request.optimize = "latency";
             runtime_request.vnfs = vnfs;
@@ -2587,6 +2905,19 @@ void SFCController::startSession(
             error["code"] = 400;
             error["message"] = "Invalid session request";
             error["details"] = "core_nfs are required";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+        const auto graph_errors = validate_custom_core_graph(sfc_request);
+        if (!graph_errors.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid custom core dependency graph";
+            Json::Value details(Json::arrayValue);
+            for (const auto& item : graph_errors) details.append(item);
+            error["details"] = details;
             auto resp = HttpResponse::newHttpJsonResponse(error);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

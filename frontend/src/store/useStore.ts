@@ -1123,22 +1123,148 @@ function deploymentDedupeKey(dep: Partial<Deployment>): string {
   return `deployment:${String(dep.backend_deployment_id ?? dep.deployment_id ?? dep.request_id ?? '')}`
 }
 
-function dedupeDeployments(deployments: Deployment[]): Deployment[] {
-  const byKey = new Map<string, Deployment>()
-  deployments.forEach((dep) => {
-    const key = deploymentDedupeKey(dep)
-    const existing = byKey.get(key)
-    if (!existing) {
-      byKey.set(key, dep)
-      return
-    }
-    const score = deploymentScore(dep)
-    const existingScore = deploymentScore(existing)
-    if (score > existingScore || (score === existingScore && deploymentTimestamp(dep) > deploymentTimestamp(existing))) {
-      byKey.set(key, dep)
+function deploymentIdentityKeys(dep: Partial<Deployment>): Set<string> {
+  const keys = new Set<string>()
+  const add = (prefix: string, raw: any) => {
+    const value = String(raw ?? '').trim()
+    if (value) keys.add(`${prefix}:${value}`)
+  }
+  const label = extractCoreLabel(dep.core_network_label) ||
+    extractCoreLabel(dep.sfc_name) ||
+    extractCoreLabel((dep as any).name) ||
+    extractCoreLabel(dep.deployment_id) ||
+    extractCoreLabel(dep.backend_deployment_id)
+  if (label) keys.add(`label:${label}`)
+  add('core', dep.core_network_id)
+  add('session', (dep as any).session_id)
+  add('backend', dep.backend_deployment_id)
+  add('deployment', dep.deployment_id)
+  add('request', dep.request_id)
+  return keys
+}
+
+function deploymentsOverlap(a: Partial<Deployment>, b: Partial<Deployment>): boolean {
+  const left = deploymentIdentityKeys(a)
+  if (left.size === 0) return deploymentDedupeKey(a) === deploymentDedupeKey(b)
+  for (const key of deploymentIdentityKeys(b)) {
+    if (left.has(key)) return true
+  }
+  return false
+}
+
+function deploymentMatchesId(dep: Partial<Deployment>, id: string): boolean {
+  const target = String(id ?? '').trim()
+  if (!target) return false
+  const sessionId = String((dep as any).session_id ?? '')
+  return String(dep.deployment_id ?? '') === target ||
+    String(dep.backend_deployment_id ?? '') === target ||
+    sessionId === target ||
+    (!!sessionId && `sess-deploy-${sessionId}` === target) ||
+    String(dep.core_network_id ?? '') === target ||
+    String(dep.request_id ?? '') === target
+}
+
+const DEPLOYMENT_RUNTIME_FIELDS: Array<keyof Deployment> = [
+  'runtime_enabled',
+  'orchestration_phase',
+  'orchestration_progress',
+  'orchestration_mode',
+  'orchestration_trigger',
+  'containers_total',
+  'containers_running',
+  'containers_failed',
+  'core_nfs_total',
+  'core_nfs_running',
+  'core_nfs_failed',
+  'service_ready',
+  'ready_for_ueransim',
+  'last_error',
+  'last_update_at',
+]
+
+function hasDeploymentValue(value: any): boolean {
+  return value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '')
+}
+
+function preserveDeploymentRuntimeState(next: Deployment, existing?: Deployment): Deployment {
+  if (!existing) return next
+  const merged: Deployment = { ...next }
+  DEPLOYMENT_RUNTIME_FIELDS.forEach((key) => {
+    if (key === 'last_update_at') return
+    const currentValue = (merged as any)[key]
+    const existingValue = (existing as any)[key]
+    if (!hasDeploymentValue(currentValue) && hasDeploymentValue(existingValue)) {
+      ;(merged as any)[key] = existingValue
     }
   })
-  return Array.from(byKey.values())
+  return merged
+}
+
+function mergeDeploymentRecords(a: Deployment, b: Deployment): Deployment {
+  const bLatest = deploymentTimestamp(b) >= deploymentTimestamp(a)
+  const latest = bLatest ? b : a
+  const older = bLatest ? a : b
+  const bRuntimePreferred = deploymentScore(b) > deploymentScore(a) ||
+    (deploymentScore(b) === deploymentScore(a) && deploymentTimestamp(b) >= deploymentTimestamp(a))
+  const runtimeSource = bRuntimePreferred ? b : a
+  const merged: Deployment = { ...older, ...latest }
+  DEPLOYMENT_RUNTIME_FIELDS.forEach((key) => {
+    const value = (runtimeSource as any)[key]
+    if (hasDeploymentValue(value)) {
+      ;(merged as any)[key] = value
+    }
+  })
+  const latestUpdateMs = Math.max(
+    Date.parse(String(a.last_update_at ?? a.deployed_at ?? '')) || 0,
+    Date.parse(String(b.last_update_at ?? b.deployed_at ?? '')) || 0,
+  )
+  if (latestUpdateMs > 0) merged.last_update_at = new Date(latestUpdateMs).toISOString()
+  const fill = (key: keyof Deployment) => {
+    if ((merged as any)[key] == null || String((merged as any)[key]).trim() === '') {
+      const value = (older as any)[key] ?? (latest as any)[key]
+      if (value != null && String(value).trim() !== '') (merged as any)[key] = value
+    }
+  }
+  fill('deployment_id')
+  fill('backend_deployment_id')
+  fill('core_network_id')
+  fill('core_network_label')
+  fill('request_id')
+  fill('sfc_name')
+  ;(['session_id'] as any[]).forEach((key) => {
+    if ((merged as any)[key] == null || String((merged as any)[key]).trim() === '') {
+      const value = (older as any)[key] ?? (latest as any)[key]
+      if (value != null && String(value).trim() !== '') (merged as any)[key] = value
+    }
+  })
+  const label = extractCoreLabel(merged.core_network_label) || extractCoreLabel(merged.sfc_name)
+  if (label) {
+    merged.core_network_label = label
+    merged.sfc_name = label
+  }
+  const backendId = String(merged.backend_deployment_id ?? '').trim()
+  const deploymentId = String(merged.deployment_id ?? '').trim()
+  if (backendId && (!deploymentId || deploymentId.startsWith('sess-deploy-'))) {
+    merged.deployment_id = backendId
+  }
+  return merged
+}
+
+function dedupeDeployments(deployments: Deployment[]): Deployment[] {
+  const deduped: Deployment[] = []
+  deployments.forEach((dep) => {
+    let merged = dep
+    for (let i = 0; i < deduped.length;) {
+      if (!deploymentsOverlap(merged, deduped[i])) {
+        i += 1
+        continue
+      }
+      merged = mergeDeploymentRecords(deduped[i], merged)
+      deduped.splice(i, 1)
+    }
+    deduped.push(merged)
+  })
+  return deduped
 }
 
 export const useStore = create<Store>((set, get) => ({
@@ -1220,7 +1346,7 @@ export const useStore = create<Store>((set, get) => ({
       )
 
       const nextHighlighted = s.highlightedDeploymentIds.filter((id) =>
-        nextDeployments.some((d) => d.deployment_id === id || d.backend_deployment_id === id)
+        nextDeployments.some((d) => deploymentMatchesId(d, id))
       )
       const highlightedSet = new Set(nextHighlighted)
 
@@ -1260,17 +1386,17 @@ export const useStore = create<Store>((set, get) => ({
     get().refreshDeploymentPaths()
   },
   addDeployment: (d) => set((s) => {
-    const idx = s.deployments.findIndex((x) => x.deployment_id === d.deployment_id)
+    const idx = s.deployments.findIndex((x) => deploymentsOverlap(x, d))
     if (idx >= 0) {
       const merged = [...s.deployments]
-      merged[idx] = { ...merged[idx], ...d }
+      merged[idx] = mergeDeploymentRecords(merged[idx], d)
       return { deployments: dedupeDeployments(merged) }
     }
     return { deployments: dedupeDeployments([d, ...s.deployments]) }
   }),
   updateDeployment: (id, p) => set((s) => ({
     deployments: dedupeDeployments(s.deployments.map((d) => (
-      d.deployment_id === id || d.backend_deployment_id === id
+      deploymentMatchesId(d, id)
         ? { ...d, ...p }
         : d
     ))),
@@ -1278,13 +1404,13 @@ export const useStore = create<Store>((set, get) => ({
   removeDeployment: (id) => set((s) => {
     const removedIdSet = new Set<string>([id])
     s.deployments.forEach((d) => {
-      if (d.deployment_id === id || d.backend_deployment_id === id) {
+      if (deploymentMatchesId(d, id)) {
         removedIdSet.add(d.deployment_id)
         if (d.backend_deployment_id) removedIdSet.add(d.backend_deployment_id)
       }
     })
     return {
-      deployments: s.deployments.filter((d) => d.deployment_id !== id && d.backend_deployment_id !== id),
+      deployments: s.deployments.filter((d) => !deploymentMatchesId(d, id)),
       highlightedDeploymentIds: s.highlightedDeploymentIds.filter((x) => !removedIdSet.has(x)),
     }
   }),
@@ -1507,7 +1633,18 @@ export const useStore = create<Store>((set, get) => ({
     const chosen = candidates.find((c: any) => !!c?.satisfies_constraints) ?? null
     const perVnf = pickTracePerVnf(trace)
 
-    const existing = s.deployments.find((d) => d.deployment_id === depId)
+    const traceSessionId = String(trace.session_id ?? '')
+    const traceRequestId = String(trace.request_id ?? '')
+    const traceCoreId = String(trace.core_network_id ?? '')
+    const traceBackendId = String((trace as any).backend_deployment_id ?? '')
+    const existing = s.deployments.find((d) =>
+      d.deployment_id === depId ||
+      String(d.session_id ?? '') === traceSessionId ||
+      (!!traceBackendId && deploymentMatchesId(d, traceBackendId)) ||
+      (!!traceCoreId && String(d.core_network_id ?? '') === traceCoreId) ||
+      (!!traceRequestId && String(d.request_id ?? '') === traceRequestId)
+    )
+    const targetDepId = existing?.deployment_id || depId
     const incomingInference = Number(trace.inference_time_ms ?? Number.NaN)
     const existingInference = Number(existing?.inference_latency_ms ?? Number.NaN)
     const resolvedInference =
@@ -1517,8 +1654,8 @@ export const useStore = create<Store>((set, get) => ({
     if (!chosen) {
       if (!existing) return {}
       return {
-        deployments: s.deployments.map((dep) =>
-          dep.deployment_id === depId
+        deployments: dedupeDeployments(s.deployments.map((dep) =>
+          deploymentMatchesId(dep, targetDepId)
             ? {
                 ...dep,
                 status: 'in-progress',
@@ -1529,14 +1666,14 @@ export const useStore = create<Store>((set, get) => ({
                 deployed_at: nowIso,
               }
             : dep
-        ),
+        )),
       }
     }
 
     const anchors = derivePathAnchors(trace, chosen, perVnf)
-    const base: Deployment = {
-      deployment_id: depId,
-      backend_deployment_id: existing?.backend_deployment_id,
+    const base: Deployment = preserveDeploymentRuntimeState({
+      deployment_id: targetDepId,
+      backend_deployment_id: existing?.backend_deployment_id ?? traceBackendId,
       core_network_id: existing?.core_network_id ?? String(trace.core_network_id ?? depId),
       core_network_label: existing?.core_network_label ?? String(trace.core_network_label ?? ''),
       request_id: trace.request_id,
@@ -1571,7 +1708,7 @@ export const useStore = create<Store>((set, get) => ({
       path_recompute_count: existing?.path_recompute_count ?? 0,
       decision_trigger: trace.trigger,
       path_transition_until: undefined,
-    }
+    }, existing)
 
     const linkMap = buildUsableLinkMap(s.links, s.satellites)
     let rebuilt = base
@@ -1599,22 +1736,22 @@ export const useStore = create<Store>((set, get) => ({
         path_recompute_count: (existing?.path_recompute_count ?? 0) + (pathChanged ? 1 : 0),
       }
     }
-    const highlightedAlready = s.highlightedDeploymentIds.includes(depId)
+    const highlightedAlready = s.highlightedDeploymentIds.some((id) => id === targetDepId || deploymentMatchesId(rebuilt, id))
     const runtimeUnchanged = hasExisting && deploymentRuntimeSignature(existing) === deploymentRuntimeSignature(rebuilt)
     const deployments = runtimeUnchanged
       ? s.deployments
       : (hasExisting
-        ? s.deployments.map((dep) => (dep.deployment_id === depId ? rebuilt : dep))
-        : [
+        ? dedupeDeployments(s.deployments.map((dep) => (deploymentMatchesId(dep, targetDepId) ? rebuilt : dep)))
+        : dedupeDeployments([
           rebuilt,
           ...s.deployments.filter((dep) =>
             !(dep.request_id === trace.request_id && !dep.session_id)
           ),
-        ])
+        ]))
 
     const highlighted = highlightedAlready
       ? s.highlightedDeploymentIds
-      : [depId, ...s.highlightedDeploymentIds]
+      : [targetDepId, ...s.highlightedDeploymentIds]
 
     if (runtimeUnchanged && highlightedAlready) return {}
     return { deployments, highlightedDeploymentIds: highlighted }

@@ -1453,6 +1453,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             placement_sig != candidate_placement_signature(session.last_candidate);
         const bool changed = (!session.has_last_candidate) || (sig != session.last_candidate_signature);
         const std::string status = changed ? (session.has_last_candidate ? "redeployed" : "deployed") : "stable";
+        trace_payload["status"] = status;
+        trace_payload["path_changed"] = changed;
+        trace_payload["placement_changed"] = placement_changed;
 
         if (changed) {
             const std::string previous_allocation_id = session.active_resource_deployment_id;
@@ -1620,6 +1623,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         : (response_candidates.empty() ? "no_candidate" : "no_deployable_candidate");
     session.pending_replanning = true;
     session.last_replanning_attempt_topology_version = session.last_topology_version;
+    trace_payload["status"] = "replanning";
+    trace_payload["path_changed"] = false;
+    trace_payload["placement_changed"] = false;
     WSHandler::broadcast_json(trace_payload);
     WSHandler::broadcast_json({
         {"type", "session_update"},

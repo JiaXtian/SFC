@@ -311,6 +311,8 @@ sfc::SFCRequest request_from_deployment_record(const nlohmann::json& dep, const 
     request.request_id = dep.value("request_id", dep.value("deployment_id", std::string("")));
     request.service_type = dep.value("service_type", std::string("open5gs_core"));
     request.network_domain = dep.value("network_domain", std::string("open5gs"));
+    request.custom_core_graph = dep.value("custom_core_graph", false);
+    request.allow_partial_core_nfs = dep.value("allow_partial_core_nfs", request.custom_core_graph);
     request.optimize = dep.value("optimize", std::string("latency"));
     request.topk = 1;
     request.realtime_mode = true;

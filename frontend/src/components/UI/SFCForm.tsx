@@ -38,6 +38,29 @@ const CORE_NF_TYPES = [
   'ausf', 'udm', 'udr', 'pcf', 'nssf', 'bsf',
 ] as const
 
+type DependencyEndpoint = typeof CORE_NF_TYPES[number]
+const REQUIRED_VALIDATION_NFS = ['nrf', 'amf', 'smf', 'upf', 'ausf', 'udm', 'udr', 'pcf'] as const satisfies readonly DependencyEndpoint[]
+const isRequiredValidationNf = (type: string) =>
+  (REQUIRED_VALIDATION_NFS as readonly string[]).includes(normalizeNfType(type))
+const nfDisplay = (type: string) => normalizeNfType(type).toUpperCase()
+
+interface CoreDependencyConfig {
+  source: DependencyEndpoint
+  target: DependencyEndpoint
+  criticality: number
+  bandwidth_scale: number
+  latency_weight: number
+  reliability_weight: number
+  bandwidth_required_gbps: number
+}
+
+type CoreDependencyInput = Omit<Partial<CoreDependencyConfig>, 'source' | 'target'> & {
+  source: string
+  target: string
+}
+
+const normalizeNfType = (v: string) => String(v || '').trim().toLowerCase().replace(/[-\s]+/g, '_')
+
 const CORE_NF_DEPENDENCIES = [
   { source: 'nrf', target: 'scp', criticality: 0.88, bandwidth_scale: 0.55, latency_weight: 0.8, reliability_weight: 0.82 },
   { source: 'scp', target: 'amf', criticality: 1.0, bandwidth_scale: 0.72, latency_weight: 1.0, reliability_weight: 1.0 },
@@ -59,7 +82,26 @@ const CORE_NF_DEPENDENCIES = [
   { source: 'udm', target: 'udr', criticality: 0.86, bandwidth_scale: 0.56, latency_weight: 0.78, reliability_weight: 0.86 },
   { source: 'pcf', target: 'udr', criticality: 0.64, bandwidth_scale: 0.34, latency_weight: 0.56, reliability_weight: 0.64 },
   { source: 'pcf', target: 'bsf', criticality: 0.52, bandwidth_scale: 0.28, latency_weight: 0.5, reliability_weight: 0.52 },
-]
+] as const
+
+const defaultDependencyBandwidth = (bandwidthScale: number) => Math.max(0.05, Number(bandwidthScale) || 0.2)
+
+const makeDependencyConfig = (dep: CoreDependencyInput): CoreDependencyConfig => ({
+  source: normalizeNfType(dep.source) as DependencyEndpoint,
+  target: normalizeNfType(dep.target) as DependencyEndpoint,
+  criticality: Number.isFinite(dep.criticality) ? Number(dep.criticality) : 0.8,
+  bandwidth_scale: Number.isFinite(dep.bandwidth_scale) ? Number(dep.bandwidth_scale) : 0.5,
+  latency_weight: Number.isFinite(dep.latency_weight) ? Number(dep.latency_weight) : 1.0,
+  reliability_weight: Number.isFinite(dep.reliability_weight) ? Number(dep.reliability_weight) : 1.0,
+  bandwidth_required_gbps: Number.isFinite(dep.bandwidth_required_gbps)
+    ? Math.max(0.01, Number(dep.bandwidth_required_gbps))
+    : defaultDependencyBandwidth(Number(dep.bandwidth_scale)),
+})
+
+const makeDefaultDependencies = () => CORE_NF_DEPENDENCIES.map(makeDependencyConfig)
+
+const dependencyLabel = (dep: Pick<CoreDependencyConfig, 'source' | 'target'>) =>
+  `${String(dep.source).toUpperCase()} -> ${String(dep.target).toUpperCase()}`
 
 interface VNFConfig {
   type: VNFTemplateName
@@ -85,10 +127,9 @@ const sfcTemplates = [
       min_bandwidth_gbps: 1.0,
       min_reliability: 0.72,
     },
+    dependencies: makeDefaultDependencies(),
   },
 ]
-
-const normalizeNfType = (v: string) => String(v || '').trim().toLowerCase().replace(/[-\s]+/g, '_')
 
 const makeNfConfig = (type: VNFTemplateName, idx: number): VNFConfig => ({
   type,
@@ -109,6 +150,74 @@ const normalizeFullCoreNfs = (vnfs: VNFConfig[]): VNFConfig[] => {
       ? { ...makeNfConfig(type, idx), ...existing, type }
       : makeNfConfig(type, idx)
   })
+}
+
+const normalizeCustomCoreNfs = (vnfs: VNFConfig[]): VNFConfig[] => {
+  const seen = new Set<string>()
+  const out: VNFConfig[] = []
+  vnfs.forEach((v) => {
+    const type = normalizeNfType(v.type) as VNFTemplateName
+    if (!CORE_NF_TYPES.includes(type) || seen.has(type)) return
+    seen.add(type)
+    out.push({ ...makeNfConfig(type, out.length), ...v, type })
+  })
+  return out
+}
+
+interface DependencyGraphCheck {
+  valid: boolean
+  activeTypes: string[]
+  missingRequired: string[]
+  isolatedTypes: string[]
+  componentTypes: string[][]
+  validEdgeCount: number
+}
+
+const analyzeDependencyGraph = (vnfs: VNFConfig[], dependencies: CoreDependencyConfig[]): DependencyGraphCheck => {
+  const activeTypes = normalizeCustomCoreNfs(vnfs).map(v => normalizeNfType(v.type))
+  const activeSet = new Set(activeTypes)
+  const missingRequired = REQUIRED_VALIDATION_NFS
+    .map(type => String(type))
+    .filter(type => !activeSet.has(type))
+  const adj = new Map<string, Set<string>>()
+  activeTypes.forEach(type => adj.set(type, new Set()))
+  const seenEdges = new Set<string>()
+  dependencies.forEach((dep) => {
+    const source = normalizeNfType(dep.source)
+    const target = normalizeNfType(dep.target)
+    if (!source || !target || source === target || !activeSet.has(source) || !activeSet.has(target)) return
+    const key = `${source}->${target}`
+    if (seenEdges.has(key)) return
+    seenEdges.add(key)
+    adj.get(source)?.add(target)
+    adj.get(target)?.add(source)
+  })
+  const isolatedTypes = activeTypes.filter(type => (adj.get(type)?.size ?? 0) === 0)
+  const visited = new Set<string>()
+  const componentTypes: string[][] = []
+  activeTypes.forEach((type) => {
+    if (visited.has(type)) return
+    const stack = [type]
+    const component: string[] = []
+    visited.add(type)
+    while (stack.length > 0) {
+      const cur = stack.pop()!
+      component.push(cur)
+      adj.get(cur)?.forEach((next) => {
+        if (visited.has(next)) return
+        visited.add(next)
+        stack.push(next)
+      })
+    }
+    componentTypes.push(component)
+  })
+  const valid =
+    activeTypes.length > 0 &&
+    missingRequired.length === 0 &&
+    seenEdges.size > 0 &&
+    isolatedTypes.length === 0 &&
+    componentTypes.length === 1
+  return { valid, activeTypes, missingRequired, isolatedTypes, componentTypes, validEdgeCount: seenEdges.size }
 }
 
 function InfoHint({ text }: { text: string }) {
@@ -144,6 +253,7 @@ export default function SFCForm() {
   const [customSFC, setCustomSFC] = useState({
     name: '自定义核心网',
     vnfs: CORE_NF_TYPES.map((type, idx) => makeNfConfig(type, idx)) as VNFConfig[],
+    dependencies: makeDefaultDependencies(),
     constraints: {
       max_latency_ms: 320,
       registration_latency_ms: 85,
@@ -156,6 +266,7 @@ export default function SFCForm() {
     optimize: 'latency',
   })
   const [bindingGroups, setBindingGroups] = useState<Array<{ id: string; members: number[] }>>([])
+  const [nfTypeToAdd, setNfTypeToAdd] = useState<VNFTemplateName | ''>('')
 
   const [inferenceProfile, setInferenceProfile] = useState<'fast' | 'balanced' | 'quality'>('fast')
   const inferenceProfileConfig = useMemo(() => {
@@ -181,6 +292,45 @@ export default function SFCForm() {
     () => scoreWeights.latency + scoreWeights.resource + scoreWeights.reliability + scoreWeights.bandwidth,
     [scoreWeights]
   )
+  const customActiveTypes = useMemo(
+    () => normalizeCustomCoreNfs(customSFC.vnfs).map(v => normalizeNfType(v.type)),
+    [customSFC.vnfs]
+  )
+  const missingCustomNfTypes = useMemo(
+    () => CORE_NF_TYPES.filter(type => !customActiveTypes.includes(type)),
+    [customActiveTypes]
+  )
+  const customGraphCheck = useMemo(
+    () => analyzeDependencyGraph(customSFC.vnfs, customSFC.dependencies),
+    [customSFC.vnfs, customSFC.dependencies]
+  )
+  const customGraphStatusText = useMemo(() => {
+    if (customGraphCheck.valid) {
+      return `依赖图已联通，活动网元 ${customGraphCheck.activeTypes.length}/12，依赖边 ${customGraphCheck.validEdgeCount} 条`
+    }
+    if (customGraphCheck.missingRequired.length > 0) {
+      return `缺少功能验证关键网元：${customGraphCheck.missingRequired.map(nfDisplay).join('、')}`
+    }
+    if (customGraphCheck.validEdgeCount === 0) {
+      return '未配置有效功能依赖边，不能生成部署策略'
+    }
+    if (customGraphCheck.isolatedTypes.length > 0) {
+      return `仍未接入依赖图的网元：${customGraphCheck.isolatedTypes.map(nfDisplay).join('、')}`
+    }
+    if (customGraphCheck.componentTypes.length > 1) {
+      return `依赖图存在 ${customGraphCheck.componentTypes.length} 个不连通分量`
+    }
+    return '依赖图配置未通过检查'
+  }, [customGraphCheck])
+  useEffect(() => {
+    if (missingCustomNfTypes.length === 0) {
+      if (nfTypeToAdd !== '') setNfTypeToAdd('')
+      return
+    }
+    if (!nfTypeToAdd || !missingCustomNfTypes.includes(nfTypeToAdd)) {
+      setNfTypeToAdd(missingCustomNfTypes[0])
+    }
+  }, [missingCustomNfTypes, nfTypeToAdd])
   useEffect(() => {
     setBindingGroups(prev =>
       prev
@@ -208,6 +358,84 @@ export default function SFCForm() {
       next[index] = { ...next[index], [field]: value }
       return { ...prev, vnfs: next }
     })
+  }
+
+  const addCoreNf = () => {
+    const selected = nfTypeToAdd || missingCustomNfTypes[0]
+    if (!selected) return
+    setCustomSFC(prev => {
+      const active = new Set(normalizeCustomCoreNfs(prev.vnfs).map(v => normalizeNfType(v.type)))
+      if (prev.vnfs.length >= CORE_NF_TYPES.length || active.has(selected)) return prev
+      return {
+        ...prev,
+        vnfs: [...prev.vnfs, makeNfConfig(selected, prev.vnfs.length)],
+      }
+    })
+  }
+
+  const removeCoreNf = (index: number) => {
+    const target = customSFC.vnfs[index]
+    if (!target) return
+    const targetType = normalizeNfType(target.type)
+    if (isRequiredValidationNf(targetType)) {
+      openSystemPopup(
+        '关键网元不可删除',
+        `${nfDisplay(targetType)} 是 UE 注册、PDU Session 或业务面验证所需的关键网元，只允许调整其计算资源。`,
+        'warning',
+      )
+      return
+    }
+    setCustomSFC(prev => ({
+      ...prev,
+      vnfs: prev.vnfs.filter((_, i) => i !== index),
+      dependencies: prev.dependencies.filter(dep =>
+        normalizeNfType(dep.source) !== targetType && normalizeNfType(dep.target) !== targetType
+      ),
+    }))
+    setBindingGroups(prev =>
+      prev
+        .map(group => ({
+          ...group,
+          members: group.members
+            .filter(member => member !== index)
+            .map(member => (member > index ? member - 1 : member)),
+        }))
+        .filter(group => group.members.length > 0)
+    )
+  }
+
+  const updateDependencyField = (index: number, field: keyof CoreDependencyConfig, value: any) => {
+    setCustomSFC(prev => {
+      const next = [...prev.dependencies]
+      const current = next[index] || makeDependencyConfig({ source: 'amf', target: 'smf' })
+      next[index] = makeDependencyConfig({ ...current, [field]: value })
+      return { ...prev, dependencies: next }
+    })
+  }
+
+  const addDependencyEdge = () => {
+    setCustomSFC(prev => {
+      const activeTypes = normalizeCustomCoreNfs(prev.vnfs).map(v => normalizeNfType(v.type) as DependencyEndpoint)
+      const used = new Set(prev.dependencies.map(dep => `${dep.source}->${dep.target}`))
+      const pair =
+        activeTypes.flatMap(source => activeTypes.map(target => ({ source, target })))
+          .find(dep => dep.source !== dep.target && !used.has(`${dep.source}->${dep.target}`))
+      if (!pair) return prev
+      return {
+        ...prev,
+        dependencies: [
+          ...prev.dependencies,
+          makeDependencyConfig({ ...pair, criticality: 0.85, bandwidth_scale: 0.5 }),
+        ],
+      }
+    })
+  }
+
+  const removeDependencyEdge = (index: number) => {
+    setCustomSFC(prev => ({
+      ...prev,
+      dependencies: prev.dependencies.filter((_, i) => i !== index),
+    }))
   }
 
   const addBindingGroup = () => {
@@ -275,6 +503,10 @@ export default function SFCForm() {
   )
 
   const submit = async () => {
+    if (mode === 'custom' && !customGraphCheck.valid) {
+      openSystemPopup('功能依赖图配置错误', customGraphStatusText, 'warning')
+      return
+    }
     if (!backendTopologySynced) {
       openSystemPopup('无法生成部署策略', '当前星座未完成后端同步，无法规划部署。请先重新生成/导入并确认同步成功。', 'warning')
       return
@@ -324,11 +556,44 @@ export default function SFCForm() {
               name: selectedTpl.name,
               vnfs: selectedTpl.vnfs.map((type, idx) => makeNfConfig(type, idx)),
               constraints: selectedTpl.constraints,
+              dependencies: selectedTpl.dependencies,
               optimize: templateAdvanced.optimize,
             }
           : customSFC
 
-      const fullCoreVnfs = normalizeFullCoreNfs(sfc.vnfs as VNFConfig[])
+      const activeCoreVnfs = mode === 'template'
+        ? normalizeFullCoreNfs(sfc.vnfs as VNFConfig[])
+        : normalizeCustomCoreNfs(sfc.vnfs as VNFConfig[])
+      const dependencyPayload = (mode === 'template' ? selectedTpl.dependencies : customSFC.dependencies)
+        .map(dep => makeDependencyConfig(dep))
+      const validNfTypes = mode === 'custom'
+        ? new Set<string>(activeCoreVnfs.map(v => normalizeNfType(v.type)))
+        : new Set<string>(CORE_NF_TYPES)
+      const seenDependencies = new Set<string>()
+      for (const dep of dependencyPayload) {
+        if (!validNfTypes.has(dep.source) || !validNfTypes.has(dep.target)) {
+          openSystemPopup('依赖图配置错误', `依赖边 ${dependencyLabel(dep)} 包含未知网元。`, 'warning')
+          setBusy(false)
+          return
+        }
+        if (dep.source === dep.target) {
+          openSystemPopup('依赖图配置错误', `依赖边 ${dependencyLabel(dep)} 两端不能为同一网元。`, 'warning')
+          setBusy(false)
+          return
+        }
+        const edgeKey = `${dep.source}->${dep.target}`
+        if (seenDependencies.has(edgeKey)) {
+          openSystemPopup('依赖图配置错误', `依赖边 ${dependencyLabel(dep)} 重复，请删除重复项后再生成策略。`, 'warning')
+          setBusy(false)
+          return
+        }
+        seenDependencies.add(edgeKey)
+      }
+      if (dependencyPayload.length === 0) {
+        openSystemPopup('依赖图配置错误', '至少需要保留 1 条功能依赖边。', 'warning')
+        setBusy(false)
+        return
+      }
       const reqId = `req-${Date.now()}`
       const optimizeMode = enableCustomWeights ? 'custom' : sfc.optimize || 'latency'
       const customBindingPayload =
@@ -336,19 +601,19 @@ export default function SFCForm() {
           ? bindingGroups
               .map(group =>
                 Array.from(new Set(group.members))
-                  .map(idx => normalizeNfType(fullCoreVnfs[idx]?.type || ''))
+                  .map(idx => normalizeNfType(activeCoreVnfs[idx]?.type || ''))
                   .filter(Boolean)
               )
               .filter(group => group.length >= 2)
           : []
       const independentNfPayload =
         mode === 'custom'
-          ? fullCoreVnfs
+          ? activeCoreVnfs
               .filter(v => !!v.independent)
               .map(v => normalizeNfType(v.type || v.name || ''))
               .filter(Boolean)
           : []
-      const coreNfs = fullCoreVnfs.map((v: any, idx: number) => {
+      const coreNfs = activeCoreVnfs.map((v: any, idx: number) => {
         const nfType = String(v.type || v.nf_type || v.name || 'amf')
         const nfName = v.name?.trim() || `core-nf-${idx + 1}-${nfType}`
         return {
@@ -374,7 +639,10 @@ export default function SFCForm() {
         core_nfs: coreNfs,
         core_nf_sequence: coreNfs,
         vnfs: coreNfs,
-        core_nf_dependencies: CORE_NF_DEPENDENCIES,
+        core_nf_dependencies: dependencyPayload,
+        custom_core_graph: mode === 'custom',
+        allow_partial_core_nfs: mode === 'custom',
+        active_core_nf_types: coreNfs.map((nf: any) => normalizeNfType(nf.nf_type || nf.core_nf_type || nf.name || '')),
         constraints: sfc.constraints,
         optimize: optimizeMode,
         topk: 1,
@@ -519,8 +787,6 @@ export default function SFCForm() {
     setBusy(false)
   }
 
-  const selectedTpl = sfcTemplates[selectedTemplate]
-
   return (
     <div className="space-y-3 h-full pr-1 pb-2 text-slate-100">
       <div className="flex gap-2">
@@ -591,7 +857,9 @@ export default function SFCForm() {
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="text-[11px] font-semibold text-cyan-100">{tpl.name} 模板详情</div>
-                        <div className="text-[9px] text-slate-400 font-mono">{tpl.vnfs.length} Core NFs</div>
+                        <div className="text-[9px] text-slate-400 font-mono">
+                          {tpl.vnfs.length} Core NFs · {tpl.dependencies.length} Edges
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-4 gap-1.5 mb-2">
@@ -621,7 +889,7 @@ export default function SFCForm() {
                           <div className="px-2 py-1">核心网网元</div>
                           <div className="px-2 py-1 text-right">CPU</div>
                           <div className="px-2 py-1 text-right">MEM</div>
-                          <div className="px-2 py-1 text-right">BW in/out</div>
+                          <div className="px-2 py-1 text-right">DISK</div>
                         </div>
 
                         {tpl.vnfs.map((type, idx) => {
@@ -640,12 +908,38 @@ export default function SFCForm() {
                               </div>
                               <div className="px-2 py-1 text-right text-slate-300 font-mono">{vnf.cpu}</div>
                               <div className="px-2 py-1 text-right text-slate-300 font-mono">{vnf.mem}</div>
-                              <div className="px-2 py-1 text-right text-slate-300 font-mono">
-                                {vnf.bw_in}/{vnf.bw_out}
-                              </div>
+                              <div className="px-2 py-1 text-right text-slate-300 font-mono">{vnf.disk}</div>
                             </div>
                           )
                         })}
+                      </div>
+
+                      <div className="mt-2 rounded-md overflow-hidden" style={{ border: '1px solid rgba(83,114,138,0.22)' }}>
+                        <div
+                          className="grid grid-cols-[1.5fr_0.8fr] text-[8px] uppercase tracking-wider"
+                          style={{ background: 'rgba(14,27,44,0.95)', color: '#94a3b8' }}
+                        >
+                          <div className="px-2 py-1">模板功能依赖边</div>
+                          <div className="px-2 py-1 text-right">需求带宽</div>
+                        </div>
+                        {tpl.dependencies.slice(0, 6).map((dep, idx) => (
+                          <div
+                            key={`${dep.source}-${dep.target}-${idx}`}
+                            className="grid grid-cols-[1.5fr_0.8fr] text-[9px]"
+                            style={{
+                              background: idx % 2 === 0 ? 'rgba(9,18,31,0.92)' : 'rgba(7,15,26,0.92)',
+                              borderTop: idx === 0 ? 'none' : '1px solid rgba(78,102,122,0.16)',
+                            }}
+                          >
+                            <div className="px-2 py-1 text-cyan-100 font-mono">{dependencyLabel(dep)}</div>
+                            <div className="px-2 py-1 text-right text-slate-300 font-mono">
+                              {dep.bandwidth_required_gbps.toFixed(2)}G
+                            </div>
+                          </div>
+                        ))}
+                        <div className="px-2 py-1 text-[9px] text-slate-500">
+                          共 {tpl.dependencies.length} 条边，默认总需求 {tpl.dependencies.reduce((sum, dep) => sum + dep.bandwidth_required_gbps, 0).toFixed(2)}Gbps
+                        </div>
                       </div>
                     </div>
                   )}
@@ -725,13 +1019,41 @@ export default function SFCForm() {
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">完整核心网网元列表 ({customSFC.vnfs.length}/12)</div>
+              <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">活动核心网网元列表 ({customSFC.vnfs.length}/12)</div>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={nfTypeToAdd}
+                  onChange={e => setNfTypeToAdd(e.target.value as VNFTemplateName)}
+                  disabled={missingCustomNfTypes.length === 0}
+                  className="h-7 px-2 rounded text-[10px]"
+                  style={{
+                    background: missingCustomNfTypes.length === 0 ? 'rgba(9,17,31,0.45)' : 'rgba(9,17,31,0.9)',
+                    border: '1px solid rgba(98,128,152,0.25)',
+                    color: missingCustomNfTypes.length === 0 ? '#64748b' : '#dff6ff',
+                  }}
+                >
+                  {missingCustomNfTypes.length === 0
+                    ? <option value="">已达到12个网元</option>
+                    : missingCustomNfTypes.map(type => (
+                      <option key={type} value={type}>{type.toUpperCase()}</option>
+                    ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={addCoreNf}
+                  disabled={missingCustomNfTypes.length === 0}
+                  className="h-7 px-2 rounded text-[10px] font-bold flex items-center gap-1 transition hover:bg-white/5 disabled:opacity-50 disabled:hover:bg-transparent"
+                  style={{ color: '#67e8f9' }}
+                >
+                  <Plus className="w-3 h-3" /> 新增网元
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
               {customSFC.vnfs.map((vnf, i) => (
                 <div key={i} className="p-2.5 rounded-lg" style={{ background: 'rgba(12,22,38,0.86)', border: '1px solid rgba(96,125,149,0.23)' }}>
-                  <div className="grid grid-cols-[48px_1fr] gap-2 mb-2 items-center">
+                  <div className="grid grid-cols-[42px_76px_1fr_28px] gap-2 mb-2 items-center">
                     <span className="text-[10px] text-slate-500 font-mono">#{i + 1}</span>
                     <select
                       value={vnf.type}
@@ -746,10 +1068,6 @@ export default function SFCForm() {
                         </option>
                       ))}
                     </select>
-                  </div>
-
-                  <div className="mb-2">
-                    <div className="text-[10px] text-slate-500 mb-0.5">网元名称（自定义）</div>
                     <input
                       type="text"
                       value={vnf.name}
@@ -757,6 +1075,15 @@ export default function SFCForm() {
                       className="w-full px-2 py-1 rounded text-xs"
                       style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.25)', color: '#fff' }}
                     />
+                    <button
+                      type="button"
+                      onClick={() => removeCoreNf(i)}
+                      disabled={isRequiredValidationNf(vnf.type)}
+                      className="h-7 w-7 rounded inline-flex items-center justify-center transition disabled:opacity-35 disabled:cursor-not-allowed hover:bg-red-900/30"
+                      title={isRequiredValidationNf(vnf.type) ? '功能验证关键网元不可删除' : '删除该网元'}
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-slate-500 hover:text-red-400" />
+                    </button>
                   </div>
 
                   <label className="mb-2 flex items-center justify-between gap-2 rounded px-2 py-1.5 text-[10px] cursor-pointer" style={{ background: 'rgba(8,17,31,0.68)', border: '1px solid rgba(98,128,152,0.18)' }}>
@@ -769,13 +1096,11 @@ export default function SFCForm() {
                     />
                   </label>
 
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
                     {[
                       ['cpu', 'CPU', 0.1],
                       ['mem', 'MEM (GB)', 0.1],
                       ['disk', 'DISK (GB)', 0.1],
-                      ['bw_in', 'BW IN (Gbps)', 0.1],
-                      ['bw_out', 'BW OUT (Gbps)', 0.1],
                     ].map(([field, label, step]) => (
                       <div key={field} className={field === 'disk' ? '' : ''}>
                         <div className="text-slate-500 mb-0.5">{label}</div>
@@ -792,6 +1117,101 @@ export default function SFCForm() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(10,19,33,0.5)', border: '1px solid rgba(92,123,150,0.22)' }}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] text-slate-300 uppercase tracking-wider font-semibold">
+                功能依赖图边 ({customSFC.dependencies.length})
+              </div>
+              <button
+                onClick={addDependencyEdge}
+                disabled={customActiveTypes.length < 2}
+                className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition hover:bg-white/5 disabled:opacity-50 disabled:hover:bg-transparent"
+                style={{ color: '#67e8f9' }}
+              >
+                <Plus className="w-3 h-3" /> 新增依赖边
+              </button>
+            </div>
+            <div
+              className={`mb-2 px-2 py-1.5 rounded text-[10px] leading-relaxed ${
+                customGraphCheck.valid ? 'text-emerald-200' : 'text-amber-200'
+              }`}
+              style={{
+                background: customGraphCheck.valid ? 'rgba(16,185,129,0.10)' : 'rgba(245,158,11,0.10)',
+                border: customGraphCheck.valid ? '1px solid rgba(74,222,128,0.22)' : '1px solid rgba(251,191,36,0.24)',
+              }}
+            >
+              {customGraphStatusText}
+            </div>
+
+            <div
+              className="grid grid-cols-[1fr_18px_1fr_86px_28px] gap-1.5 px-2 py-1 text-[9px] uppercase tracking-wider rounded-t-md"
+              style={{ background: 'rgba(14,27,44,0.8)', color: '#94a3b8' }}
+            >
+              <div>源网元</div>
+              <div></div>
+              <div>目标网元</div>
+              <div className="text-right">带宽(G)</div>
+              <div></div>
+            </div>
+
+            <div className="max-h-[260px] overflow-y-auto pr-1 rounded-b-md" style={{ border: '1px solid rgba(83,114,138,0.18)', borderTop: 'none' }}>
+              {customSFC.dependencies.map((dep, i) => (
+                <div
+                  key={`${dep.source}-${dep.target}-${i}`}
+                  className="grid grid-cols-[1fr_18px_1fr_86px_28px] gap-1.5 items-center px-2 py-1.5 text-[10px]"
+                  style={{
+                    background: i % 2 === 0 ? 'rgba(9,18,31,0.88)' : 'rgba(7,15,26,0.86)',
+                    borderTop: i === 0 ? 'none' : '1px solid rgba(78,102,122,0.16)',
+                  }}
+                >
+                  <select
+                    value={dep.source}
+                    onChange={e => updateDependencyField(i, 'source', e.target.value as DependencyEndpoint)}
+                    className="w-full px-1.5 py-1 rounded text-[10px]"
+                    style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.22)', color: '#dff6ff' }}
+                  >
+                    {customActiveTypes.map(name => (
+                      <option key={`src-${name}`} value={name}>{name.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <div className="text-center text-slate-500">→</div>
+                  <select
+                    value={dep.target}
+                    onChange={e => updateDependencyField(i, 'target', e.target.value as DependencyEndpoint)}
+                    className="w-full px-1.5 py-1 rounded text-[10px]"
+                    style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.22)', color: '#dff6ff' }}
+                  >
+                    {customActiveTypes.map(name => (
+                      <option key={`dst-${name}`} value={name}>{name.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={dep.bandwidth_required_gbps}
+                    onChange={e => updateDependencyField(i, 'bandwidth_required_gbps', parseFloat(e.target.value) || 0.01)}
+                    className="w-full px-1.5 py-1 rounded text-[10px] text-right"
+                    style={{ background: 'rgba(9,17,31,0.9)', border: '1px solid rgba(98,128,152,0.22)', color: '#fff' }}
+                  />
+                  <button onClick={() => removeDependencyEdge(i)} className="p-1 rounded hover:bg-red-900/30 transition" title="删除依赖边">
+                    <Trash2 className="w-3.5 h-3.5 text-slate-500 hover:text-red-400" />
+                  </button>
+                </div>
+              ))}
+              {customSFC.dependencies.length === 0 && (
+                <div className="px-2 py-2 text-[10px] text-amber-300">未配置依赖边，当前自定义核心网不能生成部署策略。</div>
+              )}
+            </div>
+
+            <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+              <span>默认模板基础上可编辑</span>
+              <span className="font-mono">
+                Σ {customSFC.dependencies.reduce((sum, dep) => sum + Number(dep.bandwidth_required_gbps || 0), 0).toFixed(2)}Gbps
+              </span>
             </div>
           </div>
 

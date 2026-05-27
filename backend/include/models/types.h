@@ -380,6 +380,8 @@ struct SFCRequest {
     std::vector<CoreNFDependency> core_nf_dependencies;
     std::vector<std::vector<std::string>> custom_nf_bindings;
     std::vector<std::string> independent_core_nfs;
+    bool custom_core_graph = false;
+    bool allow_partial_core_nfs = false;
     struct {
         double max_latency_ms;
         double registration_latency_ms = 120.0;

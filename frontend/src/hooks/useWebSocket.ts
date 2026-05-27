@@ -54,6 +54,61 @@ function sfcLabelByDeploymentId(deploymentId: string): string {
   })
 }
 
+const PATH_RECOMPUTE_TRIGGERS = new Set([
+  'anchor_path_disconnected',
+  'resource_or_link_fault',
+  'link_recovery_reroute',
+])
+
+function linkSignature(links: any[]): string {
+  if (!Array.isArray(links) || links.length === 0) return ''
+  return links
+    .map((l: any) => `${String(l?.src ?? '')}->${String(l?.dst ?? '')}`)
+    .filter((x) => x !== '->')
+    .join('|')
+}
+
+function nodeSignature(nodes: any[]): string {
+  if (!Array.isArray(nodes) || nodes.length === 0) return ''
+  return nodes.map((n) => String(n ?? '')).filter(Boolean).join('|')
+}
+
+function bestTraceCandidate(trace: any): any {
+  const candidates = Array.isArray(trace?.candidates) ? trace.candidates : []
+  return candidates.find((c: any) => !!c?.satisfies_constraints) ?? candidates[0] ?? null
+}
+
+function pathTraceAffectsDeployment(trace: any): boolean {
+  const trigger = String(trace?.trigger ?? '')
+  if (!PATH_RECOMPUTE_TRIGGERS.has(trigger)) return true
+  const st = useStore.getState()
+  const sid = String(trace?.session_id ?? '')
+  const rid = String(trace?.request_id ?? '')
+  const coreId = String(trace?.core_network_id ?? '')
+  const existing = st.deployments.find((dep: any) =>
+    (!!sid && String(dep?.session_id ?? '') === sid) ||
+    (!!rid && String(dep?.request_id ?? '') === rid) ||
+    (!!coreId && String(dep?.core_network_id ?? '') === coreId)
+  ) as any
+  const chosen = bestTraceCandidate(trace)
+  if (!existing || !chosen) return Boolean((trace as any)?.path_changed ?? true)
+  if ((trace as any)?.path_changed === true || (trace as any)?.placement_changed === true) return true
+
+  const oldPath = linkSignature(existing?.link_details)
+  const nextPath = linkSignature(chosen?.link_details)
+  if ((oldPath || nextPath) && oldPath !== nextPath) return true
+
+  const oldNodes = nodeSignature(existing?.deployed_nodes)
+  const nextNodes = nodeSignature(chosen?.deployed_nodes)
+  if ((oldNodes || nextNodes) && oldNodes !== nextNodes) return true
+
+  const metricChanged =
+    Math.abs(Number(existing?.bottleneck_bandwidth_gbps ?? 0) - Number(chosen?.bottleneck_bandwidth_gbps ?? 0)) > 1e-4 ||
+    Math.abs(Number(existing?.total_latency_ms ?? 0) - Number(chosen?.total_latency_ms ?? 0)) > 1e-3 ||
+    Math.abs(Number(existing?.estimated_reliability ?? 0) - Number(chosen?.estimated_reliability ?? 0)) > 1e-6
+  return metricChanged
+}
+
 export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) {
   const ref = useRef<WebSocket | null>(null)
   const reconnectRef = useRef<number | null>(null)
@@ -247,9 +302,11 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
             }
             if (type === 'decision_trace') {
               const trace = data as any
+              const trigger = String(trace?.trigger ?? '')
+              const isPathRecomputeTrace = PATH_RECOMPUTE_TRIGGERS.has(trigger)
+              const affectedByPathRecompute = pathTraceAffectsDeployment(trace)
               pushDecisionTrace(trace)
               upsertSessionDeploymentFromTrace(trace)
-              const trigger = String(trace?.trigger ?? '')
               const sessionId = String(trace?.session_id ?? trace?.request_id ?? 'unknown')
               const sfcLabel = sfcLabelByIds(String(trace?.session_id ?? ''), String(trace?.request_id ?? ''))
               const key = `${sessionId}:${trigger}`
@@ -275,11 +332,12 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               } else if (
                 trigger === 'deployment_node_down' ||
                 trigger === 'anchor_path_disconnected' ||
-                trigger === 'resource_or_link_fault'
+                trigger === 'resource_or_link_fault' ||
+                trigger === 'link_recovery_reroute'
               ) {
-                if (now - last > 8000) {
+                const isNodeRedeploy = trigger === 'deployment_node_down'
+                if ((isNodeRedeploy || affectedByPathRecompute) && now - last > 8000) {
                   endpointFaultPopupCooldownRef.current[key] = now
-                  const isNodeRedeploy = trigger === 'deployment_node_down'
                   pushRuntimeEvent({
                     type: isNodeRedeploy ? 'reschedule_trigger' : 'path_recompute_trigger',
                     sim_time: data.sim_time,
@@ -295,18 +353,24 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                   })
                 }
               }
-              pushRuntimeEvent({
-                type: 'decision_trace',
-                sim_time: data.sim_time,
-                message: `策略决策完成: ${data.request_id} [${data.mode ?? 'single'}]`,
-                raw: { ...data, sfc_name: sfcLabel },
-              })
+              if (!isPathRecomputeTrace || affectedByPathRecompute) {
+                pushRuntimeEvent({
+                  type: 'decision_trace',
+                  sim_time: data.sim_time,
+                  message: `策略决策完成: ${data.request_id} [${data.mode ?? 'single'}]`,
+                  raw: { ...data, sfc_name: sfcLabel },
+                })
+              }
               return
             }
             if (type === 'session_update') {
               const sid = String(data.session_id ?? '')
               const rid = String(data.request_id ?? '')
               const sfcLabel = sfcLabelByIds(sid, rid)
+              const sessionTrigger = String(data.trigger ?? '')
+              if (PATH_RECOMPUTE_TRIGGERS.has(sessionTrigger) && String(data.status ?? '') === 'stable') {
+                return
+              }
               pushRuntimeEvent({
                 type,
                 sim_time: data.sim_time,
@@ -329,6 +393,16 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                 : (type === 'recovery_event' ? '恢复事件' : '故障更新')
               const entityType = String(data.entity_type ?? 'entity')
               const entityId = String(data.entity_id ?? '')
+              const eventTrigger = String(data.trigger ?? '')
+              const recoveryStrategy = String(data.strategy ?? '')
+              if (
+                type === 'recovery_event' &&
+                entityType === 'session' &&
+                PATH_RECOMPUTE_TRIGGERS.has(eventTrigger) &&
+                (recoveryStrategy === 'hold_and_observe' || String(data.result ?? '') === 'stable')
+              ) {
+                return
+              }
               const entity = entityType === 'session'
                 ? sfcLabelByIds(entityId, String(data.request_id ?? ''))
                 : (entityType === 'link' ? `链路:${entityId}` : `节点:${entityId}`)
