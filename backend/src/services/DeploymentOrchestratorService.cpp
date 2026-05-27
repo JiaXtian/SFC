@@ -48,6 +48,35 @@ constexpr int kSbiPortScp = 7785;
 constexpr int kSbiPortBsf = 7786;
 constexpr int kSbiPortSepp = 7787;
 
+bool deployment_runtime_enabled_snapshot(const std::string& deployment_id) {
+    if (deployment_id.empty()) return false;
+    const nlohmann::json records = list_deployment_records();
+    if (!records.is_array()) return true;
+    for (const auto& dep : records) {
+        if (!dep.is_object()) continue;
+        const std::string dep_id = dep.value("deployment_id", std::string(""));
+        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
+        if (dep_id == deployment_id || backend_id == deployment_id) {
+            return dep.value("runtime_enabled", false);
+        }
+    }
+    return true;
+}
+
+std::string normalize_trigger_token(std::string value) {
+    for (char& ch : value) {
+        if (ch == '-' || ch == ' ') ch = '_';
+        else ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+bool is_partial_redeploy_trigger(const std::string& trigger) {
+    const std::string normalized = normalize_trigger_token(trigger);
+    return normalized.find("partial_node_redeploy") != std::string::npos ||
+        normalized.find("partial_redeploy") != std::string::npos;
+}
+
 double clamp01(double v) {
     if (v < 0.0) return 0.0;
     if (v > 1.0) return 1.0;
@@ -271,10 +300,24 @@ void DeploymentOrchestratorService::enqueue_deployment(
         );
     }
 
-    const int containers_total = static_cast<int>(unique_nf_types(task.candidate.deployed_nodes).size());
+    const auto unique_deployed_nodes = unique_nf_types(task.candidate.deployed_nodes);
+    const int containers_total = static_cast<int>(unique_deployed_nodes.size());
     const int core_nfs_total = static_cast<int>(task.candidate.per_vnf.size());
+    int initial_containers_running = 0;
+    if (is_partial_redeploy_trigger(trigger)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& node : unique_deployed_nodes) {
+            auto it = node_runtime_.find(node);
+            if (it != node_runtime_.end() &&
+                it->second.deployed &&
+                it->second.container_state == "running") {
+                initial_containers_running += 1;
+            }
+        }
+    }
     const nlohmann::json candidate_json = task.candidate.to_json();
     nlohmann::json patch = {
+        {"runtime_enabled", true},
         {"orchestration_phase", "queued"},
         {"orchestration_progress", 5},
         {"orchestration_mode", mode},
@@ -290,7 +333,7 @@ void DeploymentOrchestratorService::enqueue_deployment(
         {"bottleneck_bandwidth_gbps", candidate_json.value("bottleneck_bandwidth_gbps", 0.0)},
         {"reason", candidate_json.value("reason", std::string(""))},
         {"containers_total", containers_total},
-        {"containers_running", 0},
+        {"containers_running", initial_containers_running},
         {"containers_failed", 0},
         {"core_nfs_total", core_nfs_total},
         {"core_nfs_running", 0},
@@ -438,21 +481,45 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     const std::string now = iso_now();
     const auto unique_nodes = unique_nf_types(task.candidate.deployed_nodes);
     const std::unordered_set<std::string> new_node_set(unique_nodes.begin(), unique_nodes.end());
-    const bool partial_redeploy =
-        task.trigger == "partial_node_redeploy" ||
-        task.trigger == "partial_node_redeploy_success";
+    const bool partial_redeploy = is_partial_redeploy_trigger(task.trigger);
+    auto mark_runtime_stopped = [&]() {
+        update_deployment_runtime_state(task.deployment_id, {
+            {"runtime_enabled", false},
+            {"orchestration_phase", "runtime_stopped"},
+            {"orchestration_progress", 0},
+            {"containers_total", static_cast<int>(unique_nodes.size())},
+            {"containers_running", 0},
+            {"containers_failed", 0},
+            {"core_nfs_total", static_cast<int>(task.candidate.per_vnf.size())},
+            {"core_nfs_running", 0},
+            {"core_nfs_failed", 0},
+            {"service_ready", false},
+            {"ready_for_ueransim", false},
+            {"last_error", ""},
+            {"last_update_at", iso_now()}
+        }, true);
+    };
+    auto abort_if_runtime_disabled = [&]() -> bool {
+        if (deployment_runtime_enabled_snapshot(task.deployment_id)) return false;
+        (void)rollback_deployment(task.deployment_id, unique_nodes);
+        mark_runtime_stopped();
+        return true;
+    };
+    if (abort_if_runtime_disabled()) return;
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "stopping_old"},
         {"orchestration_progress", partial_redeploy ? 34 : 12},
         {"last_error", ""},
         {"last_update_at", now}
     }, true);
+    if (abort_if_runtime_disabled()) return;
 
     std::vector<std::string> old_nodes;
     std::vector<std::string> old_containers;
     std::unordered_map<std::string, std::string> old_container_by_node;
     std::unordered_map<std::string, std::string> old_container_state_by_node;
     std::unordered_map<std::string, std::unordered_set<std::string>> old_nfs_by_node;
+    std::unordered_map<std::string, NodeRuntimeSnapshot> old_runtime_by_node;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = deployment_runtime_.find(task.deployment_id);
@@ -465,6 +532,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         }
         for (const auto& kv : node_runtime_) {
             if (kv.second.container_name.empty()) continue;
+            old_runtime_by_node[kv.first] = kv.second;
             old_container_by_node.emplace(kv.first, kv.second.container_name);
             old_container_state_by_node[kv.first] = kv.second.container_state;
             for (const auto& nf : kv.second.running_core_nf_types) {
@@ -557,6 +625,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         fail_deployment("docker_network_unavailable");
         return;
     }
+    if (abort_if_runtime_disabled()) return;
 
     bool has_db_nf = false;
     for (const auto& kv : nfs_by_node) {
@@ -626,16 +695,34 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     active_containers.reserve(unique_nodes.size());
 
     for (const auto& node : unique_nodes) {
-        const std::string container_name = node_to_container_name(task.deployment_id, node);
+        if (abort_if_runtime_disabled()) return;
         const bool retained_running_container =
             partial_redeploy &&
             old_node_set.find(node) != old_node_set.end() &&
             old_container_state_by_node[node] == "running";
+        const auto old_container_it = old_container_by_node.find(node);
+        const std::string container_name = retained_running_container &&
+                old_container_it != old_container_by_node.end() &&
+                !old_container_it->second.empty()
+            ? old_container_it->second
+            : node_to_container_name(task.deployment_id, node);
         NodeRuntimeSnapshot node_state;
+        const auto old_state_it = old_runtime_by_node.find(node);
+        if (retained_running_container && old_state_it != old_runtime_by_node.end()) {
+            node_state = old_state_it->second;
+        }
         node_state.node_id = node;
         node_state.container_name = container_name;
-        node_state.container_state = "starting";
         node_state.deployed = true;
+        if (!retained_running_container) {
+            node_state.container_state = "starting";
+            node_state.service_probe_ok = false;
+            node_state.running_core_nf_types.clear();
+            node_state.core_business_load = zero_business_load();
+            node_state.core_network_load = 0.0;
+        } else {
+            node_state.container_state = "running";
+        }
         update_node_runtime_state(node, node_state);
 
         const bool container_ready = retained_running_container || ensure_satellite_container(container_name, satellite_image, platform);
@@ -691,10 +778,12 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
 
         if (!retained_running_container) containers_running += 1;
         node_state.container_state = "running";
-        node_state.service_probe_ok = false;
-        node_state.running_core_nf_types.clear();
-        node_state.core_business_load = zero_business_load();
-        node_state.core_network_load = 0.0;
+        if (!retained_running_container) {
+            node_state.service_probe_ok = false;
+            node_state.running_core_nf_types.clear();
+            node_state.core_business_load = zero_business_load();
+            node_state.core_network_load = 0.0;
+        }
         update_node_runtime_state(node, node_state);
         node_ip_by_id[node] = node_ip;
         node_container_by_id[node] = container_name;
@@ -758,6 +847,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
         {"last_update_at", iso_now()}
     }, true);
     for (const auto& node : unique_nodes) {
+        if (abort_if_runtime_disabled()) return;
         const auto ip_it = node_ip_by_id.find(node);
         if (ip_it == node_ip_by_id.end()) continue;
         const std::string local_ip = ip_it->second;
@@ -835,6 +925,7 @@ void DeploymentOrchestratorService::process_task(const OrchestrationTask& task) 
     }
 
     bool registration_ok = true;
+    if (abort_if_runtime_disabled()) return;
     update_deployment_runtime_state(task.deployment_id, {
         {"orchestration_phase", "health_check"},
         {"orchestration_progress", 92},
@@ -2169,6 +2260,7 @@ void DeploymentOrchestratorService::update_deployment_runtime_state(
         {"core_nfs_total", merged.value("core_nfs_total", 0)},
         {"core_nfs_running", merged.value("core_nfs_running", 0)},
         {"core_nfs_failed", merged.value("core_nfs_failed", 0)},
+        {"runtime_enabled", merged.value("runtime_enabled", false)},
         {"service_ready", merged.value("service_ready", false)},
         {"ready_for_ueransim", merged.value("ready_for_ueransim", false)},
         {"last_error", merged.value("last_error", "")},

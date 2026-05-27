@@ -167,6 +167,10 @@ class APIClient {
   async rollbackDeployment(id: string) { 
     return (await http.post('/sfc/rollback', { deployment_id: id })).data 
   }
+
+  async setDeploymentRuntime(id: string, enabled: boolean) {
+    return (await http.post('/sfc/deployment/runtime', { deployment_id: id, enabled }, { timeout: 180000 })).data
+  }
   
   async getDeployments() { return (await http.get('/deployments')).data }
   async getUERANSIMDeployments() {

@@ -98,6 +98,7 @@ export interface Deployment {
   core_nfs_total?: number
   core_nfs_running?: number
   core_nfs_failed?: number
+  runtime_enabled?: boolean
   service_ready?: boolean
   ready_for_ueransim?: boolean
   last_error?: string
@@ -1091,6 +1092,55 @@ function orbitalLayoutChanged(current: SatelliteData[], incoming: any[]): boolea
   return false
 }
 
+function deploymentTimestamp(dep: Partial<Deployment>): string {
+  return String(dep.last_update_at ?? dep.deployed_at ?? '')
+}
+
+function extractCoreLabel(raw: any): string {
+  const match = /\b(?:CORE|SFC)[-_\s]?(\d+)\b/i.exec(String(raw ?? ''))
+  if (!match) return ''
+  return `CORE-${String(Number(match[1])).padStart(2, '0')}`
+}
+
+function deploymentScore(dep: Partial<Deployment>): number {
+  return (dep.runtime_enabled ? 1000 : 0) +
+    (dep.service_ready ? 250 : 0) +
+    (dep.ready_for_ueransim ? 250 : 0) +
+    (String(dep.orchestration_phase ?? '') === 'running' ? 120 : 0) +
+    Math.min(80, Number(dep.containers_running ?? 0) * 4) +
+    Math.min(120, Number(dep.core_nfs_running ?? 0) * 4)
+}
+
+function deploymentDedupeKey(dep: Partial<Deployment>): string {
+  const label = extractCoreLabel(dep.core_network_label) ||
+    extractCoreLabel(dep.sfc_name) ||
+    extractCoreLabel((dep as any).name) ||
+    extractCoreLabel(dep.deployment_id) ||
+    extractCoreLabel(dep.backend_deployment_id)
+  if (label) return `label:${label}`
+  const coreId = String(dep.core_network_id ?? '').trim()
+  if (coreId) return `core:${coreId}`
+  return `deployment:${String(dep.backend_deployment_id ?? dep.deployment_id ?? dep.request_id ?? '')}`
+}
+
+function dedupeDeployments(deployments: Deployment[]): Deployment[] {
+  const byKey = new Map<string, Deployment>()
+  deployments.forEach((dep) => {
+    const key = deploymentDedupeKey(dep)
+    const existing = byKey.get(key)
+    if (!existing) {
+      byKey.set(key, dep)
+      return
+    }
+    const score = deploymentScore(dep)
+    const existingScore = deploymentScore(existing)
+    if (score > existingScore || (score === existingScore && deploymentTimestamp(dep) > deploymentTimestamp(existing))) {
+      byKey.set(key, dep)
+    }
+  })
+  return Array.from(byKey.values())
+}
+
 export const useStore = create<Store>((set, get) => ({
   satellites: [],
   links: [],
@@ -1164,7 +1214,7 @@ export const useStore = create<Store>((set, get) => ({
   setBackendTopologySynced: (synced) => set({ backendTopologySynced: synced }),
   setDeployments: (deployments) => {
     set((s) => {
-      const nextDeployments = Array.isArray(deployments) ? deployments : []
+      const nextDeployments = dedupeDeployments(Array.isArray(deployments) ? deployments : [])
       const knownKeys = new Set(
         s.deployments.flatMap((d) => [String(d.deployment_id ?? ''), String(d.backend_deployment_id ?? '')]).filter(Boolean)
       )
@@ -1214,16 +1264,16 @@ export const useStore = create<Store>((set, get) => ({
     if (idx >= 0) {
       const merged = [...s.deployments]
       merged[idx] = { ...merged[idx], ...d }
-      return { deployments: merged }
+      return { deployments: dedupeDeployments(merged) }
     }
-    return { deployments: [d, ...s.deployments] }
+    return { deployments: dedupeDeployments([d, ...s.deployments]) }
   }),
   updateDeployment: (id, p) => set((s) => ({
-    deployments: s.deployments.map((d) => (
+    deployments: dedupeDeployments(s.deployments.map((d) => (
       d.deployment_id === id || d.backend_deployment_id === id
         ? { ...d, ...p }
         : d
-    )),
+    ))),
   })),
   removeDeployment: (id) => set((s) => {
     const removedIdSet = new Set<string>([id])

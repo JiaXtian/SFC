@@ -218,23 +218,34 @@ export default function Links() {
       isGhost: boolean
     }> = []
     const active = new Set(highlightedDeploymentIds)
+    const compactMode = satellites.length >= 1800 || active.size > 2
+    const maxHighlightedEdges = satellites.length >= 5000 ? 700 : (compactMode ? 1200 : 2400)
+    const seenEdges = new Set<string>()
     deployments.forEach((dep: any) => {
-      if (!active.has(dep.deployment_id)) return
+      const depId = String(dep?.deployment_id ?? '')
+      const backendId = String(dep?.backend_deployment_id ?? '')
+      if (!active.has(depId) && (!backendId || !active.has(backendId))) return
       if (dep.satisfies_constraints === false || dep.status === 'failed') return
 
       const currentLinks = Array.isArray(dep.link_details) ? dep.link_details : []
       currentLinks.forEach((l: any, i: number) => {
+        if (out.length >= maxHighlightedEdges) return
         const lk = `${String(l?.src ?? '')}|${String(l?.dst ?? '')}`
         if (!activeLinkSet.has(lk)) return
+        const src = String(l?.src ?? '')
+        const dst = String(l?.dst ?? '')
+        if (!src || !dst) return
+        const edgeKey = src <= dst ? `${src}|${dst}` : `${dst}|${src}`
+        if (seenEdges.has(edgeKey)) return
+        seenEdges.add(edgeKey)
         const a = satMap.get(l.src)
         const b = satMap.get(l.dst)
         if (!a || !b) return
+        const start = toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z)
+        const end = toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z)
         out.push({
-          key: `hl-cur-${dep.deployment_id}-${l.src}-${l.dst}-${i}`,
-          points: bulgedLinkPoints(
-            toXYZ(a.coordinates.x, a.coordinates.y, a.coordinates.z),
-            toXYZ(b.coordinates.x, b.coordinates.y, b.coordinates.z),
-          ),
+          key: `hl-cur-${edgeKey}-${i}`,
+          points: compactMode ? [start, end] : bulgedLinkPoints(start, end),
           link: l,
           color: '#22d3ee',
           glowColor: '#fbbf24',
@@ -245,8 +256,9 @@ export default function Links() {
       })
     })
     return out
-  }, [deployments, highlightedDeploymentIds, satMap, activeLinkSet])
+  }, [deployments, highlightedDeploymentIds, satMap, activeLinkSet, satellites.length])
   const heavyHighlightMode = satellites.length >= 2600
+  const compactHighlightMode = heavyHighlightMode || highlightedDeploymentIds.length > 2 || highlightedLines.length > 180
 
   const selectedLines = useMemo(() => {
     const out: Array<{ key: string; points: [number, number, number][]; link: RenderLink }> = []
@@ -396,17 +408,11 @@ export default function Links() {
         >
           <Line
             points={item.points}
-            color="#fde047"
-            lineWidth={4.8}
+            color="#ef4444"
+            lineWidth={3.4}
             transparent
-            opacity={Math.max(0.86, display.linkOpacity)}
-          />
-          <Line
-            points={item.points}
-            color="#f59e0b"
-            lineWidth={11.5}
-            transparent
-            opacity={0.42}
+            opacity={Math.max(0.9, display.linkOpacity)}
+            depthWrite={false}
           />
         </group>
       ))}
@@ -417,21 +423,23 @@ export default function Links() {
           <Line
             points={item.points}
             color={item.color}
-            lineWidth={heavyHighlightMode ? 0.95 : 1.25}
+            lineWidth={compactHighlightMode ? 0.95 : 1.25}
             transparent
-            opacity={heavyHighlightMode ? Math.max(0.62, item.opacity * 0.78) : item.opacity}
+            opacity={compactHighlightMode ? Math.max(0.62, item.opacity * 0.78) : item.opacity}
             depthWrite={false}
             raycast={() => null}
           />
-          <Line
-            points={item.points}
-            color={item.glowColor}
-            lineWidth={heavyHighlightMode ? 1.7 : 2.6}
-            transparent
-            opacity={heavyHighlightMode ? 0.1 : 0.13}
-            depthWrite={false}
-            raycast={() => null}
-          />
+          {!compactHighlightMode && (
+            <Line
+              points={item.points}
+              color={item.glowColor}
+              lineWidth={2.6}
+              transparent
+              opacity={0.13}
+              depthWrite={false}
+              raycast={() => null}
+            />
+          )}
         </group>
       ))}
 
@@ -439,10 +447,10 @@ export default function Links() {
         const linkType = String((item.link as any)?.link_type ?? 'inter_orbit')
         const hasFaultTag = isRenderableLinkFault((item.link as any)?.fault_tag)
         const selectedCore = hasFaultTag
-          ? '#fde047'
+          ? '#ef4444'
           : (linkType === 'intra_orbit' ? '#6ee7b7' : '#c4b5fd')
         const selectedGlow = hasFaultTag
-          ? '#f59e0b'
+          ? '#991b1b'
           : (linkType === 'intra_orbit' ? '#10b981' : '#8b5cf6')
         return (
         <group key={item.key}>

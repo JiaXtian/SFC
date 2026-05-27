@@ -16,20 +16,13 @@ const TYPES_ZH: Record<ConstellationType, string> = {
   starlink_v1: 'Starlink 第一代',
   starlink_v2: 'Starlink 第二代',
   oneweb: 'OneWeb 星座',
-  iridium: 'Iridium NEXT',
-  telesat: 'Telesat Lightspeed',
-  kuiper: 'Amazon Kuiper',
   polar: '极地轨道星座',
-  qianfan: '千帆星座',
 }
 
 const CONTROL_TYPES: ConstellationType[] = [
   'starlink_v1',
   'starlink_v2',
   'oneweb',
-  'iridium',
-  'telesat',
-  'kuiper',
   'polar',
 ]
 

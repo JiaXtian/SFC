@@ -13,6 +13,7 @@
 #include <optional>
 #include <queue>
 #include <random>
+#include <sstream>
 #include <unordered_set>
 #include <spdlog/spdlog.h>
 
@@ -35,6 +36,78 @@ bool node_is_down(const Satellite& sat) {
     }
     const std::string fault_tag = to_lower(sat.fault_tag);
     return !fault_tag.empty() && fault_tag != "none";
+}
+
+std::string canonical_link_key(const std::string& source, const std::string& target) {
+    if (source <= target) return source + "|" + target;
+    return target + "|" + source;
+}
+
+bool link_is_down(const Link& link) {
+    const std::string status = to_lower(link.status);
+    if (status == "down" || status == "fault" || status == "failed" || status == "inactive") {
+        return true;
+    }
+    const std::string fault_tag = to_lower(link.fault_tag);
+    return !fault_tag.empty() && fault_tag != "none";
+}
+
+bool deployment_runtime_enabled_for_inference(const std::string& deployment_id) {
+    if (deployment_id.empty()) return false;
+    const nlohmann::json records = list_deployment_records();
+    if (!records.is_array()) return true;
+    for (const auto& dep : records) {
+        if (!dep.is_object()) continue;
+        const std::string dep_id = dep.value("deployment_id", std::string(""));
+        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
+        if (dep_id == deployment_id || backend_id == deployment_id) {
+            return dep.value("runtime_enabled", false);
+        }
+    }
+    return true;
+}
+
+std::pair<std::string, int> down_link_signature(const Topology& topology) {
+    std::vector<std::string> keys;
+    keys.reserve(topology.links.size());
+    for (const auto& link : topology.links) {
+        if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+        if (!link_is_down(link)) continue;
+        keys.push_back(canonical_link_key(link.source, link.target));
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::string sig;
+    for (const auto& key : keys) {
+        if (!sig.empty()) sig.push_back(',');
+        sig += key;
+    }
+    return {sig, static_cast<int>(keys.size())};
+}
+
+std::string candidate_placement_signature(const DeploymentCandidate& candidate) {
+    std::vector<std::string> parts;
+    parts.reserve(candidate.per_vnf.empty() ? candidate.deployed_nodes.size() : candidate.per_vnf.size());
+    if (!candidate.per_vnf.empty()) {
+        for (const auto& pv : candidate.per_vnf) {
+            std::string nf = pv.nf_type.empty() ? (pv.core_nf.empty() ? pv.vnf : pv.core_nf) : pv.nf_type;
+            std::transform(nf.begin(), nf.end(), nf.begin(), [](unsigned char ch) {
+                if (ch == '-' || ch == ' ') return '_';
+                return static_cast<char>(std::tolower(ch));
+            });
+            parts.push_back(nf + "@" + pv.node);
+        }
+    } else {
+        for (const auto& node : candidate.deployed_nodes) {
+            parts.push_back("node@" + node);
+        }
+    }
+    std::sort(parts.begin(), parts.end());
+    std::ostringstream oss;
+    for (const auto& part : parts) {
+        oss << part << "|";
+    }
+    return oss.str();
 }
 
 bool better_candidate(const DeploymentCandidate& a, const DeploymentCandidate& b) {
@@ -1140,20 +1213,24 @@ nlohmann::json DynamicInferenceService::evaluate_session(
     std::string partial_detail = "";
     if (trigger == "anchor_path_disconnected") {
         recovery_strategy = "local_reroute";
+    } else if (trigger == "link_recovery_reroute") {
+        recovery_strategy = "link_recovery_path_optimization";
     } else if (trigger == "sla_latency_violation") {
         recovery_strategy = "full_redeploy_sla_latency_violation";
     }
     nlohmann::json decision_process;
     const auto t0 = std::chrono::high_resolution_clock::now();
     std::vector<DeploymentCandidate> candidates;
-    if (trigger == "anchor_path_disconnected" && session.has_last_candidate) {
+    if ((trigger == "anchor_path_disconnected" || trigger == "link_recovery_reroute") && session.has_last_candidate) {
         DeploymentCandidate rerouted = session.last_candidate;
         std::string reroute_reason;
         if (rebuild_candidate_paths_and_sla(&rerouted, session.request, planning_topology, &reroute_reason)) {
             decision_process = {
                 {"algorithm", "fast_dependency_path_reroute"},
                 {"status", "success"},
-                {"detail", "same_nf_placement_path_recomputed"}
+                {"detail", trigger == "link_recovery_reroute"
+                    ? "link_recovered_same_nf_placement_path_optimized"
+                    : "same_nf_placement_path_recomputed"}
             };
             candidates.push_back(std::move(rerouted));
         } else {
@@ -1163,13 +1240,17 @@ nlohmann::json DynamicInferenceService::evaluate_session(
                 {"status", "failed"},
                 {"detail", partial_detail}
             };
-            recovery_strategy = "full_redeploy_after_path_reroute_unavailable";
+            recovery_strategy = trigger == "link_recovery_reroute"
+                ? "full_redeploy_after_recovery_path_optimization_unavailable"
+                : "full_redeploy_after_path_reroute_unavailable";
             candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
             if (!decision_process.is_object()) {
                 decision_process = nlohmann::json::object();
             }
             decision_process["recovery_algorithm"] = "model_full_redeploy";
-            decision_process["recovery_reason"] = "dependency_path_reroute_unavailable";
+            decision_process["recovery_reason"] = trigger == "link_recovery_reroute"
+                ? "recovered_link_path_optimization_unavailable"
+                : "dependency_path_reroute_unavailable";
             decision_process["detail"] = partial_detail;
             if (candidates.empty()) {
                 decision_process["status"] = "failed";
@@ -1348,7 +1429,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         response_candidates.end(),
         [&](const DeploymentCandidate& c) { return is_deployable_candidate(c); }
     );
-    const bool link_fault_reroute_only = trigger == "anchor_path_disconnected" && session.has_last_candidate;
+    const bool link_fault_reroute_only =
+        (trigger == "anchor_path_disconnected" || trigger == "link_recovery_reroute") &&
+        session.has_last_candidate;
     if (link_fault_reroute_only) {
         chosen_it = std::find_if(
             response_candidates.begin(),
@@ -1364,6 +1447,10 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         chosen.per_vnf = ensure_per_vnf_filled(chosen, session.request);
         normalize_candidate_bandwidth_requirements(&chosen, session.request);
         const std::string sig = candidate_signature(chosen);
+        const std::string placement_sig = candidate_placement_signature(chosen);
+        const bool placement_changed =
+            !session.has_last_candidate ||
+            placement_sig != candidate_placement_signature(session.last_candidate);
         const bool changed = (!session.has_last_candidate) || (sig != session.last_candidate_signature);
         const std::string status = changed ? (session.has_last_candidate ? "redeployed" : "deployed") : "stable";
 
@@ -1443,7 +1530,13 @@ nlohmann::json DynamicInferenceService::evaluate_session(
             auto updated_topology = res_mgr_->export_current_topology();
             topo_mgr_->save_current_topology(updated_topology);
 
-            if (!session.orchestration_deployment_id.empty() && g_deployment_orchestrator) {
+            const bool path_only_reroute =
+                (trigger == "anchor_path_disconnected" || trigger == "link_recovery_reroute") &&
+                !placement_changed;
+            if (!path_only_reroute &&
+                !session.orchestration_deployment_id.empty() &&
+                g_deployment_orchestrator &&
+                deployment_runtime_enabled_for_inference(session.orchestration_deployment_id)) {
                 const std::string orchestration_trigger = recovery_strategy.empty() ? trigger : recovery_strategy;
                 g_deployment_orchestrator->enqueue_deployment(
                     session.orchestration_deployment_id,
@@ -1460,9 +1553,11 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         } else if (
             !session.orchestration_deployment_id.empty() &&
             g_deployment_orchestrator &&
+            deployment_runtime_enabled_for_inference(session.orchestration_deployment_id) &&
             trigger != "session_start" &&
             trigger != "topology_tick_bootstrap" &&
-            trigger != "anchor_path_disconnected"
+            trigger != "anchor_path_disconnected" &&
+            trigger != "link_recovery_reroute"
         ) {
             // Fault-driven recomputation may keep the same placement. We still trigger orchestration
             // so container runtime can perform stop/start recovery on the selected satellites.
@@ -1932,11 +2027,23 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
     }
     const auto down_nodes = collect_down_nodes(topology);
     const auto adjacency = build_active_adjacency(topology, down_nodes);
+    const auto current_down_link_state = down_link_signature(topology);
+    const std::string current_down_link_signature = current_down_link_state.first;
+    const int current_down_link_count = current_down_link_state.second;
 
     for (auto& kv : sessions_) {
         auto& session = kv.second;
         if (!session.active) continue;
         if (!session.auto_redeploy) continue;
+        auto remember_link_observation = [&]() {
+            session.last_observed_down_link_signature = current_down_link_signature;
+            session.last_observed_down_link_count = current_down_link_count;
+        };
+        const bool has_link_observation = session.last_observed_down_link_count >= 0;
+        const bool link_recovered_since_last_tick =
+            has_link_observation &&
+            current_down_link_count < session.last_observed_down_link_count &&
+            current_down_link_signature != session.last_observed_down_link_signature;
 
         std::string trigger;
         std::string disconnected_from;
@@ -1953,9 +2060,15 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
                 &disconnected_to
             );
         }
+        if (trigger.empty() && session.has_last_candidate && link_recovered_since_last_tick) {
+            trigger = "link_recovery_reroute";
+            disconnected_from = "recovered_link";
+            disconnected_to = "optimized_path";
+        }
         if (trigger.empty()) {
             if (session.pending_replanning) {
                 if (session.last_replanning_attempt_topology_version == snapshot.topology_version) {
+                    remember_link_observation();
                     continue;
                 }
                 auto result = evaluate_session(session, snapshot, "recovery_resume");
@@ -1988,10 +2101,12 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
                     {"affected_services", 1}
                 });
                 decisions_this_tick += 1;
+                remember_link_observation();
                 continue;
             }
             session.last_required_recompute_signature.clear();
             session.last_required_recompute_topology_version = -1;
+            remember_link_observation();
             continue;
         }
 
@@ -2000,6 +2115,7 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
         const bool repeated_same_reason = fault_driven && reason_signature == session.last_required_recompute_signature;
         if (repeated_same_reason &&
             session.last_required_recompute_topology_version == snapshot.topology_version) {
+            remember_link_observation();
             continue;
         }
         const bool had_prev = session.has_last_candidate;
@@ -2060,6 +2176,7 @@ void DynamicInferenceService::on_topology_tick(const TopologySnapshot& snapshot)
             session.last_required_recompute_signature.clear();
             session.last_required_recompute_topology_version = -1;
         }
+        remember_link_observation();
         decisions_this_tick += 1;
     }
 

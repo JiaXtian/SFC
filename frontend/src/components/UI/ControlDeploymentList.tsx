@@ -1,4 +1,5 @@
-import { Trash2, RefreshCw } from 'lucide-react'
+import { useState } from 'react'
+import { Trash2, RefreshCw, Power, Loader2 } from 'lucide-react'
 import { apiClient } from '@/api/client'
 import { useStore } from '@/store/useStore'
 import { resolveSfcLabel } from '@/utils/sfcLabel'
@@ -18,9 +19,11 @@ function statusLabel(raw: string): string {
 }
 
 export default function ControlDeploymentList({ canManage }: { canManage: boolean }) {
+  const [runtimeToggling, setRuntimeToggling] = useState<Set<string>>(new Set())
   const {
     deployments,
     setDeployments,
+    updateDeployment,
     removeDeployment,
     suppressSessionDeployment,
     applyTopologySnapshot,
@@ -75,6 +78,38 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
     }
   }
 
+  const markRuntimeToggling = (id: string, active: boolean) => {
+    setRuntimeToggling((prev) => {
+      const next = new Set(prev)
+      if (active) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const toggleRuntime = async (dep: any, enabled: boolean) => {
+    if (!canManage) {
+      openSystemPopup('无权限操作', '普通用户仅可查看部署信息，不允许启停核心网容器。', 'warning')
+      return
+    }
+    const target = String(dep?.backend_deployment_id ?? dep?.deployment_id ?? '')
+    if (!target) {
+      addToast('无法识别核心网部署ID', 'error')
+      return
+    }
+    markRuntimeToggling(target, true)
+    try {
+      const res = await apiClient.setDeploymentRuntime(target, enabled)
+      if (res?.deployment) updateDeployment(target, res.deployment as any)
+      addToast(enabled ? '已提交 Open5GS 网元拉起任务' : '已停止并清理该核心网网元容器', 'success')
+      await refresh()
+    } catch (e: any) {
+      addToast(`${enabled ? '启动' : '停止'}核心网运行态失败: ${e?.message ?? e}`, 'error')
+    } finally {
+      markRuntimeToggling(target, false)
+    }
+  }
+
   return (
     <div
       className="rounded-2xl p-3.5 h-full flex flex-col overflow-hidden"
@@ -104,6 +139,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
             <tr>
               <th className="px-2 py-2 text-left min-w-[90px]">核心网</th>
               <th className="px-2 py-2 text-left">状态</th>
+              <th className="px-2 py-2 text-left min-w-[92px]">Open5GS</th>
               <th className="px-2 py-2 text-left min-w-[150px]">网元/依赖</th>
               <th className="px-2 py-2 text-left">节点</th>
               <th className="px-2 py-2 text-left">容器启动</th>
@@ -132,6 +168,11 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
               const nFailed = Number(dep?.core_nfs_failed ?? 0)
               const serviceReady = Boolean(dep?.service_ready ?? false)
               const readyForUe = Boolean(dep?.ready_for_ueransim ?? false)
+              const explicitRuntime = typeof dep?.runtime_enabled === 'boolean' ? Boolean(dep.runtime_enabled) : null
+              const runtimeEnabled = explicitRuntime ?? (serviceReady || cRunning > 0 || nRunning > 0)
+              const runtimeKey = String(dep?.backend_deployment_id ?? dep?.deployment_id ?? '')
+              const runtimeBusy = runtimeToggling.has(runtimeKey)
+              const runtimeDisabled = !canManage || runtimeBusy || String(dep?.status ?? '') === 'failed' || String(dep?.status ?? '') === 'rolled_back'
               const score = Number(dep?.score_total ?? 0)
               const reliability = Number(dep?.estimated_reliability ?? 0)
               const bottleneck = Number(dep?.bottleneck_bandwidth_gbps ?? 0)
@@ -141,6 +182,32 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
                 <tr key={String(dep?.deployment_id ?? Math.random())} className="border-t border-slate-800/80 text-slate-200">
                   <td className="px-2 py-2 font-medium">{label}</td>
                   <td className="px-2 py-2">{statusLabel(String(dep?.status ?? 'completed'))}</td>
+                  <td className="px-2 py-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleRuntime(dep, !runtimeEnabled)}
+                      disabled={runtimeDisabled}
+                      title={runtimeEnabled ? '关闭并删除该核心网 Open5GS 容器' : '拉起该核心网 Open5GS 网元'}
+                      className={`relative h-6 w-[54px] rounded-full border transition inline-flex items-center ${
+                        runtimeEnabled
+                          ? 'bg-emerald-500/20 border-emerald-300/45'
+                          : 'bg-slate-800/75 border-slate-600/70'
+                      } ${runtimeDisabled ? 'opacity-60 cursor-not-allowed' : 'hover:border-cyan-300/60'}`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-5 w-5 rounded-full inline-flex items-center justify-center transition ${
+                          runtimeEnabled
+                            ? 'left-[29px] bg-emerald-300 text-slate-950'
+                            : 'left-0.5 bg-slate-500 text-slate-950'
+                        }`}
+                      >
+                        {runtimeBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
+                      </span>
+                      <span className={`absolute top-1/2 -translate-y-1/2 text-[9px] font-semibold ${runtimeEnabled ? 'left-2 text-emerald-100' : 'right-2 text-slate-400'}`}>
+                        {runtimeEnabled ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+                  </td>
                   <td className="px-2 py-2 font-mono">
                     <span>{Array.isArray(dep?.per_vnf) ? dep.per_vnf.length : nTotal || 0}/12 NF</span>
                     <span className="text-slate-500 mx-1">·</span>
@@ -184,7 +251,7 @@ export default function ControlDeploymentList({ canManage }: { canManage: boolea
             })}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={13} className="px-3 py-8 text-center text-slate-500">当前无已部署核心网</td>
+                <td colSpan={14} className="px-3 py-8 text-center text-slate-500">当前无已部署核心网</td>
               </tr>
             )}
           </tbody>

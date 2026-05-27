@@ -157,7 +157,7 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
               const deploymentId = String(data.deployment_id ?? '')
               const sfcLabel = sfcLabelByDeploymentId(deploymentId)
               if (deploymentId) {
-                updateDeployment(deploymentId, {
+                const runtimePatch: any = {
                   orchestration_phase: String(data.orchestration_phase ?? ''),
                   orchestration_progress: Number(data.orchestration_progress ?? 0),
                   containers_total: Number(data.containers_total ?? 0),
@@ -170,7 +170,9 @@ export function useWebSocket(options: { applyTopologySnapshot?: boolean } = {}) 
                   ready_for_ueransim: Boolean(data.ready_for_ueransim),
                   last_error: String(data.last_error ?? ''),
                   last_update_at: String(data.last_update_at ?? ''),
-                } as any)
+                }
+                if (typeof data.runtime_enabled === 'boolean') runtimePatch.runtime_enabled = Boolean(data.runtime_enabled)
+                updateDeployment(deploymentId, runtimePatch)
               }
               pushRuntimeEvent({
                 type: 'deployment_runtime_update',

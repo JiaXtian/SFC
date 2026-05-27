@@ -25,6 +25,7 @@ public:
     METHOD_LIST_BEGIN
     ADD_METHOD_TO(SFCController::plan, "/api/v1/sfc/plan", Post);
     ADD_METHOD_TO(SFCController::deploy, "/api/v1/sfc/deploy", Post);
+    ADD_METHOD_TO(SFCController::setDeploymentRuntime, "/api/v1/sfc/deployment/runtime", Post);
     ADD_METHOD_TO(SFCController::rollback, "/api/v1/sfc/rollback", Post);
     ADD_METHOD_TO(SFCController::getDeployments, "/api/v1/deployments", Get);
     ADD_METHOD_TO(SFCController::startSession, "/api/v1/sfc/session/start", Post);
@@ -42,6 +43,9 @@ public:
     
     void rollback(const HttpRequestPtr& req,
                  std::function<void(const HttpResponsePtr&)>&& callback);
+
+    void setDeploymentRuntime(const HttpRequestPtr& req,
+                              std::function<void(const HttpResponsePtr&)>&& callback);
     
     void getDeployments(const HttpRequestPtr& req,
                        std::function<void(const HttpResponsePtr&)>&& callback);

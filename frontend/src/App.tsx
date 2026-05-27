@@ -180,9 +180,12 @@ export default function App() {
           >
             <div className="pointer-events-auto"><TopBar /></div>
             <div className="pointer-events-auto"><SystemMessagePanel /></div>
+            <div className="pointer-events-auto"><BottomHub /></div>
+          </div>
+
+          <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 12 }}>
             <div className="pointer-events-auto"><SatelliteDetail /></div>
             <div className="pointer-events-auto"><LinkDetailPanel /></div>
-            <div className="pointer-events-auto"><BottomHub /></div>
           </div>
 
           <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 11 }}>

@@ -16,6 +16,7 @@
 #include <limits>
 #include <cmath>
 #include <cctype>
+#include <ctime>
 #include <optional>
 #include <nlohmann/json.hpp>
 
@@ -88,24 +89,99 @@ std::string extract_core_label(const std::string& raw) {
         });
         return out;
     }();
-    const std::string prefix = "CORE-";
-    if (upper.rfind(prefix, 0) != 0) return "";
-    size_t i = prefix.size();
-    while (i < upper.size() && std::isdigit(static_cast<unsigned char>(upper[i]))) i += 1;
-    if (i != upper.size() || i == prefix.size()) return "";
-    int seq = 0;
-    try {
-        seq = std::stoi(upper.substr(prefix.size()));
-    } catch (...) {
-        return "";
+    for (const auto& word : {"CORE", "SFC"}) {
+        size_t pos = upper.find(word);
+        while (pos != std::string::npos) {
+            size_t i = pos + std::string(word).size();
+            if (i < upper.size() && (upper[i] == '-' || upper[i] == '_' || std::isspace(static_cast<unsigned char>(upper[i])))) {
+                i += 1;
+            }
+            const size_t digit_start = i;
+            while (i < upper.size() && std::isdigit(static_cast<unsigned char>(upper[i]))) i += 1;
+            if (i > digit_start) {
+                try {
+                    return format_core_label(std::stoi(upper.substr(digit_start, i - digit_start)));
+                } catch (...) {
+                    return "";
+                }
+            }
+            pos = upper.find(word, pos + 1);
+        }
     }
-    return format_core_label(seq);
+    return "";
 }
 
 std::string stable_core_network_id(const std::string& deployment_id, const std::string& request_id) {
     if (!deployment_id.empty()) return "core-" + deployment_id;
     if (!request_id.empty()) return "core-" + request_id;
     return "core-unknown";
+}
+
+std::string deployment_timestamp_key(const nlohmann::json& dep) {
+    std::string best;
+    for (const auto& key : {"last_update_at", "deployed_at", "created_at", "updated_at"}) {
+        if (dep.contains(key) && dep[key].is_string()) {
+            best = std::max(best, dep[key].get<std::string>());
+        }
+    }
+    return best;
+}
+
+int deployment_liveness_score(const nlohmann::json& dep) {
+    int score = 0;
+    if (dep.value("runtime_enabled", false)) score += 1000;
+    if (dep.value("service_ready", false)) score += 250;
+    if (dep.value("ready_for_ueransim", false)) score += 250;
+    if (dep.value("orchestration_phase", std::string("")) == "running") score += 120;
+    score += std::min(80, dep.value("containers_running", 0) * 4);
+    score += std::min(120, dep.value("core_nfs_running", 0) * 4);
+    return score;
+}
+
+bool prefer_deployment_record(const nlohmann::json& candidate, const nlohmann::json& current) {
+    const int candidate_score = deployment_liveness_score(candidate);
+    const int current_score = deployment_liveness_score(current);
+    if (candidate_score != current_score) return candidate_score > current_score;
+    const std::string candidate_ts = deployment_timestamp_key(candidate);
+    const std::string current_ts = deployment_timestamp_key(current);
+    if (candidate_ts != current_ts) return candidate_ts > current_ts;
+    return candidate.value("deployment_id", std::string("")) > current.value("deployment_id", std::string(""));
+}
+
+std::string deployment_dedupe_key(const nlohmann::json& dep) {
+    std::string label = dep.value("core_network_label", std::string(""));
+    const std::string normalized_label = extract_core_label(label);
+    if (!normalized_label.empty()) label = normalized_label;
+    if (label.empty()) label = extract_core_label(dep.value("sfc_name", std::string("")));
+    if (!label.empty()) return "label:" + label;
+    const std::string core_id = dep.value("core_network_id", std::string(""));
+    if (!core_id.empty()) return "core_id:" + core_id;
+    const std::string deployment_id = dep.value("deployment_id", std::string(""));
+    if (!deployment_id.empty()) return "deployment_id:" + deployment_id;
+    return "request_id:" + dep.value("request_id", std::string(""));
+}
+
+bool dedupe_deployments_locked() {
+    std::vector<nlohmann::json> deduped;
+    std::unordered_map<std::string, size_t> index_by_key;
+    bool changed = false;
+    for (const auto& dep : g_deployments) {
+        const std::string key = deployment_dedupe_key(dep);
+        auto it = index_by_key.find(key);
+        if (it == index_by_key.end()) {
+            index_by_key[key] = deduped.size();
+            deduped.push_back(dep);
+            continue;
+        }
+        changed = true;
+        if (prefer_deployment_record(dep, deduped[it->second])) {
+            deduped[it->second] = dep;
+        }
+    }
+    if (changed) {
+        g_deployments = std::move(deduped);
+    }
+    return changed;
 }
 
 void sync_deployments_from_db_locked() {
@@ -134,6 +210,12 @@ void sync_deployments_from_db_locked() {
                 item["core_network_label"] = label;
                 normalized = true;
             }
+        } else {
+            const std::string label = extract_core_label(item.value("core_network_label", std::string("")));
+            if (!label.empty() && label != item.value("core_network_label", std::string(""))) {
+                item["core_network_label"] = label;
+                normalized = true;
+            }
         }
         if (!item.contains("custom_nf_bindings")) {
             item["custom_nf_bindings"] = nlohmann::json::array();
@@ -151,6 +233,14 @@ void sync_deployments_from_db_locked() {
             item["orchestration_phase"] = "not_started";
             normalized = true;
         }
+        if (!item.contains("runtime_enabled")) {
+            item["runtime_enabled"] =
+                item.value("service_ready", false) ||
+                item.value("ready_for_ueransim", false) ||
+                item.value("containers_running", 0) > 0 ||
+                item.value("core_nfs_running", 0) > 0;
+            normalized = true;
+        }
         if (!item.contains("orchestration_progress")) {
             item["orchestration_progress"] = item.value("status", std::string("completed")) == "completed" ? 100 : 0;
             normalized = true;
@@ -164,7 +254,8 @@ void sync_deployments_from_db_locked() {
         }
         if (!item.contains("containers_running")) {
             const int total = item.value("containers_total", 0);
-            item["containers_running"] = item.value("status", std::string("completed")) == "completed" ? total : 0;
+            item["containers_running"] = item.value("runtime_enabled", false) &&
+                item.value("status", std::string("completed")) == "completed" ? total : 0;
             normalized = true;
         }
         if (!item.contains("containers_failed")) {
@@ -183,7 +274,8 @@ void sync_deployments_from_db_locked() {
         }
         if (!item.contains("core_nfs_running")) {
             const int total = item.value("core_nfs_total", 0);
-            item["core_nfs_running"] = item.value("status", std::string("completed")) == "completed" ? total : 0;
+            item["core_nfs_running"] = item.value("runtime_enabled", false) &&
+                item.value("status", std::string("completed")) == "completed" ? total : 0;
             normalized = true;
         }
         if (!item.contains("core_nfs_failed")) {
@@ -191,7 +283,8 @@ void sync_deployments_from_db_locked() {
             normalized = true;
         }
         if (!item.contains("service_ready")) {
-            item["service_ready"] = item.value("status", std::string("completed")) == "completed";
+            item["service_ready"] = item.value("runtime_enabled", false) &&
+                item.value("status", std::string("completed")) == "completed";
             normalized = true;
         }
         if (!item.contains("ready_for_ueransim")) {
@@ -255,6 +348,9 @@ void sync_deployments_from_db_locked() {
         }
 
         g_deployments.push_back(item);
+    }
+    if (dedupe_deployments_locked()) {
+        normalized = true;
     }
 
     if (normalized) {
@@ -366,6 +462,160 @@ static std::vector<std::string> parse_nf_token_list(const Json::Value& arr_json)
         if (!token.empty() && seen.insert(token).second) out.push_back(token);
     }
     return out;
+}
+
+static std::string controller_iso_now() {
+    const auto now = std::chrono::system_clock::now();
+    const auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buf[48];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return std::string(buf);
+}
+
+static bool find_deployment_record_by_id(const std::string& deployment_id, nlohmann::json* out) {
+    if (deployment_id.empty()) return false;
+    const nlohmann::json records = list_deployment_records();
+    if (!records.is_array()) return false;
+    for (const auto& dep : records) {
+        if (!dep.is_object()) continue;
+        const std::string dep_id = dep.value("deployment_id", std::string(""));
+        const std::string backend_id = dep.value("backend_deployment_id", dep_id);
+        if (dep_id == deployment_id || backend_id == deployment_id) {
+            if (out) *out = dep;
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::vector<std::string> deployment_nodes_from_record(const nlohmann::json& dep) {
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> nodes;
+    auto push_node = [&](const std::string& node) {
+        if (!node.empty() && seen.insert(node).second) nodes.push_back(node);
+    };
+    if (dep.contains("deployed_nodes") && dep["deployed_nodes"].is_array()) {
+        for (const auto& node : dep["deployed_nodes"]) {
+            if (node.is_string()) push_node(node.get<std::string>());
+        }
+    }
+    const auto per = dep.contains("per_core_nf") && dep["per_core_nf"].is_array()
+        ? dep["per_core_nf"]
+        : (dep.contains("per_vnf") && dep["per_vnf"].is_array() ? dep["per_vnf"] : nlohmann::json::array());
+    for (const auto& item : per) {
+        if (item.is_object()) push_node(item.value("node", std::string("")));
+    }
+    return nodes;
+}
+
+static DeploymentCandidate candidate_from_deployment_record_for_runtime(const nlohmann::json& dep) {
+    DeploymentCandidate candidate{};
+    candidate.score = dep.value("score_total", dep.value("score", 0.0));
+    candidate.total_latency_ms = dep.value("total_latency_ms", 0.0);
+    candidate.registration_latency_ms = dep.value("registration_latency_ms", 0.0);
+    candidate.pdu_session_latency_ms = dep.value("pdu_session_latency_ms", 0.0);
+    candidate.estimated_reliability = dep.value("estimated_reliability", 0.0);
+    candidate.bottleneck_bandwidth_gbps = dep.value("bottleneck_bandwidth_gbps", 0.0);
+    candidate.satisfies_constraints = dep.value("satisfies_constraints", true);
+    candidate.reason = dep.value("reason", std::string(""));
+
+    candidate.deployed_nodes = deployment_nodes_from_record(dep);
+    const auto per = dep.contains("per_vnf") && dep["per_vnf"].is_array()
+        ? dep["per_vnf"]
+        : (dep.contains("per_core_nf") && dep["per_core_nf"].is_array() ? dep["per_core_nf"] : nlohmann::json::array());
+    std::unordered_set<std::string> node_set(candidate.deployed_nodes.begin(), candidate.deployed_nodes.end());
+    for (const auto& item : per) {
+        if (!item.is_object()) continue;
+        DeploymentCandidate::PerVNF pv{};
+        pv.vnf = item.value("vnf", std::string(""));
+        pv.core_nf = item.value("core_nf", pv.vnf);
+        pv.nf_type = item.value("nf_type", pv.core_nf.empty() ? pv.vnf : pv.core_nf);
+        pv.nf_role = item.value("nf_role", std::string("control_plane"));
+        pv.node = item.value("node", std::string(""));
+        pv.cpu_used = item.value("cpu_used", 0.0);
+        pv.mem_used = item.value("mem_used", 0.0);
+        pv.disk_used = item.value("disk_used", 0.0);
+        if (pv.node.empty()) continue;
+        candidate.per_vnf.push_back(pv);
+        node_set.insert(pv.node);
+    }
+    if (candidate.deployed_nodes.empty() && !node_set.empty()) {
+        candidate.deployed_nodes.assign(node_set.begin(), node_set.end());
+        std::sort(candidate.deployed_nodes.begin(), candidate.deployed_nodes.end());
+    }
+
+    const auto links = dep.contains("link_details") && dep["link_details"].is_array()
+        ? dep["link_details"]
+        : nlohmann::json::array();
+    for (const auto& item : links) {
+        if (!item.is_object()) continue;
+        DeploymentCandidate::LinkDetail ld{};
+        ld.src = item.value("src", std::string(""));
+        ld.dst = item.value("dst", std::string(""));
+        ld.dependency_source_nf = item.value("dependency_source_nf", std::string(""));
+        ld.dependency_target_nf = item.value("dependency_target_nf", std::string(""));
+        ld.latency_ms = item.value("latency_ms", 0.0);
+        ld.bandwidth_gbps = item.value("bandwidth_gbps", 0.0);
+        ld.bandwidth_available_gbps = item.value("bandwidth_available_gbps", ld.bandwidth_gbps);
+        ld.bandwidth_required_gbps = item.value("bandwidth_required_gbps", 0.0);
+        ld.status = item.value("status", std::string("active"));
+        ld.reliability = item.value("reliability", 0.999);
+        if (!ld.src.empty() && !ld.dst.empty()) candidate.link_details.push_back(ld);
+    }
+    return candidate;
+}
+
+static std::vector<VNF> vnfs_from_deployment_record_for_runtime(const nlohmann::json& dep, const DeploymentCandidate& candidate) {
+    std::vector<VNF> vnfs;
+    const double min_bw = dep.contains("score_constraints") && dep["score_constraints"].is_object()
+        ? dep["score_constraints"].value("min_bandwidth_gbps", 0.5)
+        : 0.5;
+    vnfs.reserve(candidate.per_vnf.size());
+    for (const auto& pv : candidate.per_vnf) {
+        VNF vnf{};
+        vnf.name = pv.core_nf.empty() ? pv.vnf : pv.core_nf;
+        if (vnf.name.empty()) vnf.name = pv.nf_type;
+        vnf.nf_type = pv.nf_type.empty() ? vnf.name : pv.nf_type;
+        vnf.nf_role = pv.nf_role.empty() ? "control_plane" : pv.nf_role;
+        vnf.resource_profile = "standard";
+        vnf.processing_weight = 1.0;
+        vnf.stateful = true;
+        vnf.cpu = std::max(0.0, pv.cpu_used);
+        vnf.mem = std::max(0.0, pv.mem_used);
+        vnf.disk = std::max(0.0, pv.disk_used);
+        if (vnf.disk <= 1e-9 && vnf.mem > 1e-9) vnf.disk = vnf.mem * 2.0;
+        vnf.bw_in = min_bw;
+        vnf.bw_out = min_bw;
+        vnfs.push_back(vnf);
+    }
+    return vnfs;
+}
+
+static nlohmann::json runtime_state_broadcast_payload(const std::string& deployment_id, const nlohmann::json& dep) {
+    return {
+        {"type", "deployment_runtime_update"},
+        {"deployment_id", deployment_id},
+        {"request_id", dep.value("request_id", "")},
+        {"runtime_enabled", dep.value("runtime_enabled", false)},
+        {"orchestration_phase", dep.value("orchestration_phase", "")},
+        {"orchestration_progress", dep.value("orchestration_progress", 0)},
+        {"containers_total", dep.value("containers_total", 0)},
+        {"containers_running", dep.value("containers_running", 0)},
+        {"containers_failed", dep.value("containers_failed", 0)},
+        {"core_nfs_total", dep.value("core_nfs_total", 0)},
+        {"core_nfs_running", dep.value("core_nfs_running", 0)},
+        {"core_nfs_failed", dep.value("core_nfs_failed", 0)},
+        {"service_ready", dep.value("service_ready", false)},
+        {"ready_for_ueransim", dep.value("ready_for_ueransim", false)},
+        {"last_error", dep.value("last_error", "")},
+        {"last_update_at", dep.value("last_update_at", "")}
+    };
 }
 
 static std::optional<size_t> resolve_binding_member_index(
@@ -1555,8 +1805,9 @@ void SFCController::deploy(
         }
         const int containers_total = static_cast<int>(unique_nodes.size());
         const int core_nfs_total = static_cast<int>(candidate.per_vnf.size());
-        dep_json["orchestration_phase"] = g_deployment_orchestrator ? "queued" : "orchestrator_unavailable";
-        dep_json["orchestration_progress"] = g_deployment_orchestrator ? 5 : 100;
+        dep_json["runtime_enabled"] = false;
+        dep_json["orchestration_phase"] = "runtime_stopped";
+        dep_json["orchestration_progress"] = 0;
         dep_json["orchestration_mode"] = dep_json.value("strategy_mode", std::string("single_request"));
         dep_json["orchestration_trigger"] = "manual_deploy";
         dep_json["containers_total"] = containers_total;
@@ -1567,7 +1818,7 @@ void SFCController::deploy(
         dep_json["core_nfs_failed"] = 0;
         dep_json["service_ready"] = false;
         dep_json["ready_for_ueransim"] = false;
-        dep_json["last_error"] = g_deployment_orchestrator ? "" : "orchestrator_unavailable";
+        dep_json["last_error"] = "";
         dep_json["last_update_at"] = "";
         if (json->isMember("path_nodes") && (*json)["path_nodes"].isArray()) {
             nlohmann::json path_nodes = nlohmann::json::array();
@@ -1680,28 +1931,23 @@ void SFCController::deploy(
         {
             std::lock_guard<std::mutex> lock(g_deployments_mutex);
             sync_deployments_from_db_locked();
+            const std::string new_core_label = dep_json.value("core_network_label", std::string(""));
+            const std::string new_core_id = dep_json.value("core_network_id", std::string(""));
             g_deployments.erase(
                 std::remove_if(
                     g_deployments.begin(),
                     g_deployments.end(),
                     [&](const nlohmann::json& dep) {
-                        return dep.value("deployment_id", "") == deployment_id;
+                        const std::string existing_label = dep.value("core_network_label", std::string(""));
+                        const std::string existing_core_id = dep.value("core_network_id", std::string(""));
+                        return dep.value("deployment_id", "") == deployment_id ||
+                            (!new_core_label.empty() && existing_label == new_core_label) ||
+                            (!new_core_id.empty() && existing_core_id == new_core_id);
                     }),
                 g_deployments.end()
             );
             g_deployments.push_back(dep_json);
             persist_deployments_locked();
-        }
-
-        if (g_deployment_orchestrator) {
-            g_deployment_orchestrator->enqueue_deployment(
-                deployment_id,
-                request_id,
-                candidate,
-                vnfs,
-                dep_json.value("strategy_mode", std::string("single_request")),
-                "manual_deploy"
-            );
         }
 
         if (g_dynamic_inference && !vnfs.empty()) {
@@ -2105,6 +2351,166 @@ void SFCController::rollback(
         
     } catch (const std::exception& e) {
         spdlog::error("Rollback failed: {}", e.what());
+        Json::Value error;
+        error["code"] = 500;
+        error["message"] = e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(error);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+void SFCController::setDeploymentRuntime(
+    const HttpRequestPtr& req,
+    std::function<void(const HttpResponsePtr&)>&& callback
+) {
+    try {
+        auto json = req->getJsonObject();
+        if (!json) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "Invalid JSON";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        const std::string requested_id = (*json).get("deployment_id", "").asString();
+        const bool enabled = (*json).get("enabled", false).asBool();
+        if (requested_id.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "deployment_id is required";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        nlohmann::json dep;
+        if (!find_deployment_record_by_id(requested_id, &dep)) {
+            Json::Value error;
+            error["code"] = 404;
+            error["message"] = "deployment not found";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k404NotFound);
+            callback(resp);
+            return;
+        }
+
+        const std::string deployment_id = dep.value(
+            "backend_deployment_id",
+            dep.value("deployment_id", requested_id)
+        );
+        const std::string request_id = dep.value(
+            "request_id",
+            dep.value("sfc_name", deployment_id)
+        );
+        if (deployment_id.empty()) {
+            Json::Value error;
+            error["code"] = 400;
+            error["message"] = "deployment_id is invalid";
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        const auto candidate = candidate_from_deployment_record_for_runtime(dep);
+        const int containers_total = static_cast<int>(deployment_nodes_from_record(dep).size());
+        const int core_nfs_total = candidate.per_vnf.empty()
+            ? dep.value("core_nfs_total", 0)
+            : static_cast<int>(candidate.per_vnf.size());
+        nlohmann::json merged;
+        if (enabled) {
+            if (!g_deployment_orchestrator) {
+                Json::Value error;
+                error["code"] = 503;
+                error["message"] = "deployment orchestrator unavailable";
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k503ServiceUnavailable);
+                callback(resp);
+                return;
+            }
+            if (candidate.deployed_nodes.empty() || candidate.per_vnf.empty()) {
+                Json::Value error;
+                error["code"] = 400;
+                error["message"] = "deployment has no runnable core network placement";
+                auto resp = HttpResponse::newHttpJsonResponse(error);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+
+            const std::string mode = dep.value("strategy_mode", std::string("single_request"));
+            nlohmann::json patch = {
+                {"runtime_enabled", true},
+                {"orchestration_phase", "queued"},
+                {"orchestration_progress", 5},
+                {"orchestration_mode", mode},
+                {"orchestration_trigger", "manual_runtime_start"},
+                {"containers_total", containers_total},
+                {"containers_running", 0},
+                {"containers_failed", 0},
+                {"core_nfs_total", core_nfs_total},
+                {"core_nfs_running", 0},
+                {"core_nfs_failed", 0},
+                {"service_ready", false},
+                {"ready_for_ueransim", false},
+                {"last_error", ""},
+                {"last_update_at", controller_iso_now()}
+            };
+            (void)patch_deployment_record(deployment_id, patch, &merged);
+            g_deployment_orchestrator->enqueue_deployment(
+                deployment_id,
+                request_id,
+                candidate,
+                vnfs_from_deployment_record_for_runtime(dep, candidate),
+                mode,
+                "manual_runtime_start"
+            );
+        } else {
+            const auto nodes_hint = deployment_nodes_from_record(dep);
+            nlohmann::json patch = {
+                {"runtime_enabled", false},
+                {"orchestration_phase", "runtime_stopped"},
+                {"orchestration_progress", 0},
+                {"containers_total", containers_total},
+                {"containers_running", 0},
+                {"containers_failed", 0},
+                {"core_nfs_total", core_nfs_total},
+                {"core_nfs_running", 0},
+                {"core_nfs_failed", 0},
+                {"service_ready", false},
+                {"ready_for_ueransim", false},
+                {"last_error", ""},
+                {"last_update_at", controller_iso_now()}
+            };
+            (void)patch_deployment_record(deployment_id, patch, &merged);
+            if (g_deployment_orchestrator) {
+                (void)g_deployment_orchestrator->rollback_deployment(deployment_id, nodes_hint);
+            }
+            if (merged.is_object()) {
+                WSHandler::broadcast_json(runtime_state_broadcast_payload(deployment_id, merged));
+            }
+        }
+
+        if (!merged.is_object()) {
+            (void)find_deployment_record_by_id(deployment_id, &merged);
+        }
+
+        Json::Value response;
+        response["status"] = "ok";
+        response["deployment_id"] = deployment_id;
+        response["runtime_enabled"] = enabled;
+        if (merged.is_object()) {
+            response["deployment"] = nlohmann_to_jsoncpp(merged);
+        }
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        callback(resp);
+    } catch (const std::exception& e) {
+        spdlog::error("Set deployment runtime failed: {}", e.what());
         Json::Value error;
         error["code"] = 500;
         error["message"] = e.what();

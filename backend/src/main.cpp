@@ -397,6 +397,7 @@ int restore_active_deployments_after_boot() {
     for (const auto& dep : deployments) {
         if (!dep.is_object()) continue;
         if (!is_active_deployment_status(dep.value("status", std::string("completed")))) continue;
+        const bool runtime_enabled = dep.value("runtime_enabled", false);
 
         const std::string deployment_id = dep.value(
             "backend_deployment_id",
@@ -415,14 +416,16 @@ int restore_active_deployments_after_boot() {
             "request_id",
             dep.value("sfc_name", dep.value("name", deployment_id))
         );
-        sfc::g_deployment_orchestrator->enqueue_deployment(
-            deployment_id,
-            request_id,
-            candidate,
-            {},
-            "bootstrap_restore",
-            "system_restart_restore"
-        );
+        if (runtime_enabled) {
+            sfc::g_deployment_orchestrator->enqueue_deployment(
+                deployment_id,
+                request_id,
+                candidate,
+                {},
+                "bootstrap_restore",
+                "system_restart_restore"
+            );
+        }
         if (sfc::g_dynamic_inference && !request.vnfs.empty()) {
             (void)sfc::g_dynamic_inference->start_session(
                 request,

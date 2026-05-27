@@ -61,6 +61,8 @@ private:
         int last_replanning_attempt_topology_version = -1;
         std::string last_required_recompute_signature;
         int last_required_recompute_topology_version = -1;
+        std::string last_observed_down_link_signature;
+        int last_observed_down_link_count = -1;
         nlohmann::json last_decision_trace;
         std::string active_resource_deployment_id;
         std::string orchestration_deployment_id;

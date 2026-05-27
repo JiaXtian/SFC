@@ -290,6 +290,26 @@ std::string legacy_container_name(const std::string& node_id) {
     return "sfc-sat-" + normalize_token(node_id);
 }
 
+std::vector<std::string> deployment_container_prefixes(const json& dep) {
+    std::vector<std::string> prefixes;
+    const std::string dep_id = dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")));
+    const std::string backend_dep_id = dep.value("backend_deployment_id", dep_id);
+    if (!dep_id.empty()) prefixes.push_back("sfc-sat-" + normalize_token(dep_id) + "-");
+    if (!backend_dep_id.empty() && backend_dep_id != dep_id) {
+        prefixes.push_back("sfc-sat-" + normalize_token(backend_dep_id) + "-");
+    }
+    std::sort(prefixes.begin(), prefixes.end());
+    prefixes.erase(std::unique(prefixes.begin(), prefixes.end()), prefixes.end());
+    return prefixes;
+}
+
+bool container_matches_prefixes(const std::string& container, const std::vector<std::string>& prefixes) {
+    if (container.empty() || prefixes.empty()) return true;
+    return std::any_of(prefixes.begin(), prefixes.end(), [&](const std::string& prefix) {
+        return container.rfind(prefix, 0) == 0;
+    });
+}
+
 bool is_container_running(const std::string& container) {
     if (container.empty()) return false;
     return run_ok("docker inspect -f '{{.State.Running}}' " + shell_quote(container) + " | grep -q true");
@@ -338,9 +358,13 @@ bool process_running_in_container(const std::string& container, const std::strin
     );
 }
 
-std::string find_container_by_daemon(const std::string& daemon) {
+std::string find_container_by_daemon(
+    const std::string& daemon,
+    const std::vector<std::string>& deployment_prefixes = {}
+) {
     const auto ps = run_cmd("docker ps --format '{{.Names}}'");
     for (const auto& name : lines_of(ps.output)) {
+        if (!container_matches_prefixes(name, deployment_prefixes)) continue;
         if (name.rfind("sfc-sat-", 0) == 0 && process_running_in_container(name, daemon)) {
             return name;
         }
@@ -454,6 +478,20 @@ json infer_nf_array_from_runtime(
 json collect_deployment_runtime(const json& dep) {
     const std::string dep_id = dep.value("deployment_id", dep.value("backend_deployment_id", std::string("")));
     const auto runtime = runtime_snapshot_by_node();
+    const std::vector<std::string> deployment_prefixes = deployment_container_prefixes(dep);
+    std::unordered_map<std::string, std::string> runtime_node_by_nf;
+    std::unordered_map<std::string, std::string> runtime_container_by_nf;
+    for (const auto& kv : runtime) {
+        const auto& snap = kv.second;
+        if (!snap.deployed || snap.container_state != "running") continue;
+        if (!container_matches_prefixes(snap.container_name, deployment_prefixes)) continue;
+        for (const auto& nf : snap.running_core_nf_types) {
+            const std::string nf_type = normalize_nf_token(nf);
+            if (nf_type.empty()) continue;
+            runtime_node_by_nf[nf_type] = kv.first;
+            runtime_container_by_nf[nf_type] = snap.container_name;
+        }
+    }
     json per_nfs = per_nf_array(dep);
     if (per_nfs.empty()) per_nfs = infer_nf_array_from_runtime(dep, runtime);
     json containers = json::array();
@@ -465,6 +503,11 @@ json collect_deployment_runtime(const json& dep) {
         std::string node = json_string_any(nf, {
             "node", "node_id", "satellite", "satellite_id", "selected_node", "target_node", "placement_node"
         });
+        const bool explicit_placement_node = !node.empty();
+        const auto runtime_node_it = runtime_node_by_nf.find(nf_type);
+        if (runtime_node_it != runtime_node_by_nf.end() && !runtime_node_it->second.empty()) {
+            node = runtime_node_it->second;
+        }
         if (node.empty() && nf_type.size() > 0) {
             std::string unique_node;
             int matches = 0;
@@ -481,7 +524,10 @@ json collect_deployment_runtime(const json& dep) {
         auto rt_it = runtime.find(node);
         const bool runtime_running = rt_it != runtime.end() && rt_it->second.deployed && rt_it->second.container_state == "running";
         const bool runtime_nf_ok = rt_it != runtime.end() && runtime_has_nf(rt_it->second, nf_type);
-        std::string container = rt_it != runtime.end() ? rt_it->second.container_name : "";
+        const auto runtime_container_it = runtime_container_by_nf.find(nf_type);
+        std::string container = runtime_container_it != runtime_container_by_nf.end()
+            ? runtime_container_it->second
+            : (rt_it != runtime.end() ? rt_it->second.container_name : "");
         bool container_running = is_container_running(container);
         if (container.empty() || (!container_running && !runtime_running)) {
             container = find_container_for_node(dep_id, node);
@@ -489,8 +535,8 @@ json collect_deployment_runtime(const json& dep) {
         }
         bool daemon_ok = container_running && process_running_in_container(container, daemon);
         if (!daemon_ok && runtime_nf_ok && container.empty()) daemon_ok = true;
-        if (!daemon_ok) {
-            const std::string fallback = find_container_by_daemon(daemon);
+        if (!daemon_ok && !explicit_placement_node) {
+            const std::string fallback = find_container_by_daemon(daemon, deployment_prefixes);
             if (!fallback.empty()) {
                 container = fallback;
                 container_running = is_container_running(container);
@@ -605,7 +651,13 @@ std::string deployment_nodes_signature(const json& dep) {
     return oss.str();
 }
 
-json build_reschedule_diff(const json& before, const json& after, const json& fault_runtime) {
+json build_reschedule_diff(
+    const json& before,
+    const json& after,
+    const json& fault_runtime,
+    const json& before_runtime = json::array(),
+    const json& after_runtime = json::array()
+) {
     std::unordered_map<std::string, json> before_by_nf;
     std::unordered_map<std::string, json> after_by_nf;
     for (const auto& nf : per_nf_array(before)) {
@@ -620,6 +672,25 @@ json build_reschedule_diff(const json& before, const json& after, const json& fa
         }));
         if (!nf_type.empty()) after_by_nf[nf_type] = nf;
     }
+    auto overlay_runtime = [](std::unordered_map<std::string, json>& by_nf, const json& runtime) {
+        if (!runtime.is_array()) return;
+        for (const auto& item : runtime) {
+            const bool usable =
+                item.value("daemon_running", false) ||
+                (item.value("running", false) && item.value("source", std::string("")) == "orchestrator_runtime");
+            if (!usable) continue;
+            const std::string nf_type = normalize_nf_token(item.value("nf_type", std::string("")));
+            const std::string node = item.value("node", std::string(""));
+            if (nf_type.empty() || node.empty()) continue;
+            json placement = by_nf.count(nf_type) ? by_nf[nf_type] : json::object();
+            placement["nf_type"] = nf_type;
+            placement["node"] = node;
+            if (item.contains("container")) placement["container"] = item["container"];
+            by_nf[nf_type] = placement;
+        }
+    };
+    overlay_runtime(before_by_nf, before_runtime);
+    overlay_runtime(after_by_nf, after_runtime);
 
     json moves = json::array();
     int moved_count = 0;
@@ -638,13 +709,17 @@ json build_reschedule_diff(const json& before, const json& after, const json& fa
         const bool moved = !to_node.empty() && from_node != to_node;
         if (moved) ++moved_count;
         ++total_count;
+        const std::string from_container = json_string_any(kv.second, {"container", "container_name"});
+        const std::string to_container = it == after_by_nf.end()
+            ? ""
+            : json_string_any(it->second, {"container", "container_name"});
         moves.push_back({
             {"nf_type", nf_type},
             {"from_node", from_node},
             {"to_node", to_node},
             {"status", moved ? "moved" : (to_node.empty() ? "missing_after" : "unchanged")},
-            {"from_container", node_container_name(before_dep_id, from_node)},
-            {"to_container", to_node.empty() ? "" : node_container_name(after_dep_id, to_node)}
+            {"from_container", from_container.empty() ? node_container_name(before_dep_id, from_node) : from_container},
+            {"to_container", to_container.empty() && !to_node.empty() ? node_container_name(after_dep_id, to_node) : to_container}
         });
     }
 
@@ -1106,7 +1181,7 @@ json run_single_ue_smoke_phase(
     if (nf_total == 0 || nf_ok != nf_total) {
         throw std::runtime_error(phase_tag + " NF process verification failed: " + std::to_string(nf_ok) + "/" + std::to_string(nf_total));
     }
-    if (amf_container.empty()) amf_container = find_container_by_daemon("open5gs-amfd");
+    if (amf_container.empty()) amf_container = find_container_by_daemon("open5gs-amfd", deployment_container_prefixes(dep));
     if (amf_container.empty()) throw std::runtime_error(phase_tag + " unable to locate AMF container");
 
     const std::string network = first_network_for_container(amf_container);
@@ -1334,6 +1409,7 @@ void run_reschedule_validation_job(const std::shared_ptr<ValidationJob>& job) {
             const std::string phase = current.value("orchestration_phase", std::string(""));
             const bool phase_hint =
                 phase == "stopping_old" || phase == "starting_containers" ||
+                phase == "starting_core_nfs" || phase == "health_check" ||
                 phase == "starting_nfs" || phase == "probing" || phase == "degraded";
             const bool signature_changed =
                 deployment_nf_signature(current) != baseline_nf_sig ||
@@ -1416,7 +1492,13 @@ void run_reschedule_validation_job(const std::shared_ptr<ValidationJob>& job) {
         const int64_t recovery_done_ms = now_ms();
         const int64_t recovery_cost_ms = std::max<int64_t>(0, recovery_done_ms - recovery_start_ms);
         const json recovered_runtime = collect_deployment_runtime(recovered_dep);
-        const json diff = build_reschedule_diff(baseline_dep, recovered_dep, fault_runtime);
+        const json diff = build_reschedule_diff(
+            baseline_dep,
+            recovered_dep,
+            fault_runtime,
+            baseline_runtime,
+            recovered_runtime
+        );
 
         update_reschedule_report(job, {
             {"state", "success"},
@@ -1499,7 +1581,7 @@ void run_validation_job(const std::shared_ptr<ValidationJob>& job) {
         if (nf_total == 0 || nf_ok != nf_total) {
             throw std::runtime_error("NF process verification failed: " + std::to_string(nf_ok) + "/" + std::to_string(nf_total));
         }
-        if (amf_container.empty()) amf_container = find_container_by_daemon("open5gs-amfd");
+        if (amf_container.empty()) amf_container = find_container_by_daemon("open5gs-amfd", deployment_container_prefixes(dep));
         if (amf_container.empty()) throw std::runtime_error("unable to locate AMF container");
         const std::string network = first_network_for_container(amf_container);
         const std::string amf_ip = container_ip_on_network(amf_container, network);

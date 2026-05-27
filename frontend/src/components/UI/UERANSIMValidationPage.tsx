@@ -461,7 +461,7 @@ export default function UERANSIMValidationPage({ active = true }: { active?: boo
 
         <div className="min-h-0 grid grid-cols-12 gap-2.5 overflow-hidden">
           <div
-            className="col-span-12 lg:col-span-8 rounded-2xl p-3.5 min-h-0 flex flex-col overflow-hidden"
+            className={`col-span-12 ${showReschedule ? 'lg:col-span-7' : 'lg:col-span-8'} rounded-2xl p-3.5 min-h-0 flex flex-col overflow-hidden`}
             style={{
               background: 'linear-gradient(160deg, rgba(11,17,30,0.78), rgba(8,13,24,0.66))',
               border: '1px solid rgba(112,168,208,0.28)',
@@ -545,7 +545,7 @@ export default function UERANSIMValidationPage({ active = true }: { active?: boo
           </div>
 
           <div
-            className="col-span-12 lg:col-span-4 rounded-2xl p-3.5 min-h-0 flex flex-col overflow-hidden"
+            className={`col-span-12 ${showReschedule ? 'lg:col-span-5' : 'lg:col-span-4'} rounded-2xl p-3.5 min-h-0 flex flex-col overflow-hidden`}
             style={{
               background: 'linear-gradient(160deg, rgba(9,18,31,0.76), rgba(6,13,24,0.66))',
               border: '1px solid rgba(112,168,208,0.28)',
@@ -571,7 +571,7 @@ export default function UERANSIMValidationPage({ active = true }: { active?: boo
               <div className="rounded-lg border border-slate-700/70 bg-slate-950/30 px-2 py-1.5 text-slate-300">gNB: {String(job?.gnb_ip ?? '-')}</div>
             </div>
             {showReschedule && report && (
-              <div className="mb-2 rounded-xl border border-slate-700/70 bg-slate-950/30 p-2 text-[10px] text-slate-300 max-h-[190px] overflow-auto">
+              <div className="mb-2 rounded-xl border border-slate-700/70 bg-slate-950/30 p-2.5 text-[10px] text-slate-300 min-h-[260px] flex-[1.25] overflow-auto">
                 <div className="flex items-center gap-1.5 text-cyan-100 font-semibold mb-1.5">
                   <GitCompare className="w-3.5 h-3.5" />
                   恢复对比
@@ -620,7 +620,7 @@ export default function UERANSIMValidationPage({ active = true }: { active?: boo
                 )}
               </div>
             )}
-            <pre className="min-h-0 flex-1 overflow-auto rounded-xl border border-slate-700/70 bg-black/35 p-2 text-[9px] leading-4 text-slate-300 whitespace-pre-wrap font-mono">
+            <pre className={`${showReschedule && report ? 'min-h-[150px] flex-[0.75]' : 'min-h-0 flex-1'} overflow-auto rounded-xl border border-slate-700/70 bg-black/35 p-2 text-[9px] leading-4 text-slate-300 whitespace-pre-wrap font-mono`}>
 {Array.isArray(job?.logs) && job.logs.length > 0 ? job.logs.join('\n') : '等待启动验证...'}
             </pre>
           </div>

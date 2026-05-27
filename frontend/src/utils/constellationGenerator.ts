@@ -3,8 +3,7 @@
 // ============================================================
 export type ConstellationType =
   | 'starlink_v1' | 'starlink_v2' | 'oneweb'
-  | 'iridium'     | 'telesat'    | 'kuiper'
-  | 'polar'       | 'qianfan'
+  | 'polar'
 
 export interface ConstellationTemplate {
   id: ConstellationType
@@ -55,36 +54,6 @@ export const CONSTELLATION_TEMPLATES: Record<ConstellationType, ConstellationTem
     cpuPerSat: [8, 16], memPerSat: [16, 32],
     diskPerSat: [120, 220],
   },
-  iridium: {
-    id: 'iridium', name: 'Iridium NEXT', operator: 'Iridium',
-    description: '780km 高度, 86.4° Walker-Star 配置',
-    detailedInfo: '经典 Walker-Star 极地星座（6 个轨道面，每面 11 颗卫星，86.4° 倾角）。针对全球语音和低带宽物联网服务优化。交叉接缝相位模式确保所有纬度的连续覆盖。中等高度平衡覆盖、链路预算和轨道寿命。具有 20 多年运营历史的成熟架构。',
-    altitude_km: 780, inclination_deg: 86.4, fPhasing: 0, isWalkerStar: true,
-    defaultSats: 66, defaultPlanes: 6,
-    linkBudget: { intraGbps: 1.5, interGbps: 1.0 },
-    cpuPerSat: [4, 8], memPerSat: [8, 16],
-    diskPerSat: [80, 150],
-  },
-  telesat: {
-    id: 'telesat', name: 'Telesat Lightspeed', operator: 'Telesat',
-    description: '双层: 98.98° SSO 极地 + 40° 倾斜轨道',
-    detailedInfo: '创新的双层架构结合太阳同步极地轨道 (98.98°, 1325km) 和中倾角壳层 (40°-50°, 1015km)。极地层提供连续的高纬度覆盖和遥感能力。倾斜层优化人口密集区域的容量。先进相控阵天线支持灵活的波束转向。',
-    altitude_km: 1015, inclination_deg: 98.98, fPhasing: 1, isWalkerStar: false,
-    defaultSats: 78, defaultPlanes: 13,
-    linkBudget: { intraGbps: 16, interGbps: 12 },
-    cpuPerSat: [12, 20], memPerSat: [24, 48],
-    diskPerSat: [140, 260],
-  },
-  kuiper: {
-    id: 'kuiper', name: 'Amazon Kuiper', operator: 'Amazon',
-    description: '630km 高度, 双倾角 51.9°/33° 壳层',
-    detailedInfo: '亚马逊的 LEO 星座使用双倾角架构针对 ±56° 纬度覆盖。51.9° 壳层提供人口密集区域的主要覆盖。33° 赤道壳层在高流量区域增加容量。较低高度 (630km) 最小化实时应用延迟。与 AWS 地面基础设施集成以实现边缘计算。',
-    altitude_km: 630, inclination_deg: 51.9, fPhasing: 1, isWalkerStar: false,
-    defaultSats: 80, defaultPlanes: 8,
-    linkBudget: { intraGbps: 20, interGbps: 16 },
-    cpuPerSat: [12, 24], memPerSat: [24, 48],
-    diskPerSat: [160, 300],
-  },
   polar: {
     id: 'polar', name: 'Polar Orbit Constellation', operator: 'Custom',
     description: '600km 高度, 90° 极地 Walker-Star',
@@ -94,15 +63,6 @@ export const CONSTELLATION_TEMPLATES: Record<ConstellationType, ConstellationTem
     linkBudget: { intraGbps: 8, interGbps: 6 },
     cpuPerSat: [8, 16], memPerSat: [16, 32],
     diskPerSat: [110, 210],
-  },
-  qianfan: {
-    id: 'qianfan', name: 'Qianfan / 千帆', operator: '上海垣信卫星',
-    description: '面向宽带与低时延业务的多层 LEO 架构（演示参数）',
-    detailedInfo: '用于演示千帆星座规划流程的预置工程参数，支持前端快速生成并与后端拓扑同步，可结合第三方 JSON 构型进行替换与验证。',
-    altitude_km: 650, inclination_deg: 53, fPhasing: 1, isWalkerStar: false,
-    defaultSats: 96, defaultPlanes: 8,
-    linkBudget: { intraGbps: 24, interGbps: 18 },
-    cpuPerSat: [14, 26], memPerSat: [28, 64], diskPerSat: [220, 420],
   },
 }
 
@@ -429,14 +389,11 @@ export function generateConstellation(
   const satellites: SatelliteData[] = []
   const epochJd = julianDate()
 
-  const halfPlanes = type === 'telesat' ? Math.floor(numPlanes / 2) : numPlanes
-
   for (let plane = 0; plane < numPlanes; plane++) {
     const satsInThisPlane = satsPerPlaneBase + (plane < remainder ? 1 : 0)
     if (satsInThisPlane <= 0) continue
-    const isSSO = type === 'telesat' && plane >= halfPlanes
-    const inclination = isSSO ? 98.98 : tpl.inclination_deg
-    const altitude = isSSO ? 1325 : tpl.altitude_km
+    const inclination = tpl.inclination_deg
+    const altitude = tpl.altitude_km
 
     for (let pos = 0; pos < satsInThisPlane; pos++) {
       const coord = walkerCoord(
