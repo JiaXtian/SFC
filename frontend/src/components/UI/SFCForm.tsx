@@ -268,16 +268,13 @@ export default function SFCForm() {
   const [bindingGroups, setBindingGroups] = useState<Array<{ id: string; members: number[] }>>([])
   const [nfTypeToAdd, setNfTypeToAdd] = useState<VNFTemplateName | ''>('')
 
-  const [inferenceProfile, setInferenceProfile] = useState<'fast' | 'balanced' | 'quality'>('fast')
-  const inferenceProfileConfig = useMemo(() => {
-    if (inferenceProfile === 'quality') {
-      return { max_planning_attempts: 8, planning_time_budget_ms: 5000, realtime_mode: false, auto_redeploy: true }
-    }
-    if (inferenceProfile === 'balanced') {
-      return { max_planning_attempts: 4, planning_time_budget_ms: 1500, realtime_mode: true, auto_redeploy: true }
-    }
-    return { max_planning_attempts: 1, planning_time_budget_ms: 450, realtime_mode: true, auto_redeploy: true }
-  }, [inferenceProfile])
+  const inferenceProfile = 'fast'
+  const inferenceProfileConfig = {
+    max_planning_attempts: 8,
+    planning_time_budget_ms: 450,
+    realtime_mode: true,
+    auto_redeploy: true,
+  }
   const [templateAdvanced, setTemplateAdvanced] = useState({ optimize: 'latency' })
   const [enableCustomWeights, setEnableCustomWeights] = useState(false)
   const [scoreWeights, setScoreWeights] = useState({
@@ -700,11 +697,11 @@ export default function SFCForm() {
       })
       const sortedCandidates = scoredCandidates.sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
 
-      const finalCandidates = sortedCandidates
+      const finalCandidates = sortedCandidates.filter((c: any) => !!c.satisfies_constraints)
 
       if (finalCandidates.length === 0) {
         const errorMsg = toChineseFailureText(result.error || 'No feasible deployment found')
-        addToast(`部署失败: ${errorMsg}`, 'error')
+        addToast(`生成失败: ${errorMsg}`, 'error')
         if (result.failure_reasons || result.details) {
           const details = toChineseFailureList(result.failure_reasons || result.details).join('\n')
           openSystemPopup('无可行部署方案', `详细原因:\n${details}`, 'error')
@@ -974,26 +971,6 @@ export default function SFCForm() {
                   <option value="resource">资源优先</option>
                   <option value="balanced">均衡</option>
                 </select>
-              </div>
-              <div>
-                <div className="text-[10px] text-slate-500 mb-1">推理时延档位</div>
-                <select
-                  value={inferenceProfile}
-                  onChange={e => setInferenceProfile(e.target.value as 'fast' | 'balanced' | 'quality')}
-                  className="w-full px-3 py-1.5 rounded-lg text-xs"
-                  style={{
-                    background: 'rgba(14,24,39,0.9)',
-                    border: '1px solid rgba(99,130,158,0.25)',
-                    color: '#fff',
-                  }}
-                >
-                  <option value="fast">实时优先（≤500ms）</option>
-                  <option value="balanced">均衡搜索（≤1.5s）</option>
-                  <option value="quality">质量优先（≤5s）</option>
-                </select>
-                <div className="mt-1 text-[10px] text-slate-500">
-                  当前预算 {inferenceProfileConfig.planning_time_budget_ms}ms，尝试次数 {inferenceProfileConfig.max_planning_attempts}
-                </div>
               </div>
               <div className="pt-1.5" style={{ borderTop: '1px solid rgba(88,116,139,0.3)' }}>
                 {renderScoreSection()}
@@ -1360,26 +1337,6 @@ export default function SFCForm() {
                   <option value="resource">资源优先</option>
                   <option value="balanced">均衡</option>
                 </select>
-              </div>
-              <div>
-                <div className="text-[10px] text-slate-500 mb-1">推理时延档位</div>
-                <select
-                  value={inferenceProfile}
-                  onChange={e => setInferenceProfile(e.target.value as 'fast' | 'balanced' | 'quality')}
-                  className="w-full px-3 py-1.5 rounded-lg text-xs"
-                  style={{
-                    background: 'rgba(14,24,39,0.9)',
-                    border: '1px solid rgba(99,130,158,0.25)',
-                    color: '#fff',
-                  }}
-                >
-                  <option value="fast">实时优先（≤500ms）</option>
-                  <option value="balanced">均衡搜索（≤1.5s）</option>
-                  <option value="quality">质量优先（≤5s）</option>
-                </select>
-                <div className="mt-1 text-[10px] text-slate-500">
-                  当前预算 {inferenceProfileConfig.planning_time_budget_ms}ms，尝试次数 {inferenceProfileConfig.max_planning_attempts}
-                </div>
               </div>
               <div className="pt-1.5" style={{ borderTop: '1px solid rgba(88,116,139,0.3)' }}>
                 {renderScoreSection()}

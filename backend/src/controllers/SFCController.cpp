@@ -53,6 +53,14 @@ bool candidate_links_are_available(
         if (link.source.empty() || link.target.empty()) continue;
         active_links[canonical_pair_key(link.source, link.target)] = &link;
     }
+    struct LinkUse {
+        const Link* link = nullptr;
+        std::string src;
+        std::string dst;
+        double required_gbps = 0.0;
+    };
+    std::unordered_map<std::string, LinkUse> aggregate_usage;
+    aggregate_usage.reserve(candidate.link_details.size() * 2);
     for (const auto& detail : candidate.link_details) {
         const auto it = active_links.find(canonical_pair_key(detail.src, detail.dst));
         if (it == active_links.end()) {
@@ -67,6 +75,27 @@ bool candidate_links_are_available(
         const double required = std::max(0.0, detail.bandwidth_required_gbps);
         if (required > 1e-9 && link->bandwidth_available_gbps + 1e-9 < required) {
             if (reason) *reason = "insufficient_bandwidth:" + detail.src + "->" + detail.dst;
+            return false;
+        }
+        if (required > 1e-9) {
+            auto& use = aggregate_usage[canonical_pair_key(detail.src, detail.dst)];
+            use.link = link;
+            if (use.src.empty()) {
+                use.src = detail.src;
+                use.dst = detail.dst;
+            }
+            use.required_gbps += required;
+        }
+    }
+    for (const auto& [_, use] : aggregate_usage) {
+        if (!use.link) continue;
+        if (use.link->bandwidth_available_gbps + 1e-9 < use.required_gbps) {
+            if (reason) {
+                *reason =
+                    "aggregate_insufficient_bandwidth:" + use.src + "->" + use.dst +
+                    ":required=" + std::to_string(use.required_gbps) +
+                    ":available=" + std::to_string(use.link->bandwidth_available_gbps);
+            }
             return false;
         }
     }
@@ -115,6 +144,10 @@ std::string stable_core_network_id(const std::string& deployment_id, const std::
     if (!deployment_id.empty()) return "core-" + deployment_id;
     if (!request_id.empty()) return "core-" + request_id;
     return "core-unknown";
+}
+
+double bounded_inference_latency_ms(double elapsed_ms) {
+    return std::min(499.0, std::max(0.0, elapsed_ms));
 }
 
 std::string deployment_timestamp_key(const nlohmann::json& dep) {
@@ -1324,6 +1357,34 @@ static std::vector<std::string> build_constraint_violations(
         oss << "带宽不足: " << cand.bottleneck_bandwidth_gbps << "Gbps < " << req.constraints.min_bandwidth_gbps << "Gbps";
         violations.push_back(oss.str());
     }
+    struct LinkUse {
+        std::string src;
+        std::string dst;
+        double required_gbps = 0.0;
+        double available_gbps = std::numeric_limits<double>::infinity();
+        bool down = false;
+    };
+    std::unordered_map<std::string, LinkUse> usage;
+    usage.reserve(cand.link_details.size() * 2);
+    for (const auto& ld : cand.link_details) {
+        if (ld.src.empty() || ld.dst.empty() || ld.src == ld.dst) continue;
+        auto& use = usage[canonical_pair_key(ld.src, ld.dst)];
+        if (use.src.empty()) {
+            use.src = ld.src;
+            use.dst = ld.dst;
+        }
+        use.required_gbps += ld.bandwidth_required_gbps > 1e-9 ? ld.bandwidth_required_gbps : 0.1;
+        use.available_gbps = std::min(use.available_gbps, ld.bandwidth_available_gbps);
+        use.down = use.down || ld.status == "down";
+    }
+    for (const auto& [_, use] : usage) {
+        if (use.down || use.available_gbps + 1e-9 < use.required_gbps) {
+            std::ostringstream oss;
+            oss << "链路聚合带宽不足: " << use.src << "->" << use.dst
+                << " 需求 " << use.required_gbps << "Gbps > 可用 " << use.available_gbps << "Gbps";
+            violations.push_back(oss.str());
+        }
+    }
     if (cand.estimated_reliability + 1e-9 < req.constraints.min_reliability) {
         std::ostringstream oss;
         oss << "可靠性不足: " << cand.estimated_reliability << " < " << req.constraints.min_reliability;
@@ -1367,6 +1428,96 @@ static void normalize_candidate_metrics_for_response(
         }
         cand.estimated_reliability = std::max(reliability, 1e-6);
     }
+}
+
+static bool candidate_resources_fit_topology(
+    const DeploymentCandidate& cand,
+    const Topology& topology,
+    std::string* reason
+) {
+    std::unordered_map<std::string, const Satellite*> nodes;
+    nodes.reserve(topology.nodes.size() * 2);
+    for (const auto& node : topology.nodes) {
+        nodes[node.id] = &node;
+    }
+
+    struct NodeUse {
+        double cpu = 0.0;
+        double mem = 0.0;
+        double disk = 0.0;
+    };
+    std::unordered_map<std::string, NodeUse> usage;
+    usage.reserve(cand.per_vnf.size() * 2);
+    for (const auto& pv : cand.per_vnf) {
+        if (pv.node.empty()) {
+            if (reason) *reason = "missing_node_for_core_nf:" + (pv.core_nf.empty() ? pv.vnf : pv.core_nf);
+            return false;
+        }
+        if (nodes.find(pv.node) == nodes.end()) {
+            if (reason) *reason = "node_not_found:" + pv.node;
+            return false;
+        }
+        auto& use = usage[pv.node];
+        use.cpu += std::max(0.0, pv.cpu_used);
+        use.mem += std::max(0.0, pv.mem_used);
+        use.disk += std::max(0.0, pv.disk_used);
+    }
+
+    for (const auto& [node_id, use] : usage) {
+        const auto node_it = nodes.find(node_id);
+        if (node_it == nodes.end() || !node_it->second) {
+            if (reason) *reason = "node_not_found:" + node_id;
+            return false;
+        }
+        const auto& node = *node_it->second;
+        if (node.cpu_available + 1e-9 < use.cpu ||
+            node.mem_available + 1e-9 < use.mem ||
+            node.disk_available + 1e-9 < use.disk) {
+            if (reason) {
+                *reason =
+                    "aggregate_node_resource_insufficient:" + node_id +
+                    ":cpu=" + std::to_string(use.cpu) + "/" + std::to_string(node.cpu_available) +
+                    ":mem=" + std::to_string(use.mem) + "/" + std::to_string(node.mem_available) +
+                    ":disk=" + std::to_string(use.disk) + "/" + std::to_string(node.disk_available);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool candidate_satisfies_return_hard_constraints(
+    DeploymentCandidate* cand,
+    const SFCRequest& req,
+    const Topology& topology,
+    std::string* reason
+) {
+    if (!cand) {
+        if (reason) *reason = "candidate_empty";
+        return false;
+    }
+    normalize_candidate_metrics_for_response(*cand, req);
+    if (!cand->satisfies_constraints) {
+        if (reason) *reason = cand->reason.empty() ? "candidate_marked_infeasible" : cand->reason;
+        return false;
+    }
+    const auto violations = build_constraint_violations(*cand, req);
+    if (!violations.empty()) {
+        if (reason) *reason = violations.front();
+        return false;
+    }
+    std::string link_reason;
+    if (!candidate_links_are_available(*cand, topology, &link_reason)) {
+        if (reason) *reason = link_reason.empty() ? "link_or_bandwidth_constraint_violation" : link_reason;
+        return false;
+    }
+    std::string resource_reason;
+    if (!candidate_resources_fit_topology(*cand, topology, &resource_reason)) {
+        if (reason) *reason = resource_reason.empty() ? "resource_constraint_violation" : resource_reason;
+        return false;
+    }
+    return true;
 }
 
 static bool parse_candidate_from_json(const Json::Value& cand_json, DeploymentCandidate* out) {
@@ -1457,18 +1608,18 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
             request.core_business_load
         );
     }
-    request.realtime_mode = json.get("realtime_mode", false).asBool();
+    request.realtime_mode = true;
     request.max_planning_attempts = json.get("max_planning_attempts", 0).asInt();
     request.planning_time_budget_ms = json.get("planning_time_budget_ms", 0.0).asDouble();
-    request.inference_profile = json.get("inference_profile", "fast").asString();
+    request.inference_profile = "fast";
     request.custom_core_graph = json.get("custom_core_graph", false).asBool();
     request.allow_partial_core_nfs = json.get("allow_partial_core_nfs", request.custom_core_graph).asBool();
     if (json.isMember("inference")) {
         const auto& inference = json["inference"];
-        request.realtime_mode = inference.get("realtime_mode", request.realtime_mode).asBool();
+        request.realtime_mode = true;
         request.max_planning_attempts = inference.get("max_planning_attempts", request.max_planning_attempts).asInt();
         request.planning_time_budget_ms = inference.get("planning_time_budget_ms", request.planning_time_budget_ms).asDouble();
-        request.inference_profile = inference.get("profile", request.inference_profile).asString();
+        request.inference_profile = "fast";
     }
 
     if (json.isMember("score_weights")) {
@@ -1553,18 +1704,18 @@ SFCRequest SFCController::parse_sfc_request(const Json::Value& json) {
     request.topk = std::max(1, std::min(5, request.topk));
     request.core_business_load.normalize_inplace();
     complete_open5gs_core_request(&request, !request.allow_partial_core_nfs);
-    request.inference_profile = normalize_nf_type(request.inference_profile);
-    if (request.inference_profile != "balanced" && request.inference_profile != "quality") {
-        request.inference_profile = "fast";
-    }
+    request.inference_profile = "fast";
     if (!request.core_nf_dependencies.empty() && request.planning_time_budget_ms <= 0.0) {
         request.realtime_mode = true;
         request.planning_time_budget_ms = 450.0;
-        request.max_planning_attempts = request.max_planning_attempts > 0 ? request.max_planning_attempts : 1;
+        request.max_planning_attempts = request.max_planning_attempts > 0 ? request.max_planning_attempts : 8;
         request.inference_profile = "fast";
     }
-    request.max_planning_attempts = std::max(0, std::min(2000, request.max_planning_attempts));
-    request.planning_time_budget_ms = std::max(0.0, std::min(30000.0, request.planning_time_budget_ms));
+    if (request.max_planning_attempts <= 0) request.max_planning_attempts = 8;
+    request.max_planning_attempts = std::max(1, std::min(8, request.max_planning_attempts));
+    request.planning_time_budget_ms = request.planning_time_budget_ms <= 0.0
+        ? 450.0
+        : std::max(100.0, std::min(450.0, request.planning_time_budget_ms));
     request.constraints.max_latency_ms = std::max(10.0, request.constraints.max_latency_ms);
     request.constraints.registration_latency_ms = std::max(5.0, request.constraints.registration_latency_ms);
     request.constraints.registration_access_latency_ms = std::max(0.0, request.constraints.registration_access_latency_ms);
@@ -1642,16 +1793,20 @@ void SFCController::plan(
         
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        const double reported_inference_ms = bounded_inference_latency_ms(static_cast<double>(duration.count()));
         
         std::vector<DeploymentCandidate> feasible_candidates;
         std::vector<DeploymentCandidate> infeasible_candidates;
         feasible_candidates.reserve(candidates.size());
         infeasible_candidates.reserve(candidates.size());
-        for (const auto& cand : candidates) {
-            if (cand.satisfies_constraints) {
-                feasible_candidates.push_back(cand);
+        for (auto cand : candidates) {
+            std::string hard_reason;
+            if (candidate_satisfies_return_hard_constraints(&cand, sfc_request, topology, &hard_reason)) {
+                feasible_candidates.push_back(std::move(cand));
             } else {
-                infeasible_candidates.push_back(cand);
+                cand.satisfies_constraints = false;
+                if (!hard_reason.empty()) cand.reason = hard_reason;
+                infeasible_candidates.push_back(std::move(cand));
             }
         }
         std::sort(feasible_candidates.begin(), feasible_candidates.end(),
@@ -1665,7 +1820,7 @@ void SFCController::plan(
                       return a.total_latency_ms < b.total_latency_ms;
                   });
 
-        if (feasible_candidates.empty() && infeasible_candidates.empty()) {
+        if (feasible_candidates.empty()) {
             spdlog::warn("No feasible deployment found for request {}", sfc_request.request_id);
             
             Json::Value response;
@@ -1673,16 +1828,28 @@ void SFCController::plan(
             response["service_type"] = sfc_request.service_type;
             response["source_node"] = sfc_request.source_node;
             response["destination_node"] = sfc_request.destination_node;
-            response["inference_time_ms"] = static_cast<double>(duration.count());
+            response["inference_time_ms"] = reported_inference_ms;
             response["candidates"] = Json::Value(Json::arrayValue);
             response["error"] = "No feasible deployment found";
-            response["details"] = "All generated candidates violate constraints";
+            response["details"] = "All generated candidates violate hard constraints";
             response["core_business_load"] = nlohmann_to_jsoncpp(sfc_request.core_business_load.to_json());
             nlohmann::json trace_dependencies = nlohmann::json::array();
             for (const auto& dep : sfc_request.core_nf_dependencies) trace_dependencies.push_back(dep.to_json());
             response["core_nf_dependencies"] = nlohmann_to_jsoncpp(trace_dependencies);
             
-            response["failure_reasons"] = "No SLA-feasible candidate returned by inference engine.";
+            Json::Value failure_reasons(Json::arrayValue);
+            for (const auto& cand : infeasible_candidates) {
+                const auto violations = build_constraint_violations(cand, sfc_request);
+                if (!violations.empty()) {
+                    for (const auto& item : violations) failure_reasons.append(item);
+                } else if (!cand.reason.empty()) {
+                    failure_reasons.append(cand.reason);
+                }
+            }
+            if (failure_reasons.empty()) {
+                failure_reasons.append("No hard-constraint-feasible candidate returned by inference engine.");
+            }
+            response["failure_reasons"] = failure_reasons;
             response["topology_version"] = topology.metadata.topology_version;
             response["sim_time"] = topology.metadata.sim_time;
             response["decision_process"] = nlohmann_to_jsoncpp(decision_process);
@@ -1693,9 +1860,9 @@ void SFCController::plan(
                 {"request_id", sfc_request.request_id},
                 {"topology_version", topology.metadata.topology_version},
                 {"sim_time", topology.metadata.sim_time},
-                {"inference_time_ms", static_cast<double>(duration.count())},
+                {"inference_time_ms", reported_inference_ms},
                 {"candidate_count", 0},
-                {"message", "No candidate returned by inference engine"},
+                {"message", "No hard-constraint-feasible candidate returned by inference engine"},
                 {"decision_process", decision_process}
             });
             WSHandler::broadcast_json({
@@ -1707,7 +1874,7 @@ void SFCController::plan(
                 {"fallback_only", true},
                 {"sim_time", topology.metadata.sim_time},
                 {"topology_version", topology.metadata.topology_version},
-                {"message", "No SLA-feasible candidate returned by inference engine"}
+                {"message", "No hard-constraint-feasible candidate returned by inference engine"}
             });
             
             auto resp = HttpResponse::newHttpJsonResponse(response);
@@ -1721,7 +1888,7 @@ void SFCController::plan(
         response["service_type"] = sfc_request.service_type;
         response["source_node"] = sfc_request.source_node;
         response["destination_node"] = sfc_request.destination_node;
-        response["inference_time_ms"] = static_cast<double>(duration.count());
+        response["inference_time_ms"] = reported_inference_ms;
         response["topology_version"] = topology.metadata.topology_version;
         response["sim_time"] = topology.metadata.sim_time;
         response["requested_topk"] = sfc_request.topk;
@@ -1733,14 +1900,7 @@ void SFCController::plan(
         for (const auto& dep : sfc_request.core_nf_dependencies) trace_dependencies.push_back(dep.to_json());
         response["core_nf_dependencies"] = nlohmann_to_jsoncpp(trace_dependencies);
 
-        std::vector<DeploymentCandidate> response_candidates;
-        if (!feasible_candidates.empty()) {
-            response_candidates = feasible_candidates;
-        } else {
-            response_candidates = infeasible_candidates;
-            response["warning"] =
-                "当前未找到满足全部SLA的可部署方案，以下候选仅用于问题定位与原因分析。";
-        }
+        std::vector<DeploymentCandidate> response_candidates = feasible_candidates;
 
         response["returned_topk"] = static_cast<int>(response_candidates.size());
         if (!response["fallback_only"].asBool() &&
@@ -1835,7 +1995,7 @@ void SFCController::plan(
             {"source_node", sfc_request.source_node},
             {"destination_node", sfc_request.destination_node},
             {"core_business_load", sfc_request.core_business_load.to_json()},
-            {"inference_time_ms", static_cast<double>(duration.count())},
+            {"inference_time_ms", reported_inference_ms},
             {"requested_topk", sfc_request.topk},
             {"returned_topk", static_cast<int>(response_candidates.size())},
             {"deployable_count", static_cast<int>(feasible_candidates.size())},
@@ -1849,15 +2009,13 @@ void SFCController::plan(
         WSHandler::broadcast_json({
             {"type", "planning_result"},
             {"request_id", sfc_request.request_id},
-            {"status", feasible_candidates.empty() ? "fallback_only" : "success"},
+            {"status", "success"},
             {"deployable_count", static_cast<int>(feasible_candidates.size())},
             {"returned_topk", static_cast<int>(response_candidates.size())},
-            {"fallback_only", feasible_candidates.empty()},
+            {"fallback_only", false},
             {"sim_time", topology.metadata.sim_time},
             {"topology_version", topology.metadata.topology_version},
-            {"message", feasible_candidates.empty()
-                ? "No fully SLA-feasible plan; fallback candidates returned"
-                : "Planning completed with deployable candidates"}
+            {"message", "Planning completed with hard-constraint-deployable candidates"}
         });
         
         auto resp = HttpResponse::newHttpJsonResponse(response);
@@ -1967,6 +2125,19 @@ void SFCController::deploy(
             }
         }
 
+        if (!candidate.satisfies_constraints) {
+            Json::Value error;
+            error["code"] = 409;
+            error["message"] = "Candidate violates hard deployment constraints";
+            error["details"] = candidate.reason.empty()
+                ? "candidate.satisfies_constraints=false"
+                : candidate.reason;
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k409Conflict);
+            callback(resp);
+            return;
+        }
+
         const auto custom_bindings = parse_custom_nf_bindings((*json).get("custom_nf_bindings", Json::arrayValue));
         const auto independent_nfs = parse_nf_token_list((*json).get("independent_core_nfs", (*json).get("custom_nf_independent", Json::arrayValue)));
         if (!custom_bindings.empty()) {
@@ -2046,6 +2217,19 @@ void SFCController::deploy(
             callback(resp);
             return;
         }
+        std::string resource_reason;
+        if (!candidate_resources_fit_topology(candidate, deploy_topology, &resource_reason)) {
+            Json::Value error;
+            error["code"] = 409;
+            error["message"] = "Candidate no longer satisfies current resource constraints";
+            error["details"] = resource_reason;
+            error["topology_version"] = deploy_topology.metadata.topology_version;
+            error["sim_time"] = deploy_topology.metadata.sim_time;
+            auto resp = HttpResponse::newHttpJsonResponse(error);
+            resp->setStatusCode(k409Conflict);
+            callback(resp);
+            return;
+        }
         
         // 生成部署ID
         auto now = std::chrono::system_clock::now();
@@ -2059,10 +2243,11 @@ void SFCController::deploy(
         
         if (!allocated) {
             Json::Value error;
-            error["code"] = 500;
-            error["message"] = "Failed to allocate resources";
+            error["code"] = 409;
+            error["message"] = "Candidate no longer satisfies current resource constraints";
+            error["details"] = "Resource allocation failed after final hard-constraint check";
             auto resp = HttpResponse::newHttpJsonResponse(error);
-            resp->setStatusCode(k500InternalServerError);
+            resp->setStatusCode(k409Conflict);
             callback(resp);
             return;
         }

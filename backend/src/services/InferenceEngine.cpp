@@ -311,6 +311,10 @@ std::string make_pair_key(const std::string& a, const std::string& b) {
     return key;
 }
 
+std::string make_canonical_pair_key(const std::string& a, const std::string& b) {
+    return a <= b ? make_pair_key(a, b) : make_pair_key(b, a);
+}
+
 bool link_is_down(const Link& link) {
     return link.status == "down";
 }
@@ -538,6 +542,64 @@ struct PathMetrics {
     int hops = 0;
     bool feasible = true;
 };
+
+struct LinkBudgetCheck {
+    bool feasible = true;
+    std::string reason;
+    double bottleneck_available_gbps = std::numeric_limits<double>::infinity();
+};
+
+LinkBudgetCheck validate_aggregate_link_budget(
+    const std::vector<DeploymentCandidate::LinkDetail>& links
+) {
+    struct LinkUse {
+        std::string src;
+        std::string dst;
+        double required_gbps = 0.0;
+        double available_gbps = std::numeric_limits<double>::infinity();
+        bool down = false;
+    };
+
+    std::unordered_map<std::string, LinkUse> usage;
+    usage.reserve(links.size() * 2);
+    LinkBudgetCheck check;
+    for (const auto& ld : links) {
+        if (ld.src.empty() || ld.dst.empty() || ld.src == ld.dst) continue;
+        const std::string key = make_canonical_pair_key(ld.src, ld.dst);
+        auto& use = usage[key];
+        if (use.src.empty()) {
+            use.src = ld.src;
+            use.dst = ld.dst;
+        }
+        use.required_gbps += ld.bandwidth_required_gbps > 1e-9
+            ? ld.bandwidth_required_gbps
+            : 0.1;
+        use.available_gbps = std::min(use.available_gbps, ld.bandwidth_available_gbps);
+        use.down = use.down || ld.status == "down";
+    }
+
+    for (const auto& [_, use] : usage) {
+        check.bottleneck_available_gbps = std::min(check.bottleneck_available_gbps, use.available_gbps);
+        if (use.down) {
+            check.feasible = false;
+            check.reason = "Aggregate link budget violates status: " + use.src + "->" + use.dst;
+            return check;
+        }
+        if (use.available_gbps + 1e-9 < use.required_gbps) {
+            check.feasible = false;
+            check.reason =
+                "Aggregate link bandwidth insufficient: " + use.src + "->" + use.dst +
+                " required=" + std::to_string(use.required_gbps) +
+                "Gbps available=" + std::to_string(use.available_gbps) + "Gbps";
+            return check;
+        }
+    }
+
+    if (usage.empty()) {
+        check.bottleneck_available_gbps = std::numeric_limits<double>::infinity();
+    }
+    return check;
+}
 
 struct SearchTree {
     std::vector<double> latency;
@@ -1354,11 +1416,9 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         };
     }
 
-    const bool realtime_mode = request.realtime_mode;
+    const bool realtime_mode = true;
     const bool core_dependency_mode = !request.core_nf_dependencies.empty();
-    const std::string inference_profile = normalize_nf_type(request.inference_profile);
-    const bool quality_profile = inference_profile == "quality";
-    const bool balanced_profile = inference_profile == "balanced";
+    const std::string inference_profile = "fast";
     const int req_topk = std::max(1, request.topk);
     const int min_return_topk_floor = realtime_mode
         ? candidate_tuning_.realtime_return_topk_floor
@@ -1402,10 +1462,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         hard_attempt_cap = min_attempt_floor;
     }
     if (core_dependency_mode) {
-        const int core_attempt_cap =
-            quality_profile ? 12 :
-            balanced_profile ? 4 :
-            1;
+        const int core_attempt_cap = 8;
         hard_attempt_cap = hard_attempt_cap > 0
             ? std::min(hard_attempt_cap, core_attempt_cap)
             : core_attempt_cap;
@@ -1424,16 +1481,10 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     }
     if (core_dependency_mode) {
         const double requested_budget = request.planning_time_budget_ms > 0.0 ? request.planning_time_budget_ms : 450.0;
-        const double profile_cap =
-            quality_profile ? 5000.0 :
-            balanced_profile ? 1500.0 :
-            450.0;
-        planning_time_budget_ms = std::min(requested_budget, profile_cap);
-        if (!quality_profile && !balanced_profile) {
-            planning_time_budget_ms = std::min(planning_time_budget_ms, 450.0);
-        }
+        planning_time_budget_ms = std::min(requested_budget, 450.0);
         planning_time_budget_ms = std::max(100.0, planning_time_budget_ms);
     }
+    planning_time_budget_ms = std::min(std::max(100.0, planning_time_budget_ms), 450.0);
     auto budget_exceeded = [&]() -> bool {
         return planning_time_budget_ms > 0.0 && elapsed_ms() >= planning_time_budget_ms;
     };
@@ -1476,13 +1527,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
         ? (request.realtime_mode ? 1 : 2)
         : std::max(1, request.realtime_mode ? 6 : std::max(12, effective_return_topk * 3));
 
-    std::vector<double> relax_levels = candidate_tuning_.reliability_relax_levels;
-    if (relax_levels.empty()) {
-        relax_levels = {1.0};
-    }
-    if (request.constraints.min_reliability <= candidate_tuning_.relax_disable_min_reliability) {
-        relax_levels = {1.0};
-    }
+    std::vector<double> relax_levels = {1.0};
 
     for (size_t relax_idx = 0; relax_idx < relax_levels.size(); ++relax_idx) {
         const double relax_factor = relax_levels[relax_idx];
@@ -1531,7 +1576,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             attempts_done += 1;
             const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
-            const bool disable_actor_policy = core_dependency_mode && realtime_mode && !balanced_profile && !quality_profile;
+            const bool disable_actor_policy = core_dependency_mode && realtime_mode;
             planning_request.planning_time_budget_ms = std::max(40.0, remaining_budget_ms());
             DeploymentCandidate candidate = generate_single_deployment(
                 planning_request,
@@ -1606,7 +1651,7 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
             attempts_done += 1;
             const bool capture_attempt_trace = decision_trace && trace_steps.size() < kMaxTraceAttempts;
             nlohmann::json single_trace;
-            const bool disable_actor_policy = core_dependency_mode && realtime_mode && !balanced_profile && !quality_profile;
+            const bool disable_actor_policy = core_dependency_mode && realtime_mode;
             SFCRequest extra_request = search_request;
             extra_request.planning_time_budget_ms = std::max(40.0, remaining_budget_ms());
             DeploymentCandidate candidate = generate_single_deployment(
@@ -1695,10 +1740,16 @@ std::vector<DeploymentCandidate> InferenceEngine::generate_gha_drl_candidates(
     if (fallback_candidates.empty()) {
         spdlog::error("No feasible deployment found");
     } else {
-        spdlog::warn("No SLA-feasible candidates, returning {} fallback candidates", fallback_candidates.size());
+        spdlog::warn(
+            "No hard-constraint-feasible candidates; suppressing {} diagnostic fallback candidates",
+            fallback_candidates.size()
+        );
+        if (decision_trace) {
+            (*decision_trace)["suppressed_fallback_candidate_count"] = static_cast<int>(fallback_candidates.size());
+        }
     }
 
-    return fallback_candidates;
+    return {};
 }
 
 DeploymentCandidate InferenceEngine::generate_single_deployment(
@@ -3059,6 +3110,94 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
         double dependency_bottleneck = std::numeric_limits<double>::infinity();
         int dependency_hops = 0;
         nlohmann::json dependency_trace = nlohmann::json::array();
+        std::unordered_map<std::string, double> residual_link_bw;
+        residual_link_bw.reserve(topology.links.size() * 2);
+        for (const auto& link : topology.links) {
+            if (link.source.empty() || link.target.empty() || link.source == link.target) continue;
+            residual_link_bw[make_canonical_pair_key(link.source, link.target)] = std::min(
+                residual_link_bw.count(make_canonical_pair_key(link.source, link.target))
+                    ? residual_link_bw[make_canonical_pair_key(link.source, link.target)]
+                    : std::numeric_limits<double>::infinity(),
+                link.bandwidth_available_gbps
+            );
+        }
+        auto find_residual_shortest_path = [&](const std::string& src, const std::string& dst, double required_bw) {
+            if (src == dst) return std::vector<std::string>{src};
+            const auto src_it = cache.node_index.find(src);
+            const auto dst_it = cache.node_index.find(dst);
+            if (src_it == cache.node_index.end() || dst_it == cache.node_index.end()) {
+                return std::vector<std::string>{};
+            }
+            const size_t src_idx = src_it->second;
+            const size_t dst_idx = dst_it->second;
+            std::vector<double> dist(topology.nodes.size(), std::numeric_limits<double>::infinity());
+            std::vector<int64_t> prev(topology.nodes.size(), -1);
+            using PQ = std::priority_queue<
+                std::pair<double, size_t>,
+                std::vector<std::pair<double, size_t>>,
+                std::greater<std::pair<double, size_t>>
+            >;
+            PQ pq;
+            dist[src_idx] = 0.0;
+            pq.emplace(0.0, src_idx);
+            while (!pq.empty()) {
+                const auto [cur_cost, u] = pq.top();
+                pq.pop();
+                if (cur_cost > dist[u] + 1e-9) continue;
+                if (u == dst_idx) break;
+                const std::string& current = cache.index_to_node[u];
+                for (const auto& [v, _] : cache.adjacency[u]) {
+                    const std::string& next = cache.index_to_node[v];
+                    const Link* link = find_link(current, next, topology);
+                    if (!link || link_is_down(*link)) continue;
+                    const auto residual_it = residual_link_bw.find(make_canonical_pair_key(current, next));
+                    const double residual_bw = residual_it != residual_link_bw.end()
+                        ? residual_it->second
+                        : link->bandwidth_available_gbps;
+                    if (residual_bw + 1e-9 < required_bw) continue;
+                    const double congestion_penalty = link->bandwidth_available_gbps > 1e-9
+                        ? 1.0 + std::max(0.0, required_bw / link->bandwidth_available_gbps) * 0.15
+                        : 4.0;
+                    const double next_cost = cur_cost + link->latency_ms * congestion_penalty + kHopPenaltyMs;
+                    if (next_cost + 1e-9 < dist[v]) {
+                        dist[v] = next_cost;
+                        prev[v] = static_cast<int64_t>(u);
+                        pq.emplace(next_cost, v);
+                    }
+                }
+            }
+            if (!std::isfinite(dist[dst_idx])) return std::vector<std::string>{};
+            std::vector<std::string> path;
+            for (int64_t cur = static_cast<int64_t>(dst_idx); cur >= 0; cur = prev[static_cast<size_t>(cur)]) {
+                path.push_back(cache.index_to_node[static_cast<size_t>(cur)]);
+                if (static_cast<size_t>(cur) == src_idx) break;
+            }
+            if (path.empty() || path.back() != src) return std::vector<std::string>{};
+            std::reverse(path.begin(), path.end());
+            return path;
+        };
+        auto reserve_dependency_bandwidth = [&](const std::vector<DeploymentCandidate::LinkDetail>& links, double required_bw, std::string* reason) {
+            for (const auto& ld : links) {
+                if (ld.src.empty() || ld.dst.empty() || ld.src == ld.dst) continue;
+                const std::string key = make_canonical_pair_key(ld.src, ld.dst);
+                double& residual = residual_link_bw[key];
+                if (!std::isfinite(residual)) residual = ld.bandwidth_available_gbps;
+                if (residual + 1e-9 < required_bw) {
+                    if (reason) {
+                        *reason =
+                            "aggregate dependency bandwidth insufficient on " + ld.src + "->" + ld.dst +
+                            ": required=" + std::to_string(required_bw) +
+                            "Gbps residual=" + std::to_string(residual) + "Gbps";
+                    }
+                    return false;
+                }
+            }
+            for (const auto& ld : links) {
+                if (ld.src.empty() || ld.dst.empty() || ld.src == ld.dst) continue;
+                residual_link_bw[make_canonical_pair_key(ld.src, ld.dst)] -= required_bw;
+            }
+            return true;
+        };
         auto compute_nf_pair_metrics = [&](const std::string& src_nf_raw, const std::string& dst_nf_raw) -> std::optional<PathMetrics> {
             const std::string src_nf = normalize_nf_type(src_nf_raw);
             const std::string dst_nf = normalize_nf_type(dst_nf_raw);
@@ -3091,7 +3230,19 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             return total;
         };
 
-        for (const auto& dep : request.core_nf_dependencies) {
+        std::vector<const CoreNFDependency*> dependency_order;
+        dependency_order.reserve(request.core_nf_dependencies.size());
+        for (const auto& dep : request.core_nf_dependencies) dependency_order.push_back(&dep);
+        std::stable_sort(dependency_order.begin(), dependency_order.end(), [](const auto* a, const auto* b) {
+            const double aw = std::max(0.01, a ? a->bandwidth_required_gbps : 0.0);
+            const double bw = std::max(0.01, b ? b->bandwidth_required_gbps : 0.0);
+            if (std::abs(aw - bw) > 1e-9) return aw > bw;
+            return (a ? a->criticality : 0.0) > (b ? b->criticality : 0.0);
+        });
+
+        for (const auto* dep_ptr : dependency_order) {
+            if (!dep_ptr) continue;
+            const auto& dep = *dep_ptr;
             const std::string src_nf = normalize_nf_type(dep.source);
             const std::string dst_nf = normalize_nf_type(dep.target);
             const auto src_it = node_by_nf_type.find(src_nf);
@@ -3105,24 +3256,7 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const double required_bw = std::max(0.01, dep.bandwidth_required_gbps);
             std::vector<std::string> dep_path = {src_node};
             if (src_node != dst_node) {
-                dep_path = find_shortest_path(
-                    src_node,
-                    dst_node,
-                    topology,
-                    required_bw,
-                    0,
-                    false
-                );
-                if (dep_path.empty() || dep_path.size() < 2) {
-                    dep_path = find_shortest_path(
-                        src_node,
-                        dst_node,
-                        topology,
-                        0.0,
-                        0,
-                        false
-                    );
-                }
+                dep_path = find_residual_shortest_path(src_node, dst_node, required_bw);
                 if (dep_path.empty() || dep_path.size() < 2) {
                     return finalize_failure("No path for core NF dependency: " + src_nf + "->" + dst_nf);
                 }
@@ -3136,6 +3270,12 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             const PathMetrics dep_metrics = evaluate_path_links(dep_links, required_bw);
             if (!dep_metrics.feasible) {
                 return finalize_failure("Core NF dependency path violates bandwidth/status: " + src_nf + "->" + dst_nf);
+            }
+            std::string aggregate_reason;
+            if (!reserve_dependency_bandwidth(dep_links, required_bw, &aggregate_reason)) {
+                return finalize_failure(aggregate_reason.empty()
+                    ? "Core NF dependency aggregate bandwidth violated: " + src_nf + "->" + dst_nf
+                    : aggregate_reason);
             }
             dependency_latency += dep_metrics.latency_ms * std::max(0.1, dep.latency_weight);
             dependency_reliability = std::min(
@@ -3217,18 +3357,21 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
 
     candidate.total_latency_ms = accumulated_latency;
     candidate.estimated_reliability = accumulated_reliability;
-    const double final_rel_target = dependency_graph_mode
-        ? std::max(0.45, request.constraints.min_reliability * 0.92)
-        : effective_reliability_target(
-            request.constraints.min_reliability,
-            accumulated_hops
-        );
+    const double final_rel_target = std::max(0.0, request.constraints.min_reliability);
     candidate.bottleneck_bandwidth_gbps =
         std::isfinite(bottleneck_bandwidth) ? bottleneck_bandwidth : request.constraints.min_bandwidth_gbps;
+    const LinkBudgetCheck aggregate_link_budget = validate_aggregate_link_budget(candidate.link_details);
+    if (std::isfinite(aggregate_link_budget.bottleneck_available_gbps)) {
+        candidate.bottleneck_bandwidth_gbps = std::min(
+            candidate.bottleneck_bandwidth_gbps,
+            aggregate_link_budget.bottleneck_available_gbps
+        );
+    }
     candidate.satisfies_constraints =
         (accumulated_latency <= request.constraints.max_latency_ms) &&
         (candidate.registration_latency_ms <= request.constraints.registration_latency_ms) &&
         (candidate.pdu_session_latency_ms <= request.constraints.pdu_session_latency_ms) &&
+        aggregate_link_budget.feasible &&
         (candidate.bottleneck_bandwidth_gbps >= request.constraints.min_bandwidth_gbps) &&
         (accumulated_reliability >= final_rel_target) &&
         (dependency_graph_mode || accumulated_hops <= kTargetDeploymentHops);
@@ -3242,6 +3385,10 @@ DeploymentCandidate InferenceEngine::generate_single_deployment(
             candidate.reason = "PDU Session latency SLA violated";
         } else if (candidate.bottleneck_bandwidth_gbps < request.constraints.min_bandwidth_gbps) {
             candidate.reason = "Bandwidth constraint violated";
+        } else if (!aggregate_link_budget.feasible) {
+            candidate.reason = aggregate_link_budget.reason.empty()
+                ? "Aggregate link bandwidth constraint violated"
+                : aggregate_link_budget.reason;
         } else if (accumulated_reliability < final_rel_target) {
             candidate.reason = "Reliability constraint violated";
         } else if (!dependency_graph_mode && accumulated_hops > kTargetDeploymentHops) {

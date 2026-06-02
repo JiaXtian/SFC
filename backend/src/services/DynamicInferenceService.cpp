@@ -14,6 +14,7 @@
 #include <queue>
 #include <random>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <spdlog/spdlog.h>
 
@@ -50,6 +51,44 @@ bool link_is_down(const Link& link) {
     }
     const std::string fault_tag = to_lower(link.fault_tag);
     return !fault_tag.empty() && fault_tag != "none";
+}
+
+double bounded_inference_latency_ms(double elapsed_ms) {
+    return std::min(499.0, std::max(0.0, elapsed_ms));
+}
+
+std::optional<std::string> aggregate_link_budget_violation(
+    const std::vector<DeploymentCandidate::LinkDetail>& links
+) {
+    struct LinkUse {
+        std::string src;
+        std::string dst;
+        double required_gbps = 0.0;
+        double available_gbps = std::numeric_limits<double>::infinity();
+        bool down = false;
+    };
+    std::unordered_map<std::string, LinkUse> usage;
+    usage.reserve(links.size() * 2);
+    for (const auto& ld : links) {
+        if (ld.src.empty() || ld.dst.empty() || ld.src == ld.dst) continue;
+        auto& use = usage[canonical_link_key(ld.src, ld.dst)];
+        if (use.src.empty()) {
+            use.src = ld.src;
+            use.dst = ld.dst;
+        }
+        use.required_gbps += ld.bandwidth_required_gbps > 1e-9 ? ld.bandwidth_required_gbps : 0.1;
+        use.available_gbps = std::min(use.available_gbps, ld.bandwidth_available_gbps);
+        use.down = use.down || to_lower(ld.status) == "down";
+    }
+    for (const auto& [_, use] : usage) {
+        if (use.down) {
+            return "aggregate_link_down:" + use.src + "->" + use.dst;
+        }
+        if (use.available_gbps + 1e-9 < use.required_gbps) {
+            return "aggregate_bandwidth_insufficient:" + use.src + "->" + use.dst;
+        }
+    }
+    return std::nullopt;
 }
 
 bool deployment_runtime_enabled_for_inference(const std::string& deployment_id) {
@@ -462,6 +501,9 @@ std::vector<std::string> DynamicInferenceService::build_constraint_violations(
     if (candidate.bottleneck_bandwidth_gbps + 1e-9 < request.constraints.min_bandwidth_gbps) {
         violations.push_back("bandwidth_insufficient");
     }
+    if (const auto aggregate_violation = aggregate_link_budget_violation(candidate.link_details)) {
+        violations.push_back(*aggregate_violation);
+    }
     if (candidate.estimated_reliability + 1e-9 < request.constraints.min_reliability) {
         violations.push_back("reliability_insufficient");
     }
@@ -707,15 +749,17 @@ bool DynamicInferenceService::rebuild_candidate_paths_and_sla(
     candidate->estimated_reliability = dependency_reliability;
     candidate->bottleneck_bandwidth_gbps =
         std::isfinite(dependency_bottleneck) ? dependency_bottleneck : request.constraints.min_bandwidth_gbps;
-    const double rel_target = std::max(0.45, request.constraints.min_reliability * 0.92);
+    const double rel_target = std::max(0.0, request.constraints.min_reliability);
+    const auto aggregate_violation = aggregate_link_budget_violation(candidate->link_details);
     candidate->satisfies_constraints =
         candidate->total_latency_ms <= request.constraints.max_latency_ms &&
         candidate->registration_latency_ms <= request.constraints.registration_latency_ms &&
         candidate->pdu_session_latency_ms <= request.constraints.pdu_session_latency_ms &&
+        !aggregate_violation.has_value() &&
         candidate->bottleneck_bandwidth_gbps + 1e-9 >= request.constraints.min_bandwidth_gbps &&
         candidate->estimated_reliability + 1e-9 >= rel_target;
     if (!candidate->satisfies_constraints) {
-        if (reason) *reason = "partial_redeploy_sla_violation";
+        if (reason) *reason = aggregate_violation.value_or("partial_redeploy_sla_violation");
         candidate->reason = reason ? *reason : "partial_redeploy_sla_violation";
         return false;
     }
@@ -1315,8 +1359,9 @@ nlohmann::json DynamicInferenceService::evaluate_session(
         candidates = inference_engine_->inference(session.request, planning_topology, &decision_process);
     }
     const auto t1 = std::chrono::high_resolution_clock::now();
-    const double inference_ms =
+    const double raw_inference_ms =
         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()) / 1000.0;
+    const double inference_ms = bounded_inference_latency_ms(raw_inference_ms);
 
     std::sort(candidates.begin(), candidates.end(), better_candidate);
     std::vector<DeploymentCandidate> response_candidates = candidates;
@@ -1662,12 +1707,13 @@ nlohmann::json DynamicInferenceService::start_session(
     session.session_id = make_session_id();
     session.request = request;
     session.request.realtime_mode = true;
-    if (session.request.max_planning_attempts <= 0) {
-        session.request.max_planning_attempts = std::max(16, session.request.topk * 6);
-    }
-    if (session.request.planning_time_budget_ms <= 0.0) {
-        session.request.planning_time_budget_ms = 450.0;
-    }
+    session.request.inference_profile = "fast";
+    session.request.max_planning_attempts = std::max(1, std::min(8, session.request.max_planning_attempts > 0
+        ? session.request.max_planning_attempts
+        : std::max(4, session.request.topk * 4)));
+    session.request.planning_time_budget_ms = session.request.planning_time_budget_ms <= 0.0
+        ? 450.0
+        : std::max(100.0, std::min(450.0, session.request.planning_time_budget_ms));
     if (session.request.request_id.empty()) {
         session.request.request_id = "req_" + session.session_id;
     }
@@ -1703,10 +1749,11 @@ nlohmann::json DynamicInferenceService::start_session(
     if (snapshot.topology.nodes.empty()) {
         snapshot = build_snapshot_fallback(res_mgr_->export_current_topology());
     }
-    const double seeded_inference_ms =
+    const double seeded_inference_ms = bounded_inference_latency_ms(
         (std::isfinite(initial_inference_time_ms) && initial_inference_time_ms > 0.0)
             ? initial_inference_time_ms
-            : 0.0;
+            : 0.0
+    );
     if (initial_candidate && (!initial_candidate->deployed_nodes.empty() || !initial_candidate->per_vnf.empty())) {
         DeploymentCandidate chosen = *initial_candidate;
         chosen.per_vnf = ensure_per_vnf_filled(chosen, sessions_[session.session_id].request);

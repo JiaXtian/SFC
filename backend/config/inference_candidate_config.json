@@ -31,7 +31,7 @@
   "reliability_relaxation": {
     "disable_when_min_reliability_below": 0.55,
     "min_reliability_floor": 0.45,
-    "levels": [1.0, 0.98, 0.95, 0.92, 0.88, 0.84, 0.8, 0.74, 0.68, 0.62]
+    "levels": [1.0]
   },
   "trace": {
     "max_attempts_offline": 1,
